@@ -13,6 +13,7 @@ PacePilot ist ein kleiner, selbst gehosteter Trainingsbegleiter für Garmin Conn
 - Workout-Editor für Lauf-, Rad-, Geh- und Wandereinheiten
 - explizite Kette `Entwurf -> Bestätigung -> Garmin -> Uhr`
 - regelmäßiger Garmin-Sync über APScheduler mit Prozess-Lock
+- live aktualisierter Sync-Fortschritt und Laufzeitmessungen pro Garmin-Endpunkt
 - Alembic-Migrationen, SQLite-WAL und Docker-Deployment mit einem Uvicorn-Worker
 
 Der KI-Coach ist als Phase-5-Grenze in der Oberfläche sichtbar, generiert aber noch keine Pläne. Ein unvalidierter LLM-Text wird bewusst nicht als Workout gespeichert oder zu Garmin übertragen.

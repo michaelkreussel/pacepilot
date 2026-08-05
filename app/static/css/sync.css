@@ -1,0 +1,81 @@
+.sync-progress {
+  margin-top: 22px;
+}
+
+.sync-progress form {
+  margin-top: 18px;
+}
+
+.sync-progress-heading,
+.sync-progress-heading > div,
+.sync-progress-meta,
+.sync-result {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.sync-progress-heading small,
+.sync-progress-meta {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.sync-progress-track {
+  background: #e6e7e1;
+  border-radius: 99px;
+  height: 8px;
+  margin: 13px 0 9px;
+  overflow: hidden;
+}
+
+.sync-progress-track span {
+  background: var(--orange);
+  border-radius: 99px;
+  display: block;
+  height: 100%;
+  transition: width 0.35s ease;
+  width: 0;
+}
+
+.sync-progress-track.indeterminate span {
+  animation: sync-slide 1.4s ease-in-out infinite;
+  width: 36%;
+}
+
+.sync-spinner {
+  animation: sync-spin 0.8s linear infinite;
+  border: 2px solid #ccd2ce;
+  border-radius: 50%;
+  border-top-color: var(--orange);
+  height: 13px;
+  width: 13px;
+}
+
+.sync-result {
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sync-result span {
+  font-size: 12px;
+}
+
+@keyframes sync-spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes sync-slide {
+  from { transform: translateX(-110%); }
+  to { transform: translateX(290%); }
+}
+
+@media (max-width: 560px) {
+  .sync-progress-heading,
+  .sync-progress-meta {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}

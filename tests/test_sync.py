@@ -73,6 +73,9 @@ def test_sync_normalizes_and_stores_data(
         result = sync_module.sync_garmin(session, account)
 
         assert result.status == "ok"
+        assert result.stage == "complete"
+        assert result.message == "Synchronisierung abgeschlossen"
+        assert result.current_item == result.total_items == 2
         assert result.activities_synced == 1
         assert result.health_days_synced == 2
         activity = session.scalar(select(Activity))

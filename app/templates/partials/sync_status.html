@@ -1,0 +1,30 @@
+<div
+  id="sync-progress"
+  class="sync-progress {{ account.sync_status }}"
+  {% if sync_active %}
+  hx-get="/settings/sync-status"
+  hx-trigger="load delay:2s"
+  hx-swap="outerHTML"
+  {% endif %}
+>
+  {% if account.sync_status == 'queued' %}
+    <div class="sync-progress-heading"><div><span class="sync-spinner"></span><strong>Synchronisierung wartet</strong></div><small>Der Hintergrundjob startet gleich.</small></div>
+    <div class="sync-progress-track indeterminate"><span></span></div>
+  {% elif sync_run and sync_active %}
+    <div class="sync-progress-heading">
+      <div><span class="sync-spinner"></span><strong>{{ sync_run.message or 'Synchronisierung läuft' }}</strong></div>
+      <small>{{ duration_seconds }} s{% if sync_run.total_items %} · {{ sync_run.current_item }}/{{ sync_run.total_items }} Tage{% endif %}</small>
+    </div>
+    <div class="sync-progress-track {{ 'indeterminate' if progress_percent is none else '' }}"><span{% if progress_percent is not none %} style="width: {{ progress_percent }}%"{% endif %}></span></div>
+    <div class="sync-progress-meta"><span>Schritt: {{ sync_run.stage or 'Vorbereitung' }}</span><span>{{ sync_run.activities_synced }} Aktivitäten · {{ sync_run.health_days_synced }} Health-Tage</span></div>
+  {% elif sync_run and sync_run.status == 'ok' %}
+    <div class="sync-result success-note"><strong>Letzter Lauf abgeschlossen</strong><span>{{ sync_run.activities_synced }} Aktivitäten und {{ sync_run.health_days_synced }} Health-Tage in {{ duration_seconds }} s</span></div>
+  {% elif account.sync_error or (sync_run and sync_run.status == 'error') %}
+    <div class="alert error compact"><strong>Synchronisierung fehlgeschlagen</strong><br>{{ account.sync_error or sync_run.error }}</div>
+  {% endif %}
+  <form method="post" action="/settings/garmin/sync">
+    <button class="button" type="submit" {% if sync_active %}disabled{% endif %}>
+      {% if sync_active %}Synchronisierung läuft …{% else %}Jetzt synchronisieren{% endif %}
+    </button>
+  </form>
+</div>

@@ -10,6 +10,12 @@ def test_main_pages_render(client: TestClient) -> None:
     assert client.get("/api/health").json() == {"status": "ok"}
 
 
+def test_sync_status_partial_renders(client: TestClient) -> None:
+    response = client.get("/settings/sync-status")
+    assert response.status_code == 200
+    assert 'id="sync-progress"' in response.text
+
+
 def test_create_and_confirm_workout(client: TestClient) -> None:
     response = client.post(
         "/workouts",

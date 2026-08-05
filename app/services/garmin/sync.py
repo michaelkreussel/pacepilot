@@ -1,6 +1,9 @@
 import gzip
 import json
+import logging
 import threading
+import time
+from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -13,10 +16,51 @@ from app.models.user import utcnow
 from app.services.garmin.client import connect_garmin, message_from_exception
 
 sync_lock = threading.Lock()
+logger = logging.getLogger("uvicorn.error")
 
 
 class SyncAlreadyRunningError(RuntimeError):
     pass
+
+
+def _timed_garmin_call[T](run_id: int, operation: str, call: Callable[[], T]) -> T:
+    started = time.perf_counter()
+    logger.info("Garmin sync %s: %s started", run_id, operation)
+    try:
+        result = call()
+    except Exception:
+        logger.exception(
+            "Garmin sync %s: %s failed after %.1f s",
+            run_id,
+            operation,
+            time.perf_counter() - started,
+        )
+        raise
+    logger.info(
+        "Garmin sync %s: %s finished in %.1f s",
+        run_id,
+        operation,
+        time.perf_counter() - started,
+    )
+    return result
+
+
+def _set_progress(
+    session: Session,
+    run: SyncRun,
+    *,
+    stage: str,
+    message: str,
+    current: int | None = None,
+    total: int | None = None,
+) -> None:
+    run.stage = stage
+    run.message = message
+    if current is not None:
+        run.current_item = current
+    if total is not None:
+        run.total_items = total
+    session.commit()
 
 
 def _number(data: dict[str, Any], *keys: str) -> int | float | None:
@@ -47,8 +91,15 @@ def _write_raw_activity(activity: dict[str, Any], activity_id: str) -> str:
     return str(path)
 
 
-def _sync_activities(session: Session, client: Any, user_id: int, start: date) -> int:
-    payload = client.get_activities_by_date(start.isoformat(), date.today().isoformat()) or []
+def _sync_activities(session: Session, client: Any, user_id: int, start: date, run_id: int) -> int:
+    payload = (
+        _timed_garmin_call(
+            run_id,
+            f"activities {start.isoformat()} to {date.today().isoformat()}",
+            lambda: client.get_activities_by_date(start.isoformat(), date.today().isoformat()),
+        )
+        or []
+    )
     count = 0
     for item in payload:
         if not isinstance(item, dict):
@@ -85,16 +136,41 @@ def _sync_activities(session: Session, client: Any, user_id: int, start: date) -
     return count
 
 
-def _sync_health_day(session: Session, client: Any, user_id: int, day: date) -> None:
+def _sync_health_day(
+    session: Session,
+    client: Any,
+    user_id: int,
+    day: date,
+    run_id: int,
+    report: Callable[[str], None],
+) -> None:
     day_string = day.isoformat()
-    summary = client.get_user_summary(day_string) or {}
+    report(f"Tagesübersicht für {day.strftime('%d.%m.%Y')} wird geladen")
+    summary = (
+        _timed_garmin_call(
+            run_id, f"daily summary {day_string}", lambda: client.get_user_summary(day_string)
+        )
+        or {}
+    )
+    report(f"Schlafdaten für {day.strftime('%d.%m.%Y')} werden geladen")
     try:
-        sleep = client.get_sleep_data(day_string) or {}
-    except Exception:
+        sleep = (
+            _timed_garmin_call(
+                run_id, f"sleep {day_string}", lambda: client.get_sleep_data(day_string)
+            )
+            or {}
+        )
+    except Exception as exc:
+        logger.warning("Garmin sync %s: sleep %s skipped: %s", run_id, day_string, exc)
         sleep = {}
+    report(f"HRV-Daten für {day.strftime('%d.%m.%Y')} werden geladen")
     try:
-        hrv = client.get_hrv_data(day_string) or {}
-    except Exception:
+        hrv = (
+            _timed_garmin_call(run_id, f"HRV {day_string}", lambda: client.get_hrv_data(day_string))
+            or {}
+        )
+    except Exception as exc:
+        logger.warning("Garmin sync %s: HRV %s skipped: %s", run_id, day_string, exc)
         hrv = {}
 
     sleep_dto = sleep.get("dailySleepDTO") if isinstance(sleep, dict) else {}
@@ -124,8 +200,9 @@ def _sync_health_day(session: Session, client: Any, user_id: int, day: date) -> 
     health.hrv_average = _number(hrv_summary, "lastNightAvg", "weeklyAvg")
 
 
-def _sync_devices(session: Session, client: Any, account: GarminAccount) -> None:
-    for item in client.get_devices() or []:
+def _sync_devices(session: Session, client: Any, account: GarminAccount, run_id: int) -> None:
+    devices = _timed_garmin_call(run_id, "devices", client.get_devices) or []
+    for item in devices:
         if not isinstance(item, dict):
             continue
         device_id = str(
@@ -150,26 +227,74 @@ def _sync_devices(session: Session, client: Any, account: GarminAccount) -> None
 def sync_garmin(session: Session, account: GarminAccount) -> SyncRun:
     if not sync_lock.acquire(blocking=False):
         raise SyncAlreadyRunningError("Eine Garmin-Synchronisierung läuft bereits.")
-    run = SyncRun(user_id=account.user_id)
+    run = SyncRun(
+        user_id=account.user_id,
+        stage="starting",
+        message="Synchronisierung wird vorbereitet",
+    )
     session.add(run)
     account.sync_status = "running"
     account.sync_error = None
     session.commit()
+    started = time.perf_counter()
+    logger.info("Garmin sync %s: started for account %s", run.id, account.id)
     try:
-        client = connect_garmin()
         settings = get_settings()
         start = date.today() - timedelta(days=settings.sync_days - 1)
-        run.activities_synced = _sync_activities(session, client, account.user_id, start)
+        _set_progress(
+            session,
+            run,
+            stage="login",
+            message="Verbindung zu Garmin Connect wird hergestellt",
+        )
+        client = _timed_garmin_call(run.id, "login", connect_garmin)
+        _set_progress(
+            session,
+            run,
+            stage="activities",
+            message=f"Aktivitäten seit {start.strftime('%d.%m.%Y')} werden geladen",
+        )
+        run.activities_synced = _sync_activities(session, client, account.user_id, start, run.id)
+        session.commit()
         for offset in range(settings.sync_days):
-            _sync_health_day(session, client, account.user_id, start + timedelta(days=offset))
+            day = start + timedelta(days=offset)
+
+            def report(message: str, current: int = offset + 1) -> None:
+                _set_progress(
+                    session,
+                    run,
+                    stage="health",
+                    message=message,
+                    current=current,
+                    total=settings.sync_days,
+                )
+
+            _sync_health_day(session, client, account.user_id, day, run.id, report)
             run.health_days_synced += 1
-        _sync_devices(session, client, account)
+            session.commit()
+        _set_progress(
+            session,
+            run,
+            stage="devices",
+            message="Garmin-Geräte werden aktualisiert",
+        )
+        _sync_devices(session, client, account, run.id)
         account.last_sync_at = datetime.now(UTC).replace(tzinfo=None)
         account.sync_status = "ok"
         account.sync_error = None
         run.status = "ok"
+        run.stage = "complete"
+        run.message = "Synchronisierung abgeschlossen"
+        run.current_item = run.total_items
         run.finished_at = utcnow()
         session.commit()
+        logger.info(
+            "Garmin sync %s: completed in %.1f s (%s activities, %s health days)",
+            run.id,
+            time.perf_counter() - started,
+            run.activities_synced,
+            run.health_days_synced,
+        )
     except Exception as exc:
         session.rollback()
         failed_account = session.get(GarminAccount, account.id)
@@ -179,9 +304,17 @@ def sync_garmin(session: Session, account: GarminAccount) -> SyncRun:
             failed_account.sync_error = message_from_exception(exc)
         if failed_run is not None:
             failed_run.status = "error"
+            failed_run.stage = "error"
+            failed_run.message = "Synchronisierung fehlgeschlagen"
             failed_run.error = message_from_exception(exc)
             failed_run.finished_at = utcnow()
         session.commit()
+        logger.error(
+            "Garmin sync %s: aborted after %.1f s: %s",
+            run.id,
+            time.perf_counter() - started,
+            message_from_exception(exc),
+        )
     finally:
         sync_lock.release()
     return run
