@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}PacePilot{% endblock %}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', path='/css/app.css') }}">
+  <script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
+  {% block head %}{% endblock %}
+</head>
+<body>
+  <div class="app-shell" x-data="{ menuOpen: false }">
+    <aside class="sidebar" :class="menuOpen && 'is-open'">
+      <a class="brand" href="/">
+        <span class="brand-mark">P</span>
+        <span>PacePilot</span>
+      </a>
+      <nav class="nav-list" @click="menuOpen = false">
+        <a class="nav-item {{ 'active' if active_page == 'dashboard' else '' }}" href="/">Übersicht</a>
+        <a class="nav-item {{ 'active' if active_page == 'activities' else '' }}" href="/activities">Aktivitäten</a>
+        <a class="nav-item {{ 'active' if active_page == 'plans' else '' }}" href="/plans">Trainingsplan</a>
+        <a class="nav-item {{ 'active' if active_page == 'workout-new' else '' }}" href="/workouts/new">Workout erstellen</a>
+        <a class="nav-item {{ 'active' if active_page == 'coach' else '' }}" href="/coach">KI-Coach <span class="nav-badge">Beta</span></a>
+      </nav>
+      <a class="nav-item settings-link {{ 'active' if active_page == 'settings' else '' }}" href="/settings">Einstellungen</a>
+    </aside>
+    <main class="main">
+      <header class="mobile-header">
+        <a class="brand" href="/"><span class="brand-mark">P</span><span>PacePilot</span></a>
+        <button class="menu-button" @click="menuOpen = !menuOpen" aria-label="Navigation öffnen">Menü</button>
+      </header>
+      <div class="content">
+        {% block content %}{% endblock %}
+      </div>
+    </main>
+    <div class="scrim" x-show="menuOpen" x-transition @click="menuOpen = false"></div>
+  </div>
+</body>
+</html>

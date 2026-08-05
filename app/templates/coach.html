@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}KI-Coach · PacePilot{% endblock %}
+{% block content %}
+<div class="page-heading"><div><p class="eyebrow">Planungsassistenz</p><h1>KI-Coach</h1><p>Vorschläge statt Autopilot.</p></div><span class="pill">Phase 5</span></div>
+<section class="coach-stage">
+  <article class="coach-principle"><span>01</span><h2>Das Modell entwirft.</h2><p>Trainingsdaten werden zu einem strukturierten Vorschlag verdichtet.</p></article>
+  <article class="coach-principle"><span>02</span><h2>Der Code prüft.</h2><p>Umfang, Sportart und Workout-Schritte müssen die gleichen Regeln wie manuelle Einheiten erfüllen.</p></article>
+  <article class="coach-principle"><span>03</span><h2>Du entscheidest.</h2><p>Kein KI-Entwurf wird automatisch zu Garmin übertragen.</p></article>
+</section>
+<section class="card coach-placeholder"><div><p class="eyebrow">Konfiguration</p><h2>{% if configured %}LLM-Zugang erkannt{% else %}Noch kein LLM konfiguriert{% endif %}</h2><p>{% if configured %}Der Provider ist konfiguriert. Die interaktive Plangenerierung folgt nach dem stabilen Garmin-Datenfluss.{% else %}Setze <code>LLM_API_KEY</code> und <code>LLM_BASE_URL</code>. Garmin-Sync und manuelle Workout-Planung funktionieren unabhängig davon.{% endif %}</p></div><a class="button secondary" href="/settings">Einstellungen prüfen</a></section>
+{% endblock %}

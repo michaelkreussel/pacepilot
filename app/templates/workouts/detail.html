@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}{{ workout.name }} · PacePilot{% endblock %}
+{% block content %}
+<a class="back-link" href="/plans">← Trainingsplan</a>
+<div class="page-heading"><div><p class="eyebrow">{{ workout.sport|capitalize }} · {{ workout.status|capitalize }}</p><h1>{{ workout.name }}</h1><p>{{ workout.scheduled_for|date }}{% if workout.description %} · {{ workout.description }}{% endif %}</p></div></div>
+{% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+<div class="workout-detail-grid">
+  <section class="card timeline-card"><p class="section-number">Ablauf</p>
+    <ol class="timeline">{% for step in workout.steps %}<li><span>{{ loop.index }}</span><div><strong>{{ {'warmup':'Aufwärmen','interval':'Belastung','recovery':'Erholung','cooldown':'Auslaufen'}.get(step.step_type, step.step_type) }}</strong><p>{% if step.duration_type == 'time' %}{{ step.duration_value|duration }}{% else %}{{ step.duration_value|round|int }} m{% endif %}{% if step.repeat_count and step.repeat_count > 1 %} · {{ step.repeat_count }} Wiederholungen{% endif %}</p></div></li>{% endfor %}</ol>
+  </section>
+  <aside class="card publish-card">
+    <p class="section-number">Freigabe</p><h2>Sicher zu Garmin</h2>
+    <div class="release-steps"><div class="{{ 'done' if workout.status != 'draft' else 'current' }}"><span>1</span><p><strong>Entwurf prüfen</strong><small>Inhalt und Datum kontrollieren</small></p></div><div class="{{ 'done' if workout.garmin_workout_id else '' }}"><span>2</span><p><strong>Zu Garmin laden</strong><small>Workout und Termin anlegen</small></p></div><div class="{{ 'done' if workout.status == 'pushed' else '' }}"><span>3</span><p><strong>An Uhr senden</strong><small>Über Garmin Connect zustellen</small></p></div></div>
+    {% if workout.status == 'draft' %}<form method="post" action="/workouts/{{ workout.id }}/confirm"><button class="button full" type="submit">Entwurf bestätigen</button></form>
+    {% elif not workout.garmin_workout_id %}<form method="post" action="/workouts/{{ workout.id }}/publish"><button class="button full" type="submit">An Garmin übertragen</button></form>
+    {% elif workout.status != 'pushed' %}<form method="post" action="/workouts/{{ workout.id }}/push"><button class="button full" type="submit">An meine Uhr senden</button></form>
+    {% else %}<div class="success-note">Workout wurde für deine Uhr vorgemerkt.</div>{% endif %}
+    {% if workout.garmin_workout_id %}<p class="garmin-id">Garmin-ID {{ workout.garmin_workout_id }}</p>{% endif %}
+  </aside>
+</div>
+{% endblock %}

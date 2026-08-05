@@ -1,0 +1,6 @@
+<section class="stat-grid" id="health-cards">
+  <article class="stat-card"><span>Schlaf</span><strong>{{ latest_health.sleep_seconds|duration if latest_health else '–' }}</strong><small>{% if latest_health and latest_health.sleep_score %}Score {{ latest_health.sleep_score }}{% else %}Letzte Nacht{% endif %}</small></article>
+  <article class="stat-card"><span>Ruhepuls</span><strong>{{ latest_health.resting_hr if latest_health and latest_health.resting_hr else '–' }} <small>bpm</small></strong><small>Aktueller Wert</small></article>
+  <article class="stat-card"><span>HRV</span><strong>{{ latest_health.hrv_average|round|int if latest_health and latest_health.hrv_average else '–' }} <small>ms</small></strong><small>Nächtlicher Mittelwert</small></article>
+  <article class="stat-card accent"><span>Schritte</span><strong>{{ latest_health.steps if latest_health and latest_health.steps else '–' }}</strong><small>Heute erfasst</small></article>
+</section>

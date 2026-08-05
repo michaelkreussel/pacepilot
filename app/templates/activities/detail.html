@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}{{ activity.name }} · PacePilot{% endblock %}
+{% block content %}
+<a class="back-link" href="/activities">← Alle Aktivitäten</a>
+<div class="page-heading"><div><p class="eyebrow">{{ activity.activity_type|replace('_', ' ') }}</p><h1>{{ activity.name }}</h1><p>{{ activity.started_at|datetime }}</p></div></div>
+<section class="detail-metrics">
+  <article><span>Distanz</span><strong>{{ activity.distance_m|distance }}</strong></article>
+  <article><span>Dauer</span><strong>{{ activity.duration_s|duration }}</strong></article>
+  <article><span>Ø Herzfrequenz</span><strong>{{ activity.average_hr or '–' }}{% if activity.average_hr %} bpm{% endif %}</strong></article>
+  <article><span>Max. Herzfrequenz</span><strong>{{ activity.max_hr or '–' }}{% if activity.max_hr %} bpm{% endif %}</strong></article>
+  <article><span>Kalorien</span><strong>{{ activity.calories or '–' }}</strong></article>
+  <article><span>Höhenmeter</span><strong>{{ activity.elevation_gain_m|round|int if activity.elevation_gain_m else '–' }}{% if activity.elevation_gain_m %} m{% endif %}</strong></article>
+</section>
+<section class="card note-card"><p class="eyebrow">Datenspur</p><h2>Garmin-Rohdaten gesichert</h2><p>Die vollständige Aktivitätsantwort liegt komprimiert unter <code>{{ activity.raw_file }}</code>. So bleibt die SQLite-Datenbank kompakt.</p></section>
+{% endblock %}

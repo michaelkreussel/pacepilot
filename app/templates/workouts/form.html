@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Workout erstellen · PacePilot{% endblock %}
+{% block content %}
+<div class="page-heading"><div><p class="eyebrow">Workout-Editor</p><h1>Eine klare Einheit bauen.</h1><p>Einfach planen, prüfen und erst danach zu Garmin senden.</p></div></div>
+{% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+<form method="post" action="/workouts" class="editor-layout" x-data="workoutEditor()">
+  <section class="card form-card">
+    <p class="section-number">01</p><h2>Grundlagen</h2>
+    <label>Name<input name="name" required placeholder="z. B. 6 × 800 m kontrolliert"></label>
+    <div class="form-row"><label>Sportart<select name="sport"><option value="running">Laufen</option><option value="cycling">Radfahren</option><option value="walking">Gehen</option><option value="hiking">Wandern</option></select></label><label>Datum<input type="date" name="scheduled_for" min="{{ today.isoformat() }}"></label></div>
+    <label>Beschreibung<textarea name="description" rows="3" placeholder="Ziel und Hinweise für die Einheit"></textarea></label>
+  </section>
+  <section class="card form-card steps-card">
+    <div class="card-heading"><div><p class="section-number">02</p><h2>Schritte</h2></div><button type="button" class="button secondary" @click="addStep()">+ Schritt</button></div>
+    <div class="steps-list">
+      <template x-for="(step, index) in steps" :key="step.id">
+        <div class="step-row">
+          <span class="step-index" x-text="String(index + 1).padStart(2, '0')"></span>
+          <label>Typ<select name="step_type" x-model="step.type" @change="if (step.type !== 'interval') step.duration = 'time'"><option value="warmup">Aufwärmen</option><option value="interval">Belastung</option><option value="recovery">Erholung</option><option value="cooldown">Auslaufen</option></select></label>
+          <label>Bemessung<select name="duration_type" x-model="step.duration"><option value="time">Zeit</option><option value="distance" :disabled="step.type !== 'interval'">Distanz</option></select></label>
+          <label><span x-text="step.duration === 'time' ? 'Minuten' : 'Meter'"></span><input name="duration_value" type="number" min="0.1" step="0.1" required x-model="step.value"></label>
+          <label>Wdh.<input name="repeat_count" type="number" min="1" max="50" required x-model="step.repeats"></label>
+          <button type="button" class="remove-button" @click="removeStep(index)" :disabled="steps.length === 1" aria-label="Schritt entfernen">×</button>
+        </div>
+      </template>
+    </div>
+  </section>
+  <div class="editor-actions"><p>Das Workout wird zunächst als Entwurf gespeichert.</p><button class="button large" type="submit">Entwurf speichern</button></div>
+</form>
+<script>
+function workoutEditor() {
+  return {
+    nextId: 4,
+    steps: [
+      { id: 1, type: 'warmup', duration: 'time', value: 10, repeats: 1 },
+      { id: 2, type: 'interval', duration: 'time', value: 20, repeats: 1 },
+      { id: 3, type: 'cooldown', duration: 'time', value: 10, repeats: 1 }
+    ],
+    addStep() { this.steps.push({ id: this.nextId++, type: 'interval', duration: 'time', value: 5, repeats: 1 }); },
+    removeStep(index) { if (this.steps.length > 1) this.steps.splice(index, 1); }
+  };
+}
+</script>
+{% endblock %}
