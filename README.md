@@ -14,9 +14,10 @@ PacePilot ist ein kleiner, selbst gehosteter Trainingsbegleiter für Garmin Conn
 - explizite Kette `Entwurf -> Bestätigung -> Garmin -> Uhr`
 - regelmäßiger Garmin-Sync über APScheduler mit Prozess-Lock
 - live aktualisierter Sync-Fortschritt und Laufzeitmessungen pro Garmin-Endpunkt
+- zustandsloser KI-Coach mit Agno und OpenRouter auf einem begrenzten Trainings-Snapshot
 - Alembic-Migrationen, SQLite-WAL und Docker-Deployment mit einem Uvicorn-Worker
 
-Der KI-Coach ist als Phase-5-Grenze in der Oberfläche sichtbar, generiert aber noch keine Pläne. Ein unvalidierter LLM-Text wird bewusst nicht als Workout gespeichert oder zu Garmin übertragen.
+Der KI-Coach beantwortet Planungsfragen anhand der letzten Aktivitäten, Erholungswerte, Wochenlast und anstehenden Workouts. Der Agent arbeitet ausschließlich lesend und ohne Chat-Speicher. Seine Antwort bleibt Text: Sie wird weder als Workout gespeichert noch bestätigt oder zu Garmin übertragen.
 
 ## Lokal starten
 
@@ -63,7 +64,9 @@ Der Container führt beim Start `alembic upgrade head` aus und startet genau ein
 | `SYNC_INTERVAL_MINUTES` | `60` | APScheduler-Intervall |
 | `SCHEDULER_ENABLED` | `true` | Hintergrundjobs aktivieren |
 | `GARMIN_EMAIL`, `GARMIN_PASSWORD` | leer | optionale unbeaufsichtigte Neuanmeldung |
-| `LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL` | leer | reserviert für den KI-Coach |
+| `LLM_API_KEY` | leer | OpenRouter API-Key für den KI-Coach |
+| `LLM_BASE_URL` | `https://openrouter.ai/api/v1` | OpenRouter API-Basis-URL |
+| `LLM_MODEL` | leer | OpenRouter Modell-ID, zum Beispiel `openai/gpt-4o-mini` |
 
 SQLite muss auf einem lokalen Volume liegen, nicht auf SMB oder NFS. Mehrere Uvicorn-Worker sind wegen Scheduler und Prozess-Lock nicht unterstützt.
 

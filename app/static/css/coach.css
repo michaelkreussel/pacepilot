@@ -1,0 +1,19 @@
+.coach-shell{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(300px,1fr);gap:22px;margin-top:22px;align-items:start}
+.coach-form{display:flex;flex-direction:column;gap:20px}
+.coach-form-heading,.coach-submit{display:flex;align-items:flex-start;justify-content:space-between;gap:20px}
+.coach-form-heading h2,.coach-answer h2,.coach-config h2{margin:4px 0 0;font:800 24px "Manrope",sans-serif}
+.coach-form label{display:flex;flex-direction:column;gap:8px;font-weight:700}
+.coach-form textarea{width:100%;resize:vertical;min-height:132px;padding:14px 16px;border:1px solid var(--line);border-radius:11px;background:white;color:var(--ink);line-height:1.55}
+.coach-form textarea:focus{outline:2px solid rgba(29,90,72,.2);border-color:var(--green)}
+.coach-submit{align-items:center}
+.coach-submit p,.coach-config p{margin:0;color:var(--muted);font-size:13px;line-height:1.6}
+.coach-submit .button{flex:none;border:0}
+.coach-submit .button:disabled{cursor:not-allowed;opacity:.45}
+.coach-answer{border-top:4px solid var(--green)}
+.coach-answer.coach-error{border-top-color:#8f2f24}
+.coach-answer-text{margin:18px 0 22px;white-space:pre-wrap;line-height:1.7;color:#273b34}
+.coach-config{grid-column:2}
+.status-dot{max-width:220px;padding:7px 10px;border-radius:999px;background:#ecece6;color:var(--muted);font-size:11px;font-weight:800;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.status-dot.success{background:#e4f1eb;color:var(--green)}
+@media(max-width:900px){.coach-shell{grid-template-columns:1fr}.coach-config{grid-column:auto}}
+@media(max-width:560px){.coach-form-heading,.coach-submit{align-items:stretch;flex-direction:column}.coach-submit .button{width:100%}.status-dot{max-width:100%}}

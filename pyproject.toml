@@ -5,6 +5,7 @@ description = "A small self-hosted Garmin training companion"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "agno[openai]>=2.8,<3",
     "alembic>=1.14,<2",
     "apscheduler>=3.11,<4",
     "fastapi>=0.115,<1",

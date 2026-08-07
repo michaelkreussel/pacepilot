@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     sync_interval_minutes: int = Field(default=60, ge=5)
     scheduler_enabled: bool = True
     llm_api_key: str | None = None
-    llm_base_url: str | None = None
+    llm_base_url: str = "https://openrouter.ai/api/v1"
     llm_model: str = ""
 
 

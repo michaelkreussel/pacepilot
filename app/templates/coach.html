@@ -1,11 +1,43 @@
 {% extends "base.html" %}
 {% block title %}KI-Coach · PacePilot{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ url_for('static', path='/css/coach.css') }}?v=20260807-1">{% endblock %}
 {% block content %}
-<div class="page-heading"><div><p class="eyebrow">Planungsassistenz</p><h1>KI-Coach</h1><p>Vorschläge statt Autopilot.</p></div><span class="pill">Phase 5</span></div>
+<div class="page-heading">
+  <div><p class="eyebrow">Planungsassistenz</p><h1>KI-Coach</h1><p>Vorschläge statt Autopilot.</p></div>
+  <span class="pill">Agno + OpenRouter</span>
+</div>
 <section class="coach-stage">
-  <article class="coach-principle"><span>01</span><h2>Das Modell entwirft.</h2><p>Trainingsdaten werden zu einem strukturierten Vorschlag verdichtet.</p></article>
-  <article class="coach-principle"><span>02</span><h2>Der Code prüft.</h2><p>Umfang, Sportart und Workout-Schritte müssen die gleichen Regeln wie manuelle Einheiten erfüllen.</p></article>
-  <article class="coach-principle"><span>03</span><h2>Du entscheidest.</h2><p>Kein KI-Entwurf wird automatisch zu Garmin übertragen.</p></article>
+  <article class="coach-principle"><span>01</span><h2>Das Modell entwirft.</h2><p>Aktuelle Trainings-, Erholungs- und Kalenderdaten fließen als begrenzter Snapshot ein.</p></article>
+  <article class="coach-principle"><span>02</span><h2>Die App bleibt Herrin der Daten.</h2><p>Der Agent kann weder Workouts speichern noch Garmin-Aktionen ausführen.</p></article>
+  <article class="coach-principle"><span>03</span><h2>Du entscheidest.</h2><p>Empfehlungen bleiben Text, bis du sie im Workout-Editor selbst übernimmst.</p></article>
 </section>
-<section class="card coach-placeholder"><div><p class="eyebrow">Konfiguration</p><h2>{% if configured %}LLM-Zugang erkannt{% else %}Noch kein LLM konfiguriert{% endif %}</h2><p>{% if configured %}Der Provider ist konfiguriert. Die interaktive Plangenerierung folgt nach dem stabilen Garmin-Datenfluss.{% else %}Setze <code>LLM_API_KEY</code> und <code>LLM_BASE_URL</code>. Garmin-Sync und manuelle Workout-Planung funktionieren unabhängig davon.{% endif %}</p></div><a class="button secondary" href="/settings">Einstellungen prüfen</a></section>
+
+<section class="coach-shell">
+  <form class="card coach-form" method="post" action="/coach">
+    <div class="coach-form-heading">
+      <div><p class="eyebrow">Neue Anfrage</p><h2>Was möchtest du planen?</h2></div>
+      {% if configured %}<span class="status-dot success">{{ model }}</span>{% else %}<span class="status-dot">Nicht konfiguriert</span>{% endif %}
+    </div>
+    <label>Frage
+      <textarea name="message" rows="5" maxlength="4000" placeholder="Zum Beispiel: Wie sollte ich meine Laufwoche nach den letzten Einheiten strukturieren?" required>{{ message }}</textarea>
+    </label>
+    <div class="coach-submit">
+      <p>Die Anfrage nutzt einen aktuellen Snapshot. Es wird kein Chatverlauf gespeichert.</p>
+      <button class="button" type="submit" {% if not configured %}disabled{% endif %}>Coach fragen</button>
+    </div>
+  </form>
+
+  {% if answer or error %}
+  <article class="card coach-answer {{ 'coach-error' if error else '' }}" aria-live="polite">
+    <p class="eyebrow">{{ 'Fehler' if error else 'Antwort' }}</p>
+    <h2>{{ 'Coach nicht erreichbar' if error else 'Vorschlag des Coaches' }}</h2>
+    <div class="coach-answer-text">{{ error or answer }}</div>
+    {% if answer %}<a class="button secondary" href="/workouts/new">Im Workout-Editor prüfen</a>{% endif %}
+  </article>
+  {% elif not configured %}
+  <article class="card coach-config">
+    <div><p class="eyebrow">Konfiguration</p><h2>OpenRouter-Zugang fehlt</h2><p>Setze <code>LLM_API_KEY</code> und <code>LLM_MODEL</code>. Garmin-Sync und manuelle Workout-Planung funktionieren unabhängig davon.</p></div>
+  </article>
+  {% endif %}
+</section>
 {% endblock %}

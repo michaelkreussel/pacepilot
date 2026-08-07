@@ -162,7 +162,7 @@ def test_edit_draft_workout(client: TestClient, session_factory: sessionmaker[Se
     assert '"targetMin": "4:00"' in form.text
     assert 'class="workout-step-heading"' in form.text
     assert 'class="workout-step-fields"' in form.text
-    assert "/static/css/app.css?v=20260807-3" in form.text
+    assert "/static/css/app.css?v=20260807-4" in form.text
 
     updated = client.post(
         location,
