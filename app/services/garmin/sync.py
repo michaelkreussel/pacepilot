@@ -5,6 +5,7 @@ import threading
 import time
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
+from functools import partial
 from typing import Any
 
 from sqlalchemy import select
@@ -13,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.models import Activity, DailyHealth, GarminAccount, GarminDevice, SyncRun
 from app.models.user import utcnow
+from app.services.garmin.activity_details import activity_details_path, write_activity_details
 from app.services.garmin.client import connect_garmin, message_from_exception
 
 sync_lock = threading.Lock()
@@ -130,6 +132,23 @@ def _sync_activities(session: Session, client: Any, user_id: int, start: date, r
         activity.calories = _number(item, "calories")  # type: ignore[assignment]
         activity.elevation_gain_m = _number(item, "elevationGain")
         activity.raw_file = _write_raw_activity(item, activity_id)
+        try:
+            details_path = activity_details_path(activity.started_at, activity_id)
+            if not details_path.is_file():
+                details = _timed_garmin_call(
+                    run_id,
+                    f"activity details {activity_id}",
+                    partial(client.get_activity_details, activity_id, maxchart=2000, maxpoly=2000),
+                )
+                if isinstance(details, dict) and details.get("detailsAvailable") is not False:
+                    write_activity_details(details_path, details)
+        except Exception as exc:
+            logger.warning(
+                "Garmin sync %s: activity details %s skipped: %s",
+                run_id,
+                activity_id,
+                exc,
+            )
         activity.synced_at = utcnow()
         count += 1
     session.flush()
@@ -177,16 +196,8 @@ def _sync_health_day(
     sleep_dto = sleep_dto if isinstance(sleep_dto, dict) else {}
     hrv_summary = hrv.get("hrvSummary") if isinstance(hrv, dict) else {}
     hrv_summary = hrv_summary if isinstance(hrv_summary, dict) else {}
-    health = session.scalar(
-        select(DailyHealth).where(DailyHealth.user_id == user_id, DailyHealth.day == day)
-    )
-    if health is None:
-        health = DailyHealth(user_id=user_id, day=day)
-        session.add(health)
-    health.steps = _number(summary, "totalSteps", "steps")  # type: ignore[assignment]
-    health.resting_hr = _number(summary, "restingHeartRate", "restingHR")  # type: ignore[assignment]
-    health.stress_average = _number(summary, "averageStressLevel")  # type: ignore[assignment]
-    health.body_battery_high = _number(summary, "bodyBatteryHighestValue")  # type: ignore[assignment]
+    health = _store_daily_summary(session, user_id, day, summary)
+
     health.sleep_seconds = _number(sleep_dto, "sleepTimeSeconds")  # type: ignore[assignment]
     sleep_scores = sleep_dto.get("sleepScores")
     if isinstance(sleep_scores, dict):
@@ -198,6 +209,38 @@ def _sync_health_day(
     else:
         health.sleep_score = _number(sleep_dto, "sleepScore")  # type: ignore[assignment]
     health.hrv_average = _number(hrv_summary, "lastNightAvg", "weeklyAvg")
+
+
+def _store_daily_summary(
+    session: Session, user_id: int, day: date, summary: dict[str, Any]
+) -> DailyHealth:
+    health = session.scalar(
+        select(DailyHealth).where(DailyHealth.user_id == user_id, DailyHealth.day == day)
+    )
+    if health is None:
+        health = DailyHealth(user_id=user_id, day=day)
+        session.add(health)
+    health.steps = _number(summary, "totalSteps", "steps")  # type: ignore[assignment]
+    health.resting_hr = _number(summary, "restingHeartRate", "restingHR")  # type: ignore[assignment]
+    health.stress_average = _number(summary, "averageStressLevel")  # type: ignore[assignment]
+    health.body_battery_high = _number(summary, "bodyBatteryHighestValue")  # type: ignore[assignment]
+    return health
+
+
+def refresh_daily_summary(session: Session, user_id: int, day: date | None = None) -> None:
+    if not sync_lock.acquire(blocking=False):
+        raise SyncAlreadyRunningError("Eine Garmin-Synchronisierung läuft bereits.")
+    try:
+        target_day = day or date.today()
+        client = connect_garmin()
+        summary = client.get_user_summary(target_day.isoformat()) or {}
+        _store_daily_summary(session, user_id, target_day, summary)
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        sync_lock.release()
 
 
 def _sync_devices(session: Session, client: Any, account: GarminAccount, run_id: int) -> None:

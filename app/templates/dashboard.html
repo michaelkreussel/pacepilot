@@ -54,7 +54,7 @@
   <article class="card chart-card">
     <div class="card-heading">
       <div><p class="eyebrow">Erholung</p><h2>14-Tage-Trend</h2></div>
-      <button class="text-button" hx-get="/health" hx-target="#health-cards" hx-swap="outerHTML">Aktualisieren</button>
+      <button class="text-button" hx-post="/health" hx-target="#health-cards" hx-swap="outerHTML" hx-disabled-elt="this">Aktualisieren</button>
     </div>
     {% if health %}<canvas id="healthChart" height="120"></canvas>{% else %}<div class="empty-inline">Nach dem ersten Garmin-Sync erscheint hier dein Verlauf.</div>{% endif %}
   </article>

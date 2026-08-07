@@ -1,0 +1,183 @@
+.activity-heading {
+  margin-bottom: 28px;
+}
+
+.activity-section-heading {
+  align-items: end;
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 22px;
+}
+
+.activity-section-heading h2 {
+  font: 800 clamp(24px, 3vw, 34px)/1.1 "Manrope", sans-serif;
+  letter-spacing: -.035em;
+  margin: 4px 0 0;
+}
+
+.activity-section-heading > span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.activity-map-card {
+  margin-top: 24px;
+  overflow: hidden;
+  padding: 27px;
+}
+
+.detailed-stats {
+  margin-top: 18px;
+  overflow: hidden;
+  padding: 0;
+}
+
+.detailed-stats > summary {
+  align-items: center;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  list-style: none;
+  padding: 22px 27px;
+}
+
+.detailed-stats > summary::-webkit-details-marker {
+  display: none;
+}
+
+.detailed-stats > summary strong {
+  display: block;
+  font: 800 20px "Manrope", sans-serif;
+  margin-top: 4px;
+}
+
+.details-toggle {
+  color: var(--orange-dark);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.details-toggle::after {
+  content: " +";
+}
+
+.detailed-stats[open] .details-toggle::after {
+  content: " −";
+}
+
+.detail-metrics-secondary {
+  border-top: 1px solid var(--line);
+  margin: 0;
+  padding: 22px 27px 27px;
+}
+
+#activity-map {
+  background: #dce7df;
+  border-radius: 14px;
+  height: clamp(330px, 44vw, 540px);
+  overflow: hidden;
+}
+
+.activity-analysis {
+  margin-top: 42px;
+}
+
+.activity-chart-grid {
+  display: grid;
+  gap: 18px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.activity-chart-card {
+  min-width: 0;
+  padding: 24px;
+}
+
+.activity-chart-card:last-child:nth-child(odd) {
+  grid-column: 1 / -1;
+}
+
+.activity-chart-card h3 {
+  font: 800 21px "Manrope", sans-serif;
+  margin: 8px 0 22px;
+}
+
+.chart-kicker {
+  align-items: center;
+  color: var(--muted);
+  display: flex;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+
+.chart-kicker::before {
+  background: currentColor;
+  border-radius: 50%;
+  content: "";
+  height: 8px;
+  margin-right: 8px;
+  width: 8px;
+}
+
+.chart-kicker.heart-rate { color: #e24b3b; }
+.chart-kicker.pace, .chart-kicker.speed { color: #1d5a48; }
+.chart-kicker.cadence { color: #7a5ad8; }
+
+.chart-frame {
+  height: 250px;
+  position: relative;
+}
+
+.activity-data-empty {
+  margin-top: 28px;
+}
+
+.activity-data-empty h2 {
+  font: 800 24px "Manrope", sans-serif;
+  margin: 8px 0;
+}
+
+.activity-data-empty p:last-child {
+  color: var(--muted);
+  margin-bottom: 0;
+}
+
+.leaflet-control-attribution {
+  font-size: 10px;
+}
+
+@media (max-width: 800px) {
+  .activity-chart-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .activity-chart-card:last-child:nth-child(odd) {
+    grid-column: auto;
+  }
+}
+
+@media (max-width: 560px) {
+  .activity-section-heading {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .activity-map-card,
+  .activity-chart-card {
+    padding: 20px;
+  }
+
+  .detailed-stats > summary,
+  .detail-metrics-secondary {
+    padding-left: 20px;
+    padding-right: 20px;
+  }
+
+  #activity-map {
+    height: 340px;
+  }
+}

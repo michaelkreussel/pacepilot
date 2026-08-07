@@ -4,6 +4,7 @@ from fastapi.responses import HTMLResponse
 from app.database import SessionDep
 from app.repositories.activities import find_activity, list_activities
 from app.repositories.users import get_or_create_default_user
+from app.services.garmin.activity_details import load_activity_details
 from app.web import context, templates
 
 router = APIRouter(prefix="/activities")
@@ -32,5 +33,12 @@ def activity_detail(activity_id: int, request: Request, session: SessionDep) -> 
     return templates.TemplateResponse(
         request,
         "activities/detail.html",
-        context(request, active_page="activities", activity=activity),
+        context(
+            request,
+            active_page="activities",
+            activity=activity,
+            activity_data=load_activity_details(
+                activity.started_at, activity.garmin_activity_id, activity.activity_type
+            ),
+        ),
     )

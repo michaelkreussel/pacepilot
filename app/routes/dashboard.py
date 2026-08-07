@@ -1,3 +1,4 @@
+from contextlib import suppress
 from datetime import date
 
 from fastapi import APIRouter, Request
@@ -10,9 +11,16 @@ from app.models import Activity, DailyHealth, Workout
 from app.repositories.health import recent_health
 from app.repositories.users import get_or_create_default_user, get_or_create_garmin_account
 from app.services.analytics.training_load import calculate_weekly_load
+from app.services.garmin.sync import SyncAlreadyRunningError, refresh_daily_summary
 from app.web import context, templates
 
 router = APIRouter()
+
+
+def _today_health(session: SessionDep, user_id: int) -> DailyHealth | None:
+    return session.scalar(
+        select(DailyHealth).where(DailyHealth.user_id == user_id, DailyHealth.day == date.today())
+    )
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -25,12 +33,7 @@ def dashboard(request: Request, session: SessionDep) -> HTMLResponse:
         .order_by(Activity.started_at.desc())
         .limit(1)
     )
-    latest_health = session.scalar(
-        select(DailyHealth)
-        .where(DailyHealth.user_id == user.id)
-        .order_by(DailyHealth.day.desc())
-        .limit(1)
-    )
+    latest_health = _today_health(session, user.id)
     upcoming = session.scalar(
         select(Workout)
         .options(selectinload(Workout.steps))
@@ -59,18 +62,31 @@ def dashboard(request: Request, session: SessionDep) -> HTMLResponse:
 @router.get("/health", response_class=HTMLResponse)
 def health_cards(request: Request, session: SessionDep) -> HTMLResponse:
     user = get_or_create_default_user(session)
-    latest_health = session.scalar(
-        select(DailyHealth)
-        .where(DailyHealth.user_id == user.id)
-        .order_by(DailyHealth.day.desc())
-        .limit(1)
-    )
+    latest_health = _today_health(session, user.id)
     return templates.TemplateResponse(
         request,
         "partials/health_cards.html",
         context(
             request,
             latest_health=latest_health,
+            weekly_load=calculate_weekly_load(session, user.id),
+        ),
+    )
+
+
+@router.post("/health", response_class=HTMLResponse)
+def refresh_health_cards(request: Request, session: SessionDep) -> HTMLResponse:
+    user = get_or_create_default_user(session)
+    account = get_or_create_garmin_account(session, user)
+    if account.connected_at is not None:
+        with suppress(SyncAlreadyRunningError):
+            refresh_daily_summary(session, user.id)
+    return templates.TemplateResponse(
+        request,
+        "partials/health_cards.html",
+        context(
+            request,
+            latest_health=_today_health(session, user.id),
             weekly_load=calculate_weekly_load(session, user.id),
         ),
     )

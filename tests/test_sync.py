@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.config import get_settings
 from app.models import Activity, DailyHealth, GarminAccount, GarminDevice, User
 from app.services.garmin import sync as sync_module
+from app.services.garmin.activity_details import load_activity_details
 
 
 class FakeGarmin:
@@ -33,6 +34,24 @@ class FakeGarmin:
             "restingHeartRate": 48,
             "averageStressLevel": 24,
             "bodyBatteryHighestValue": 86,
+        }
+
+    def get_activity_details(
+        self, _activity_id: str, maxchart: int, maxpoly: int
+    ) -> dict[str, Any]:
+        assert maxchart == maxpoly == 2000
+        return {
+            "metricDescriptors": [
+                {"key": "sumElapsedDuration", "metricsIndex": 0},
+                {"key": "directHeartRate", "metricsIndex": 1},
+                {"key": "directSpeed", "metricsIndex": 2},
+                {"key": "directDoubleCadence", "metricsIndex": 3},
+            ],
+            "activityDetailMetrics": [
+                {"metrics": [0, 140, 2.8, 170]},
+                {"metrics": [60, 150, 3.0, 174]},
+            ],
+            "geoPolylineDTO": {"polyline": [{"lat": 50.0, "lon": 9.0, "valid": True}]},
         }
 
     def get_sleep_data(self, _day: str) -> dict[str, Any]:
@@ -83,8 +102,15 @@ def test_sync_normalizes_and_stores_data(
         assert activity.distance_m == 10100.0
         assert activity.raw_file is not None
         assert Path(activity.raw_file).exists()
+        activity_data = load_activity_details(
+            activity.started_at, activity.garmin_activity_id, activity.activity_type
+        )
+        assert activity_data["series"]["heart_rate"] == [[0.0, 140.0], [60.0, 150.0]]
+        assert activity_data["series"]["cadence"] == [[0.0, 170.0], [60.0, 174.0]]
+        assert activity_data["route"] == [[50.0, 9.0]]
         health = session.scalar(select(DailyHealth))
         assert health is not None
+        assert health.steps == 9000
         assert health.sleep_score == 82
         assert health.hrv_average == 54.0
         assert session.scalar(select(GarminDevice)) is not None

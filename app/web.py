@@ -16,8 +16,26 @@ def format_duration(seconds: float | int | None) -> str:
     return f"{hours}:{minutes:02d} h" if hours else f"{minutes} min"
 
 
+def format_precise_duration(seconds: float | int | None) -> str:
+    if seconds is None:
+        return "–"
+    hours, remainder = divmod(round(seconds), 3600)
+    minutes, remaining_seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{remaining_seconds:02d} h"
+    return f"{minutes}:{remaining_seconds:02d} min"
+
+
 def format_distance(meters: float | int | None) -> str:
     return "–" if meters is None else f"{meters / 1000:.1f} km"
+
+
+def format_pace(seconds: float | int | None) -> str:
+    if seconds is None:
+        return "–"
+    total = round(seconds)
+    minutes, remainder = divmod(total, 60)
+    return f"{minutes}:{remainder:02d} min/km"
 
 
 def format_date(value: date | datetime | None, include_time: bool = False) -> str:
@@ -30,7 +48,9 @@ def format_date(value: date | datetime | None, include_time: bool = False) -> st
 
 templates.env.filters.update(
     duration=format_duration,
+    precise_duration=format_precise_duration,
     distance=format_distance,
+    pace=format_pace,
     date=format_date,
     datetime=lambda value: format_date(value, include_time=True),
 )
