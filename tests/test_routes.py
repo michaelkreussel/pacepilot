@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.models import DailyHealth, GarminAccount, Workout
+from app.routes import plans as plans_module
 from app.services.garmin import sync as sync_module
 from app.services.garmin import workout_export as workout_export_module
 
@@ -35,6 +36,48 @@ def test_main_pages_render(client: TestClient) -> None:
         assert "PacePilot" in response.text
 
     assert client.get("/api/health").json() == {"status": "ok"}
+
+
+def test_training_plan_month_view_shows_calendar_weeks_and_workouts(
+    client: TestClient, monkeypatch: Any
+) -> None:
+    class FixedDate(date):
+        @classmethod
+        def today(cls) -> date:
+            return cls(2027, 1, 15)
+
+    monkeypatch.setattr(plans_module, "date", FixedDate)
+    client.post(
+        "/workouts",
+        data=_workout_data(name="Silvesterlauf", scheduled_for="2026-12-31"),
+    )
+    client.post(
+        "/workouts",
+        data=_workout_data(name="Januarlauf", scheduled_for="2027-01-31"),
+    )
+
+    response = client.get("/plans?view=month")
+
+    assert response.status_code == 200
+    assert "Januar 2027" in response.text
+    assert 'aria-label="Kalenderwoche 53"' in response.text
+    assert 'aria-label="Kalenderwoche 4"' in response.text
+    assert "Silvesterlauf" in response.text
+    assert "Januarlauf" in response.text
+    assert "/plans?view=month&amp;month=-1" in response.text
+    assert "/plans?view=month&amp;month=1" in response.text
+
+
+def test_training_plan_can_switch_between_week_and_month(client: TestClient) -> None:
+    week = client.get("/plans")
+    month = client.get("/plans?view=month")
+
+    assert 'class="active" href="/plans?view=week">Woche</a>' in week.text
+    assert "Diese Woche" in week.text
+    assert 'class="active" href="/plans?view=month">Monat</a>' in month.text
+    assert "Dieser Monat" in month.text
+    assert 'const storageKey = "pacepilot-plan-url"' in month.text
+    assert "window.location.replace(savedUrl)" in month.text
 
 
 def test_sync_status_partial_renders(client: TestClient) -> None:
@@ -119,7 +162,7 @@ def test_edit_draft_workout(client: TestClient, session_factory: sessionmaker[Se
     assert '"targetMin": "4:00"' in form.text
     assert 'class="workout-step-heading"' in form.text
     assert 'class="workout-step-fields"' in form.text
-    assert "/static/css/app.css?v=20260807-2" in form.text
+    assert "/static/css/app.css?v=20260807-3" in form.text
 
     updated = client.post(
         location,
