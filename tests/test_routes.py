@@ -5,8 +5,27 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.models import DailyHealth, GarminAccount
+from app.models import DailyHealth, GarminAccount, Workout
 from app.services.garmin import sync as sync_module
+from app.services.garmin import workout_export as workout_export_module
+
+
+def _workout_data(
+    name: str = "Lockerer Dauerlauf", scheduled_for: str = "2026-08-09"
+) -> dict[str, object]:
+    return {
+        "name": name,
+        "sport": "running",
+        "scheduled_for": scheduled_for,
+        "description": "Ruhig bleiben",
+        "step_type": ["warmup", "interval", "cooldown"],
+        "duration_type": ["time", "time", "time"],
+        "duration_value": ["10", "30", "5"],
+        "repeat_count": ["1", "1", "1"],
+        "target_type": ["no_target", "pace", "no_target"],
+        "target_min": ["", "4:00", ""],
+        "target_max": ["", "4:20", ""],
+    }
 
 
 def test_main_pages_render(client: TestClient) -> None:
@@ -55,16 +74,7 @@ def test_health_refresh_fetches_current_steps(
 def test_create_and_confirm_workout(client: TestClient) -> None:
     response = client.post(
         "/workouts",
-        data={
-            "name": "Lockerer Dauerlauf",
-            "sport": "running",
-            "scheduled_for": "2026-08-09",
-            "description": "Ruhig bleiben",
-            "step_type": ["warmup", "interval", "cooldown"],
-            "duration_type": ["time", "time", "time"],
-            "duration_value": ["10", "30", "5"],
-            "repeat_count": ["1", "1", "1"],
-        },
+        data=_workout_data(),
         follow_redirects=False,
     )
     assert response.status_code == 303
@@ -73,6 +83,7 @@ def test_create_and_confirm_workout(client: TestClient) -> None:
     detail = client.get(location)
     assert detail.status_code == 200
     assert "Lockerer Dauerlauf" in detail.text
+    assert "Pace 4:00 min/km bis 4:20 min/km" in detail.text
     assert "Entwurf bestätigen" in detail.text
 
     confirmed = client.post(f"{location}/confirm", follow_redirects=True)
@@ -94,3 +105,138 @@ def test_invalid_workout_is_rejected(client: TestClient) -> None:
     )
     assert response.status_code == 422
     assert "Bitte einen Namen angeben" in response.text
+
+
+def test_edit_draft_workout(client: TestClient, session_factory: sessionmaker[Session]) -> None:
+    created = client.post("/workouts", data=_workout_data(), follow_redirects=False)
+    location = created.headers["location"]
+
+    form = client.get(f"{location}/edit")
+    assert form.status_code == 200
+    assert "Einheit bearbeiten" in form.text
+    assert 'value="Lockerer Dauerlauf"' in form.text
+    assert 'x-data=\'workoutEditor([{"duration": "time"' in form.text
+    assert '"targetMin": "4:00"' in form.text
+    assert 'class="workout-step-heading"' in form.text
+    assert 'class="workout-step-fields"' in form.text
+    assert "/static/css/app.css?v=20260807-2" in form.text
+
+    updated = client.post(
+        location,
+        data=_workout_data(name="Tempolauf bearbeitet", scheduled_for="2026-08-10"),
+        follow_redirects=False,
+    )
+
+    assert updated.status_code == 303
+    assert updated.headers["location"] == location
+    with session_factory() as session:
+        workout = session.scalar(select(Workout))
+        assert workout is not None
+        assert workout.name == "Tempolauf bearbeitet"
+        assert workout.scheduled_for == date(2026, 8, 10)
+        assert workout.status == "draft"
+        assert workout.steps[1].target_min == 240
+        assert workout.steps[1].target_max == 260
+
+
+def test_edit_pushed_workout_updates_garmin_and_device(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: Any,
+) -> None:
+    created = client.post("/workouts", data=_workout_data(), follow_redirects=False)
+    location = created.headers["location"]
+    with session_factory() as session:
+        workout = session.scalar(select(Workout))
+        assert workout is not None
+        workout.garmin_workout_id = "12345"
+        workout.status = "pushed"
+        session.commit()
+
+    class FakeGarmin:
+        updated: list[tuple[str, dict[str, Any]]] = []
+        unscheduled: list[str] = []
+        scheduled: list[tuple[str, str]] = []
+        pushed: list[str] = []
+
+        def update_workout(self, workout_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+            self.updated.append((workout_id, payload))
+            return {}
+
+        def get_scheduled_workouts(self, _year: int, month: int) -> dict[str, object]:
+            if month == 8:
+                return {"items": [{"id": 987, "date": "2026-08-09", "workoutId": 12345}]}
+            return {"items": []}
+
+        def unschedule_workout(self, scheduled_id: str) -> None:
+            self.unscheduled.append(scheduled_id)
+
+        def schedule_workout(self, workout_id: str, day: str) -> dict[str, Any]:
+            self.scheduled.append((workout_id, day))
+            return {}
+
+        def push_workout_to_device(self, workout_id: str) -> dict[str, Any]:
+            self.pushed.append(workout_id)
+            return {}
+
+    garmin = FakeGarmin()
+    monkeypatch.setattr(workout_export_module, "connect_garmin", lambda: garmin)
+
+    response = client.post(
+        location,
+        data=_workout_data(name="Garmin Update", scheduled_for="2026-08-10"),
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert garmin.updated[0][0] == "12345"
+    assert garmin.updated[0][1]["workoutName"] == "Garmin Update"
+    assert garmin.unscheduled == ["987"]
+    assert garmin.scheduled == [("12345", "2026-08-10")]
+    assert garmin.pushed == ["12345"]
+    with session_factory() as session:
+        workout = session.scalar(select(Workout))
+        assert workout is not None
+        assert workout.name == "Garmin Update"
+        assert workout.scheduled_for == date(2026, 8, 10)
+        assert workout.status == "pushed"
+
+
+def test_delete_pushed_workout_removes_garmin_workout(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: Any,
+) -> None:
+    created = client.post("/workouts", data=_workout_data(), follow_redirects=False)
+    location = created.headers["location"]
+    with session_factory() as session:
+        workout = session.scalar(select(Workout))
+        assert workout is not None
+        workout.garmin_workout_id = "12345"
+        workout.status = "pushed"
+        session.commit()
+
+    class FakeGarmin:
+        unscheduled: list[str] = []
+        deleted: list[str] = []
+
+        def get_scheduled_workouts(self, _year: int, _month: int) -> dict[str, object]:
+            return {"items": [{"id": 987, "date": "2026-08-09", "workoutId": 12345}]}
+
+        def unschedule_workout(self, scheduled_id: str) -> None:
+            self.unscheduled.append(scheduled_id)
+
+        def delete_workout(self, workout_id: str) -> None:
+            self.deleted.append(workout_id)
+
+    garmin = FakeGarmin()
+    monkeypatch.setattr(workout_export_module, "connect_garmin", lambda: garmin)
+
+    response = client.post(f"{location}/delete", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/plans"
+    assert garmin.unscheduled == ["987"]
+    assert garmin.deleted == ["12345"]
+    with session_factory() as session:
+        assert session.scalar(select(Workout)) is None

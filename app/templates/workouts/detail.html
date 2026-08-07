@@ -2,11 +2,11 @@
 {% block title %}{{ workout.name }} · PacePilot{% endblock %}
 {% block content %}
 <a class="back-link" href="/plans">← Trainingsplan</a>
-<div class="page-heading"><div><p class="eyebrow">{{ workout.sport|capitalize }} · {{ workout.status|capitalize }}</p><h1>{{ workout.name }}</h1><p>{{ workout.scheduled_for|date }}{% if workout.description %} · {{ workout.description }}{% endif %}</p></div></div>
+<div class="page-heading"><div><p class="eyebrow">{{ workout.sport|capitalize }} · {{ workout.status|capitalize }}</p><h1>{{ workout.name }}</h1><p>{{ workout.scheduled_for|date }}{% if workout.description %} · {{ workout.description }}{% endif %}</p></div><div class="workout-actions"><a class="button secondary" href="/workouts/{{ workout.id }}/edit">Bearbeiten</a><form method="post" action="/workouts/{{ workout.id }}/delete" onsubmit="return confirm('Workout wirklich bei PacePilot und Garmin löschen?')"><button class="button danger" type="submit">Löschen</button></form></div></div>
 {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
 <div class="workout-detail-grid">
   <section class="card timeline-card"><p class="section-number">Ablauf</p>
-    <ol class="timeline">{% for step in workout.steps %}<li><span>{{ loop.index }}</span><div><strong>{{ {'warmup':'Aufwärmen','interval':'Belastung','recovery':'Erholung','cooldown':'Auslaufen'}.get(step.step_type, step.step_type) }}</strong><p>{% if step.duration_type == 'time' %}{{ step.duration_value|duration }}{% else %}{{ step.duration_value|round|int }} m{% endif %}{% if step.repeat_count and step.repeat_count > 1 %} · {{ step.repeat_count }} Wiederholungen{% endif %}</p></div></li>{% endfor %}</ol>
+    <ol class="timeline">{% for step in workout.steps %}<li><span>{{ loop.index }}</span><div><strong>{{ {'warmup':'Aufwärmen','interval':'Belastung','recovery':'Erholung','cooldown':'Auslaufen'}.get(step.step_type, step.step_type) }}</strong><p>{% if step.duration_type == 'time' %}{{ step.duration_value|duration }}{% else %}{{ step.duration_value|round|int }} m{% endif %}{% if step.target_type == 'pace' %} · Pace {{ step.target_min|pace }} bis {{ step.target_max|pace }}{% endif %}{% if step.repeat_count and step.repeat_count > 1 %} · {{ step.repeat_count }} Wiederholungen{% endif %}</p></div></li>{% endfor %}</ol>
   </section>
   <aside class="card publish-card">
     <p class="section-number">Freigabe</p><h2>Sicher zu Garmin</h2>

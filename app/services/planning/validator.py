@@ -4,6 +4,7 @@ from datetime import date
 SPORTS = {"running", "cycling", "walking", "hiking"}
 STEP_TYPES = {"warmup", "interval", "recovery", "cooldown"}
 DURATION_TYPES = {"time", "distance"}
+TARGET_TYPES = {"no_target", "pace"}
 
 
 @dataclass(frozen=True)
@@ -12,6 +13,9 @@ class StepInput:
     duration_type: str
     duration_value: float | None
     repeat_count: int = 1
+    target_type: str = "no_target"
+    target_min: float | None = None
+    target_max: float | None = None
 
 
 @dataclass(frozen=True)
@@ -41,7 +45,18 @@ def validate_workout(workout: WorkoutInput) -> None:
             raise WorkoutValidationError("Ein Trainingsschritt hat eine ungültige Dauer.")
         if step.duration_value is None or step.duration_value <= 0:
             raise WorkoutValidationError("Zeit und Distanz müssen größer als null sein.")
-        if step.duration_type == "distance" and step.step_type != "interval":
-            raise WorkoutValidationError("Distanz ist derzeit nur für Belastungsschritte möglich.")
         if not 1 <= step.repeat_count <= 50:
             raise WorkoutValidationError("Wiederholungen müssen zwischen 1 und 50 liegen.")
+        if step.target_type not in TARGET_TYPES:
+            raise WorkoutValidationError("Ein Trainingsschritt hat ein ungültiges Ziel.")
+        if step.target_type == "pace":
+            if workout.sport != "running":
+                raise WorkoutValidationError("Pace-Ziele sind derzeit nur beim Laufen möglich.")
+            if step.target_min is None or step.target_max is None:
+                raise WorkoutValidationError("Für ein Pace-Ziel beide Grenzen angeben.")
+            if step.target_min <= 0 or step.target_max <= 0:
+                raise WorkoutValidationError("Pace-Grenzen müssen größer als null sein.")
+            if step.target_min > step.target_max:
+                raise WorkoutValidationError(
+                    "Die schnelle Pace-Grenze darf nicht langsamer als die langsame sein."
+                )

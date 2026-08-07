@@ -1,0 +1,15 @@
+<article class="workout-step">
+  <div class="workout-step-heading">
+    <strong>Schritt <span x-text="String(index + 1).padStart(2, '0')"></span></strong>
+    <button type="button" class="step-remove" @click="removeStep(index)" :disabled="steps.length === 1">Entfernen</button>
+  </div>
+  <div class="workout-step-fields">
+    <label>Typ<select name="step_type" x-model="step.type"><option value="warmup">Aufwärmen</option><option value="interval">Belastung</option><option value="recovery">Erholung</option><option value="cooldown">Auslaufen</option></select></label>
+    <label>Bemessung<select name="duration_type" x-model="step.duration"><option value="time">Zeit</option><option value="distance">Distanz</option></select></label>
+    <label><span x-text="step.duration === 'time' ? 'Minuten' : 'Meter'"></span><input name="duration_value" type="number" min="0.1" step="0.1" required x-model="step.value"></label>
+    <label>Wiederholungen<input name="repeat_count" type="number" min="1" max="50" required x-model="step.repeats"></label>
+    <label>Ziel<select name="target_type" x-model="step.target"><option value="no_target">Kein Ziel</option><option value="pace">Pace-Bereich</option></select></label>
+    <label x-show="step.target === 'pace'">Schnelle Grenze<input name="target_min" type="text" inputmode="numeric" placeholder="3:55" x-model="step.targetMin"></label>
+    <label x-show="step.target === 'pace'">Langsame Grenze<input name="target_max" type="text" inputmode="numeric" placeholder="4:15" x-model="step.targetMax"></label>
+  </div>
+</article>
