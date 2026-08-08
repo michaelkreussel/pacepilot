@@ -13,16 +13,17 @@ from app.config import get_settings
 MAX_DETAIL_BYTES = 25 * 1024 * 1024
 
 
-def activity_details_path(started_at: datetime, activity_id: str) -> Path:
+def activity_details_path(
+    started_at: datetime, activity_id: str, user_id: int | None = None
+) -> Path:
     if not activity_id.isdecimal():
         raise ValueError("Garmin activity ID must be numeric")
-    return (
-        get_settings().data_dir
-        / "raw"
-        / "activities"
-        / str(started_at.year)
-        / f"{activity_id}.details.json.gz"
-    )
+    base = get_settings().data_dir / "raw" / "activities"
+    if user_id is not None:
+        if user_id < 1:
+            raise ValueError("User ID must be positive")
+        base /= f"user-{user_id}"
+    return base / str(started_at.year) / f"{activity_id}.details.json.gz"
 
 
 def write_activity_details(path: Path, details: dict[str, Any]) -> None:
@@ -208,10 +209,15 @@ def empty_activity_details(activity_type: str) -> dict[str, Any]:
 
 
 def load_activity_details(
-    started_at: datetime, activity_id: str, activity_type: str
+    started_at: datetime,
+    activity_id: str,
+    activity_type: str,
+    user_id: int | None = None,
 ) -> dict[str, Any]:
     try:
-        path = activity_details_path(started_at, activity_id)
+        path = activity_details_path(started_at, activity_id, user_id)
+        if user_id is not None and not path.is_file():
+            path = activity_details_path(started_at, activity_id)
         if not path.is_file() or path.stat().st_size > MAX_DETAIL_BYTES:
             return empty_activity_details(activity_type)
         with gzip.open(path, "rb") as raw_file:

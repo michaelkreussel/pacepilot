@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import get_settings
 from app.jobs.scheduler import start_scheduler, stop_scheduler
-from app.routes import activities, coach, dashboard, plans, settings, workouts
+from app.routes import activities, coach, dashboard, plans, profile, settings, workouts
 
 
 @asynccontextmanager
@@ -24,6 +24,7 @@ settings_config = get_settings()
 app = FastAPI(title=settings_config.app_name, lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 app.include_router(dashboard.router)
+app.include_router(profile.router)
 app.include_router(activities.router)
 app.include_router(plans.router)
 app.include_router(workouts.router)

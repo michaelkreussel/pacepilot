@@ -1,11 +1,11 @@
 {% extends "base.html" %}
 {% block title %}Aktivitäten · PacePilot{% endblock %}
 {% block content %}
-<div class="page-heading"><div><p class="eyebrow">Garmin-Protokoll</p><h1>Aktivitäten</h1><p>Deine zuletzt synchronisierten Einheiten.</p></div><a class="button" href="/settings">Garmin-Sync</a></div>
+<div class="page-heading"><div><p class="eyebrow">Garmin-Protokoll</p><h1>Aktivitäten</h1><p>{% if filters_active %}Gefilterter Zeitraum{% if from_date %} ab {{ from_date|date }}{% endif %}{% if to_date %} bis {{ to_date|date }}{% endif %}{% if sport %} · {{ sport|replace('_', ' ') }}{% endif %}.{% else %}Deine zuletzt synchronisierten Einheiten.{% endif %}</p></div>{% if filters_active %}<a class="button secondary" href="/activities">Filter zurücksetzen</a>{% else %}<a class="button" href="/settings">Garmin-Sync</a>{% endif %}</div>
 <section class="card table-card">
   {% if activities %}
   <div class="table-scroll"><table><thead><tr><th>Datum</th><th>Aktivität</th><th>Distanz</th><th>Dauer</th><th>Herzfrequenz</th><th></th></tr></thead>
   <tbody>{% for activity in activities %}<tr><td>{{ activity.started_at|datetime }}</td><td><strong>{{ activity.name }}</strong><small>{{ activity.activity_type|replace('_', ' ') }}</small></td><td>{{ activity.distance_m|distance }}</td><td>{{ activity.duration_s|duration }}</td><td>{{ activity.average_hr or '–' }}{% if activity.average_hr %} bpm{% endif %}</td><td><a class="row-link" href="/activities/{{ activity.id }}">Öffnen</a></td></tr>{% endfor %}</tbody></table></div>
-  {% else %}<div class="empty-state"><span class="empty-number">00</span><h2>Noch keine Aktivitäten</h2><p>Nach dem ersten Garmin-Sync werden deine Einheiten hier angezeigt.</p><a class="button" href="/settings">Garmin verbinden</a></div>{% endif %}
+  {% else %}<div class="empty-state"><span class="empty-number">00</span><h2>{% if filters_active %}Keine Aktivität in diesem Zeitraum{% else %}Noch keine Aktivitäten{% endif %}</h2><p>{% if filters_active %}Passe den Zeitraum an oder öffne die vollständige Historie.{% else %}Nach dem ersten Garmin-Sync werden deine Einheiten hier angezeigt.{% endif %}</p><a class="button" href="{{ '/activities' if filters_active else '/settings' }}">{{ 'Alle Aktivitäten' if filters_active else 'Garmin verbinden' }}</a></div>{% endif %}
 </section>
 {% endblock %}

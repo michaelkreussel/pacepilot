@@ -4,8 +4,11 @@ PacePilot ist ein kleiner, selbst gehosteter Trainingsbegleiter für Garmin Conn
 
 ## Aktueller Umfang
 
-- Garmin-Anmeldung mit lokal gespeichertem Token, ohne Passwortspeicherung in SQLite
-- Synchronisierung von Aktivitäten, Health-Tageswerten, Schlaf, HRV und Geräten
+- Garmin-Anmeldung mit kontobezogen gespeichertem Token, ohne Passwortspeicherung in SQLite
+- fortsetzbare historische Synchronisierung von Health-Tageswerten, Schlaf, HRV und Fitnesswerten
+- vollständiger, inkrementeller Aktivitätsverlauf mit Runden, Zonen und Krafttrainingssätzen
+- deterministische Gesundheits-, Readiness- und sportartspezifische Trainingsanalysen
+- Athletenprofil mit persönlichen Health-, Schlaf- und Trainingstrends
 - komprimierte Garmin-Aktivitätsantworten unter `data/raw/activities/`
 - Dashboard mit Erholungs- und Trainingsumfang-Trends
 - Aktivitätenliste und Detailansicht
@@ -41,7 +44,7 @@ Unter Windows kann die Beispieldatei einfach als `.env` dupliziert werden.
 
 ## Garmin verbinden
 
-Unter `Einstellungen` erfolgt die erste Anmeldung. Das Passwort wird nur an Garmin Connect weitergereicht. Der resultierende Token wird unter `GARMIN_TOKEN_DIR` gespeichert.
+Unter `Einstellungen` erfolgt die erste Anmeldung. Das Passwort wird nur an Garmin Connect weitergereicht. Der resultierende Token wird unter `GARMIN_TOKEN_DIR/account-<id>` gespeichert.
 
 Garmin Connect ist keine offizielle öffentliche API. MFA, Rate-Limits oder Änderungen auf Garmin-Seite können eine neue Anmeldung erforderlich machen. Bei MFA kann ein außerhalb der Weboberfläche erzeugter Token in `GARMIN_TOKEN_DIR` abgelegt werden. Ohne gültigen Token startet PacePilot weiterhin; nur Sync und Workout-Übertragung sind dann nicht verfügbar.
 
@@ -61,7 +64,9 @@ Der Container führt beim Start `alembic upgrade head` aus und startet genau ein
 | `DATA_DIR` | `./data` | Rohdaten und lokale Laufzeitdaten |
 | `GARMIN_TOKEN_DIR` | `./data/garmin-tokens` | Garmin-Tokenablage |
 | `SYNC_DAYS` | `14` | Zeitraum je Synchronisierung |
+| `HEALTH_SYNC_OVERLAP_DAYS` | `7` | erneut geladene aktuelle Health-Tage |
 | `SYNC_INTERVAL_MINUTES` | `60` | APScheduler-Intervall |
+| `GARMIN_CALL_DELAY_SECONDS` | `0.75` | Mindestabstand historischer Garmin-Abfragen |
 | `SCHEDULER_ENABLED` | `true` | Hintergrundjobs aktivieren |
 | `GARMIN_EMAIL`, `GARMIN_PASSWORD` | leer | optionale unbeaufsichtigte Neuanmeldung |
 | `LLM_API_KEY` | leer | OpenRouter API-Key für den KI-Coach |

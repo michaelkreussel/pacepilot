@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from functools import partial
 from typing import Annotated
 from urllib.parse import urlencode
 
@@ -91,7 +92,14 @@ async def connect_account(
     user = get_or_create_default_user(session)
     account = get_or_create_garmin_account(session, user)
     try:
-        await run_in_threadpool(connect_garmin, email.strip(), password)
+        await run_in_threadpool(
+            partial(
+                connect_garmin,
+                email.strip(),
+                password,
+                account_id=account.id,
+            )
+        )
     except Exception as exc:
         account.sync_status = "error"
         account.sync_error = message_from_exception(exc)

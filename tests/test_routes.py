@@ -30,7 +30,15 @@ def _workout_data(
 
 
 def test_main_pages_render(client: TestClient) -> None:
-    for path in ("/", "/activities", "/plans", "/workouts/new", "/coach", "/settings"):
+    for path in (
+        "/",
+        "/profile",
+        "/activities",
+        "/plans",
+        "/workouts/new",
+        "/coach",
+        "/settings",
+    ):
         response = client.get(path)
         assert response.status_code == 200
         assert "PacePilot" in response.text
@@ -102,7 +110,9 @@ def test_health_refresh_fetches_current_steps(
         account.connected_at = datetime.now(UTC).replace(tzinfo=None)
         session.commit()
 
-    monkeypatch.setattr(sync_module, "connect_garmin", lambda: FakeGarmin())
+    monkeypatch.setattr(
+        sync_module, "connect_garmin_account", lambda _session, _account: FakeGarmin()
+    )
 
     response = client.post("/health")
 
