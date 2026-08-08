@@ -1,10 +1,12 @@
 from typing import Any
 
+from fastapi.responses import RedirectResponse
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.auth import oauth
+from app.config import get_settings
 from app.models import OAuthIdentity, User
 
 
@@ -78,3 +80,45 @@ def test_logout_clears_session(unauthenticated_client: TestClient, monkeypatch: 
     assert response.status_code == 303
     assert response.headers["location"] == "/login"
     assert unauthenticated_client.get("/", follow_redirects=False).status_code == 303
+
+
+class RecordingClient:
+    def __init__(self) -> None:
+        self.redirect_uri: str | None = None
+
+    async def authorize_redirect(self, request: Any, redirect_uri: str) -> Any:
+        self.redirect_uri = redirect_uri
+        return RedirectResponse("https://example.com/authorize", status_code=302)
+
+
+def test_oauth_login_uses_public_base_url_for_redirect_uri(
+    unauthenticated_client: TestClient, monkeypatch: Any
+) -> None:
+    monkeypatch.setattr(get_settings(), "public_base_url", "https://example.com")
+    recording = RecordingClient()
+    monkeypatch.setattr(
+        oauth,
+        "create_client",
+        lambda provider: recording if provider == "google" else None,
+    )
+
+    response = unauthenticated_client.get("/auth/google/login", follow_redirects=False)
+
+    assert response.status_code == 302
+    assert recording.redirect_uri == "https://example.com/auth/google/callback"
+
+
+def test_oauth_login_redirect_uri_falls_back_to_request_url(
+    unauthenticated_client: TestClient, monkeypatch: Any
+) -> None:
+    monkeypatch.setattr(get_settings(), "public_base_url", None)
+    recording = RecordingClient()
+    monkeypatch.setattr(
+        oauth,
+        "create_client",
+        lambda provider: recording if provider == "google" else None,
+    )
+
+    unauthenticated_client.get("/auth/google/login", follow_redirects=False)
+
+    assert recording.redirect_uri == "http://testserver/auth/google/callback"
