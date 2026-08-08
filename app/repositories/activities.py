@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime, time, timedelta
 
 from sqlalchemy import Select, select
 from sqlalchemy.orm import Session, selectinload
@@ -7,11 +7,44 @@ from app.models import Activity, ActivityExerciseSet, ActivitySplit, ActivityZon
 
 
 def activity_query(user_id: int) -> Select[tuple[Activity]]:
-    return select(Activity).where(Activity.user_id == user_id).order_by(Activity.started_at.desc())
+    return (
+        select(Activity)
+        .where(Activity.user_id == user_id)
+        .order_by(Activity.started_at.desc(), Activity.id.desc())
+    )
 
 
 def list_activities(session: Session, user_id: int, limit: int = 100) -> list[Activity]:
     return list(session.scalars(activity_query(user_id).limit(limit)))
+
+
+def list_activities_on_or_before(
+    session: Session, user_id: int, through: datetime, limit: int = 100
+) -> list[Activity]:
+    return list(
+        session.scalars(activity_query(user_id).where(Activity.started_at <= through).limit(limit))
+    )
+
+
+def list_activities_filtered(
+    session: Session,
+    user_id: int,
+    *,
+    start: date | None = None,
+    end: date | None = None,
+    sport: str | None = None,
+    limit: int = 100,
+) -> list[Activity]:
+    query = activity_query(user_id)
+    if start is not None:
+        query = query.where(Activity.started_at >= datetime.combine(start, time.min))
+    if end is not None:
+        query = query.where(
+            Activity.started_at < datetime.combine(end + timedelta(days=1), time.min)
+        )
+    if sport is not None:
+        query = query.where(Activity.activity_type == sport)
+    return list(session.scalars(query.limit(limit)))
 
 
 def find_activity(session: Session, user_id: int, activity_id: int) -> Activity | None:
@@ -89,3 +122,21 @@ def replace_activity_exercise_sets(
 
 def activities_since(session: Session, user_id: int, since: datetime) -> list[Activity]:
     return list(session.scalars(activity_query(user_id).where(Activity.started_at >= since)))
+
+
+def activities_between(
+    session: Session,
+    user_id: int,
+    start: datetime,
+    end: datetime,
+    *,
+    include_zones: bool = False,
+) -> list[Activity]:
+    query = select(Activity).where(
+        Activity.user_id == user_id,
+        Activity.started_at >= start,
+        Activity.started_at < end,
+    )
+    if include_zones:
+        query = query.options(selectinload(Activity.zones))
+    return list(session.scalars(query.order_by(Activity.started_at, Activity.id)))

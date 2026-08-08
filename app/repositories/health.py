@@ -53,6 +53,31 @@ def health_between(session: Session, user_id: int, start: date, end: date) -> li
     )
 
 
+def health_metrics_between(
+    session: Session, user_id: int, start: date, end: date
+) -> list[DailyHealth]:
+    return list(
+        session.scalars(
+            select(DailyHealth)
+            .where(
+                DailyHealth.user_id == user_id,
+                DailyHealth.day >= start,
+                DailyHealth.day <= end,
+            )
+            .order_by(DailyHealth.day)
+        )
+    )
+
+
+def latest_health_on_or_before(session: Session, user_id: int, day: date) -> DailyHealth | None:
+    return session.scalar(
+        select(DailyHealth)
+        .where(DailyHealth.user_id == user_id, DailyHealth.day <= day)
+        .order_by(DailyHealth.day.desc())
+        .limit(1)
+    )
+
+
 def replace_sleep_stages(
     session: Session, health: DailyHealth, stages: Iterable[SleepStage]
 ) -> None:

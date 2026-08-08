@@ -7,6 +7,8 @@ PacePilot ist ein kleiner, selbst gehosteter Trainingsbegleiter für Garmin Conn
 - Garmin-Anmeldung mit kontobezogen gespeichertem Token, ohne Passwortspeicherung in SQLite
 - fortsetzbare historische Synchronisierung von Health-Tageswerten, Schlaf, HRV und Fitnesswerten
 - vollständiger, inkrementeller Aktivitätsverlauf mit Runden, Zonen und Krafttrainingssätzen
+- deterministische Gesundheits-, Readiness- und sportartspezifische Trainingsanalysen
+- Athletenprofil mit persönlichen Health-, Schlaf- und Trainingstrends
 - komprimierte Garmin-Aktivitätsantworten unter `data/raw/activities/`
 - Dashboard mit Erholungs- und Trainingsumfang-Trends
 - Aktivitätenliste und Detailansicht

@@ -84,8 +84,10 @@ Missing components should be omitted and remaining weights normalized, never rep
 Confidence should reflect available component coverage and baseline history length. This makes the
 score useful on the current watch while clearly communicating when it rests on limited data.
 
-The calculation belongs in the deterministic analytics service rather than a database column. This
-prevents stale derived values when baselines or the documented formula change.
+The calculation is implemented by `AthleteDataService.get_current_recovery_state()` in the
+deterministic analytics service rather than a database column. This prevents stale derived values
+when baselines or the documented formula change. See `docs/athlete-trends.md` for its versioned input
+weights and missing-data behavior.
 
 ## Sleep Presentation
 
@@ -110,6 +112,7 @@ because sleep stages are categorical intervals.
 
 ## Deferred Work
 
-Task 3 will map and backfill the audited health/recovery responses into these tables. Task 4 will map
-the complete activity history and determine the final split/set extraction details. Task 5 will
-implement trends and PacePilot Readiness. Task 6 will build the sleep and training visualizations.
+Tasks 3 and 4 populated health/recovery and complete activity history. Task 5 provides health and
+training trends plus PacePilot Readiness through a deterministic service. Task 6 now exposes those
+summaries through the Athlete Profile; timezone-safe detailed sleep-stage presentation remains a
+documented follow-up.

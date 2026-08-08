@@ -20,6 +20,16 @@ def get_or_create_sync_state(session: Session, user_id: int, resource: str) -> G
     return state
 
 
+def sync_states_for_user(session: Session, user_id: int) -> list[GarminSyncState]:
+    return list(
+        session.scalars(
+            select(GarminSyncState)
+            .where(GarminSyncState.user_id == user_id)
+            .order_by(GarminSyncState.resource)
+        )
+    )
+
+
 def mark_sync_attempt(state: GarminSyncState) -> None:
     state.status = "running"
     state.last_attempt_at = utcnow()

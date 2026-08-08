@@ -32,3 +32,12 @@ def fitness_between(session: Session, user_id: int, start: date, end: date) -> l
             .order_by(DailyFitness.day)
         )
     )
+
+
+def latest_fitness_on_or_before(session: Session, user_id: int, day: date) -> DailyFitness | None:
+    return session.scalar(
+        select(DailyFitness)
+        .where(DailyFitness.user_id == user_id, DailyFitness.day <= day)
+        .order_by(DailyFitness.day.desc())
+        .limit(1)
+    )

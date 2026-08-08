@@ -30,7 +30,15 @@ def _workout_data(
 
 
 def test_main_pages_render(client: TestClient) -> None:
-    for path in ("/", "/activities", "/plans", "/workouts/new", "/coach", "/settings"):
+    for path in (
+        "/",
+        "/profile",
+        "/activities",
+        "/plans",
+        "/workouts/new",
+        "/coach",
+        "/settings",
+    ):
         response = client.get(path)
         assert response.status_code == 200
         assert "PacePilot" in response.text

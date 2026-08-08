@@ -1,0 +1,161 @@
+{% extends "base.html" %}
+{% block title %}Athletenprofil · PacePilot{% endblock %}
+{% block head %}
+  <link rel="stylesheet" href="{{ url_for('static', path='/css/profile.css') }}?v=20260808-1">
+  <link rel="stylesheet" href="{{ url_for('static', path='/css/profile-accessibility.css') }}?v=20260808-1">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js" defer></script>
+  <script src="{{ url_for('static', path='/js/profile.js') }}?v=20260808-1" defer></script>
+{% endblock %}
+{% block content %}
+<div class="page-heading profile-heading">
+  <div>
+    <p class="eyebrow">Athletenprofil</p>
+    <h1>{{ user.display_name }}, in Bewegung.</h1>
+    <p>Gesundheit, Erholung und Training in einem persönlichen Verlauf.</p>
+  </div>
+  <div class="profile-window">
+    <span>{{ start|date }} – {{ end|date }}</span>
+    <strong>{{ period_label }}</strong>
+  </div>
+</div>
+
+<nav class="profile-periods" aria-label="Zeitraum">
+  {% for option in period_options %}
+    <a class="{{ 'active' if option.key == period else '' }}" href="/profile?period={{ option.key }}&end={{ end.isoformat() }}">{{ option.label }}</a>
+  {% endfor %}
+</nav>
+
+<section class="readiness-card {{ recovery.pacepilot_readiness_label or 'unavailable' }}">
+  <div class="readiness-copy">
+    <p class="eyebrow light">{% if is_today %}Heute{% else %}Stand {{ end|date }}{% endif %} · PacePilot Readiness</p>
+    {% if recovery.pacepilot_readiness_score is not none %}
+      <h2>{{ readiness_label }}</h2>
+      <p>Eine transparente PacePilot-Einschätzung aus deinen verfügbaren Gesundheits- und Belastungsdaten. Kein Garmin-Score.</p>
+      <div class="readiness-meta">
+        <span>{{ recovery.pacepilot_readiness_confidence|round|int }}% Datenvertrauen</span>
+        <span>Formel {{ recovery.pacepilot_readiness_formula_version }}</span>
+      </div>
+    {% else %}
+      <h2>Noch keine belastbare Einschätzung</h2>
+      <p>Sobald Schlaf, HRV oder Ruhepuls synchronisiert sind, entsteht hier dein persönlicher Erholungszustand.</p>
+      <a class="button button-light" href="/settings">Garmin-Sync prüfen</a>
+    {% endif %}
+  </div>
+  {% if recovery.pacepilot_readiness_score is not none %}
+    <div class="readiness-score" style="--readiness: {{ recovery.pacepilot_readiness_score }}">
+      <div><strong>{{ recovery.pacepilot_readiness_score|round|int }}</strong><span>/ 100</span></div>
+    </div>
+    <div class="readiness-components" aria-label="Readiness-Komponenten">
+      {% for component in readiness_components %}
+        <div class="readiness-component">
+          <div><span>{{ component.label }} · {{ component.weight }}%</span><strong>{{ component.score|round|int }}</strong></div>
+          <div class="component-track"><span style="width: {{ component.score }}%"></span></div>
+        </div>
+      {% endfor %}
+    </div>
+  {% endif %}
+</section>
+
+{% if metric_cards %}
+<section class="profile-section" aria-labelledby="current-state-title">
+  <div class="profile-section-heading">
+    <div><p class="eyebrow">{% if is_today %}Aktueller Zustand{% else %}Historischer Zustand{% endif %}</p><h2 id="current-state-title">Was am {{ end|date }} verfügbar ist</h2></div>
+    {% if recovery.health_day %}<span class="section-note">Health-Stand {{ recovery.health_day|date }}</span>{% endif %}
+  </div>
+  <div class="profile-metric-grid">
+    {% for card in metric_cards %}
+      <article class="profile-metric {{ card.tone }}">
+        <span>{{ card.label }}</span>
+        <strong>{{ card.value }}</strong>
+        {% if card.note %}<p>{{ card.note }}</p>{% endif %}
+        {% if card.source_day %}<small>Stand {{ card.source_day|date }}</small>{% endif %}
+      </article>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
+<section class="profile-section" id="gesundheit" aria-labelledby="health-title">
+  <div class="profile-section-heading">
+    <div><p class="eyebrow">Persönliche Trends</p><h2 id="health-title">Gesundheit & Erholung</h2></div>
+    <span class="section-note">Lücken bleiben Lücken, nie Nullwerte.</span>
+  </div>
+  {% if health_notices %}<div class="profile-notices">{% for notice in health_notices %}<p>{{ notice }}</p>{% endfor %}</div>{% endif %}
+  {% if health_charts %}
+    <div class="profile-chart-grid">
+      {% for chart in health_charts %}
+        <article class="card profile-chart-card">
+          <div class="chart-heading"><div><p class="eyebrow">{{ chart.kicker }}</p><h3>{{ chart.title }}</h3></div><span>{{ chart.unit }}</span></div>
+          <div class="profile-chart-frame"><canvas id="{{ chart.id }}" aria-label="{{ chart.title }}" role="img">Diagramm für {{ chart.title }} ist ohne JavaScript nicht verfügbar.</canvas></div>
+          {% if chart.summary %}<div class="chart-summary" aria-label="Letzte verfügbare Werte">{% for item in chart.summary %}<span>{{ item.label }} <strong>{{ item.value|string|replace('.', ',') }} {{ item.unit }}</strong></span>{% endfor %}</div>{% endif %}
+          {% if chart.drilldown_url %}<a class="chart-data-link" href="{{ chart.drilldown_url }}">Datenpunkt öffnen →</a>{% endif %}
+        </article>
+      {% endfor %}
+    </div>
+  {% else %}
+    <div class="card profile-empty"><span>Keine Gesundheitswerte im gewählten Zeitraum.</span><p>Prüfe den Garmin-Sync oder wähle einen längeren Zeitraum.</p></div>
+  {% endif %}
+</section>
+
+<section class="profile-section" id="training" aria-labelledby="training-title">
+  <div class="profile-section-heading">
+    <div><p class="eyebrow">Trainingstrends</p><h2 id="training-title">Belastung mit Kontext</h2></div>
+    {% if training.history_complete %}<span class="coverage-pill complete">Historie vollständig</span>{% elif training.data_status == 'not_synced' %}<span class="coverage-pill">Nicht synchronisiert</span>{% else %}<span class="coverage-pill partial">Historie teilweise</span>{% endif %}
+  </div>
+  {% if not training_show_data %}
+    <div class="card profile-empty"><span>Trainingshistorie noch nicht belastbar</span><p>Die Synchronisierung ist nicht vollständig. Verfügbare Lücken werden deshalb nicht als null Workouts gewertet.</p><a class="button" href="/settings">Synchronisierung öffnen</a></div>
+  {% else %}
+    <div class="training-stat-strip">
+      {% for label, value in training_stats %}<div><span>{{ label }}</span><strong>{{ value }}</strong></div>{% endfor %}
+    </div>
+    {% if training_charts %}
+      <div class="profile-chart-grid training-chart-grid">
+        {% for chart in training_charts %}
+          <article class="card profile-chart-card {{ 'compact-chart' if chart.type == 'doughnut' else '' }}">
+            <div class="chart-heading"><div><p class="eyebrow">{{ chart.kicker }}</p><h3>{{ chart.title }}</h3></div><span>{{ chart.unit }}</span></div>
+            <div class="profile-chart-frame"><canvas id="{{ chart.id }}" aria-label="{{ chart.title }}" role="img">Diagramm für {{ chart.title }} ist ohne JavaScript nicht verfügbar.</canvas></div>
+            {% if chart.summary %}<div class="chart-summary" aria-label="Letzte verfügbare Werte">{% for item in chart.summary %}<span>{{ item.label }} <strong>{{ item.value|string|replace('.', ',') }} {{ item.unit }}</strong></span>{% endfor %}</div>{% endif %}
+            {% if chart.drilldown_url %}<a class="chart-data-link" href="{{ chart.drilldown_url }}">Aktivitäten im Zeitraum öffnen →</a>{% endif %}
+          </article>
+        {% endfor %}
+      </div>
+    {% elif training.workouts == 0 %}
+      <div class="card profile-empty compact"><span>Keine Workouts in diesem Zeitraum</span><p>Die synchronisierte Historie enthält hier keine Einheit.</p></div>
+    {% endif %}
+
+    {% if sport_volumes %}
+      <article class="card sport-volume-card">
+        <div class="chart-heading"><div><p class="eyebrow">Sportarten</p><h3>Volumen bleibt getrennt</h3></div></div>
+        <div class="sport-volume-list">
+          {% for sport in sport_volumes %}
+            <div><strong>{{ sport.sport }}</strong><span>{{ sport.workouts }} Workouts</span><span>{{ sport.duration }}</span>{% if sport.distance %}<span>{{ sport.distance }}</span>{% endif %}{% if sport.elevation %}<span>{{ sport.elevation }}</span>{% endif %}</div>
+          {% endfor %}
+        </div>
+      </article>
+    {% endif %}
+  {% endif %}
+</section>
+
+<section class="profile-section" aria-labelledby="recent-title">
+  <div class="profile-section-heading">
+    <div><p class="eyebrow">Drill-down</p><h2 id="recent-title">Jüngste Einheiten</h2></div>
+    <a class="text-link" href="/activities">Alle Aktivitäten →</a>
+  </div>
+  {% if recent_workouts %}
+    <div class="recent-workout-grid">
+      {% for workout in recent_workouts %}
+        <a class="recent-workout" href="/activities/{{ workout.id }}">
+          <div><span>{{ workout.started_at|date }} · {{ workout.sport }}</span>{% if workout.hard %}<b>Hoher Reiz</b>{% endif %}</div>
+          <h3>{{ workout.name }}</h3>
+          <p>{{ workout.duration }}{% if workout.distance %} · {{ workout.distance }}{% endif %}{% if workout.training_effect is not none %} · TE {{ workout.training_effect }}{% endif %}</p>
+          <strong>Analysieren →</strong>
+        </a>
+      {% endfor %}
+    </div>
+  {% else %}
+    <div class="card profile-empty compact"><span>Noch keine Aktivität zum Öffnen</span></div>
+  {% endif %}
+</section>
+
+<script id="profile-data" type="application/json">{{ chart_data|tojson }}</script>
+{% endblock %}

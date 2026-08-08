@@ -1,8 +1,11 @@
-from fastapi import APIRouter, HTTPException, Request
+from datetime import date
+from typing import Annotated
+
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 
 from app.database import SessionDep
-from app.repositories.activities import find_activity, list_activities
+from app.repositories.activities import find_activity, list_activities_filtered
 from app.repositories.users import get_or_create_default_user
 from app.services.garmin.activity_details import load_activity_details
 from app.web import context, templates
@@ -11,7 +14,15 @@ router = APIRouter(prefix="/activities")
 
 
 @router.get("", response_class=HTMLResponse)
-def activities(request: Request, session: SessionDep) -> HTMLResponse:
+def activities(
+    request: Request,
+    session: SessionDep,
+    from_date: Annotated[date | None, Query(alias="from")] = None,
+    to_date: Annotated[date | None, Query(alias="to")] = None,
+    sport: str | None = None,
+) -> HTMLResponse:
+    if from_date is not None and to_date is not None and from_date > to_date:
+        raise HTTPException(status_code=400, detail="Der Start darf nicht nach dem Ende liegen")
     user = get_or_create_default_user(session)
     return templates.TemplateResponse(
         request,
@@ -19,7 +30,17 @@ def activities(request: Request, session: SessionDep) -> HTMLResponse:
         context(
             request,
             active_page="activities",
-            activities=list_activities(session, user.id),
+            activities=list_activities_filtered(
+                session,
+                user.id,
+                start=from_date,
+                end=to_date,
+                sport=sport,
+            ),
+            from_date=from_date,
+            to_date=to_date,
+            sport=sport,
+            filters_active=from_date is not None or to_date is not None or sport is not None,
         ),
     )
 
