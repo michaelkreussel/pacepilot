@@ -13,13 +13,18 @@ from app.models import GarminAccount, SyncRun
 from app.models.user import utcnow
 from app.repositories.users import get_or_create_garmin_account
 from app.services.garmin.client import (
+    GarminMfaExpiredError,
     GarminUnavailableError,
-    connect_garmin,
+    cancel_garmin_login,
+    finish_garmin_login,
     message_from_exception,
+    pending_garmin_login,
+    start_garmin_login,
 )
 from app.web import context, templates
 
 router = APIRouter(prefix="/settings")
+GARMIN_MFA_SESSION_KEY = "garmin_mfa_challenge"
 
 
 def _latest_sync(session: SessionDep, user_id: int) -> SyncRun | None:
@@ -56,11 +61,28 @@ def settings_page(
     error: str | None = None,
 ) -> HTMLResponse:
     account = get_or_create_garmin_account(session, user)
+    challenge_id = request.session.get(GARMIN_MFA_SESSION_KEY)
+    mfa_required = pending_garmin_login(
+        challenge_id if isinstance(challenge_id, str) else None,
+        account_id=account.id,
+        user_id=user.id,
+    )
+    if not mfa_required:
+        request.session.pop(GARMIN_MFA_SESSION_KEY, None)
+        if account.sync_status == "mfa_required":
+            account.sync_status = "not_connected"
+            session.commit()
     values = _sync_view(account, _latest_sync(session, user.id))
     return templates.TemplateResponse(
         request,
         "settings.html",
-        context(request, active_page="settings", error=error, **values),
+        context(
+            request,
+            active_page="settings",
+            error=error,
+            mfa_required=mfa_required,
+            **values,
+        ),
     )
 
 
@@ -76,14 +98,27 @@ def sync_status(request: Request, session: SessionDep, user: CurrentUser) -> HTM
 
 @router.post("/garmin/connect", response_class=RedirectResponse, status_code=303)
 def connect_account(
+    request: Request,
     session: SessionDep,
     user: CurrentUser,
     email: Annotated[str, Form()],
     password: Annotated[str, Form()],
 ) -> RedirectResponse:
     account = get_or_create_garmin_account(session, user)
+    previous_challenge = request.session.pop(GARMIN_MFA_SESSION_KEY, None)
+    cancel_garmin_login(
+        previous_challenge if isinstance(previous_challenge, str) else None,
+        account_id=account.id,
+        user_id=user.id,
+    )
+    normalized_email = email.strip()
     try:
-        connect_garmin(email.strip(), password, account_id=account.id)
+        challenge_id = start_garmin_login(
+            normalized_email,
+            password,
+            account_id=account.id,
+            user_id=user.id,
+        )
     except GarminUnavailableError as exc:
         account.sync_status = "error"
         account.sync_error = message_from_exception(exc)
@@ -91,9 +126,76 @@ def connect_account(
         return RedirectResponse(
             f"/settings?{urlencode({'error': account.sync_error})}", status_code=303
         )
-    account.email = email.strip()
+    if challenge_id is not None:
+        request.session[GARMIN_MFA_SESSION_KEY] = challenge_id
+        account.sync_status = "mfa_required"
+        account.sync_error = None
+        session.commit()
+        return RedirectResponse("/settings", status_code=303)
+
+    account.email = normalized_email
     account.connected_at = datetime.now(UTC).replace(tzinfo=None)
     account.sync_status = "connected"
+    account.sync_error = None
+    session.commit()
+    return RedirectResponse("/settings", status_code=303)
+
+
+@router.post("/garmin/mfa", response_class=RedirectResponse, status_code=303)
+def verify_garmin_mfa(
+    request: Request,
+    session: SessionDep,
+    user: CurrentUser,
+    code: Annotated[str, Form()],
+) -> RedirectResponse:
+    account = get_or_create_garmin_account(session, user)
+    challenge_id = request.session.get(GARMIN_MFA_SESSION_KEY)
+    try:
+        email = finish_garmin_login(
+            challenge_id if isinstance(challenge_id, str) else None,
+            code,
+            account_id=account.id,
+            user_id=user.id,
+        )
+    except GarminMfaExpiredError as exc:
+        request.session.pop(GARMIN_MFA_SESSION_KEY, None)
+        account.sync_status = "error"
+        account.sync_error = message_from_exception(exc)
+        session.commit()
+        return RedirectResponse(
+            f"/settings?{urlencode({'error': account.sync_error})}", status_code=303
+        )
+    except GarminUnavailableError as exc:
+        account.sync_status = "mfa_required"
+        account.sync_error = message_from_exception(exc)
+        session.commit()
+        return RedirectResponse(
+            f"/settings?{urlencode({'error': account.sync_error})}", status_code=303
+        )
+
+    request.session.pop(GARMIN_MFA_SESSION_KEY, None)
+    account.email = email
+    account.connected_at = datetime.now(UTC).replace(tzinfo=None)
+    account.sync_status = "connected"
+    account.sync_error = None
+    session.commit()
+    return RedirectResponse("/settings", status_code=303)
+
+
+@router.post("/garmin/mfa/cancel", response_class=RedirectResponse, status_code=303)
+def cancel_garmin_mfa(
+    request: Request,
+    session: SessionDep,
+    user: CurrentUser,
+) -> RedirectResponse:
+    account = get_or_create_garmin_account(session, user)
+    challenge_id = request.session.pop(GARMIN_MFA_SESSION_KEY, None)
+    cancel_garmin_login(
+        challenge_id if isinstance(challenge_id, str) else None,
+        account_id=account.id,
+        user_id=user.id,
+    )
+    account.sync_status = "not_connected"
     account.sync_error = None
     session.commit()
     return RedirectResponse("/settings", status_code=303)

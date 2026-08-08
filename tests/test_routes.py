@@ -100,6 +100,88 @@ def test_sync_status_partial_renders(client: TestClient) -> None:
     assert 'id="sync-progress"' in response.text
 
 
+def test_garmin_connect_without_mfa_marks_account_connected(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: Any,
+) -> None:
+    login_calls: list[tuple[str, str, int, int]] = []
+
+    def start_login(email: str, password: str, *, account_id: int, user_id: int) -> None:
+        login_calls.append((email, password, account_id, user_id))
+
+    monkeypatch.setattr(settings_module, "start_garmin_login", start_login)
+
+    response = client.post(
+        "/settings/garmin/connect",
+        data={"email": " runner@example.com ", "password": "secret"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/settings"
+    with session_factory() as session:
+        account = session.scalar(select(GarminAccount))
+        assert account is not None
+        assert login_calls == [("runner@example.com", "secret", account.id, account.user_id)]
+        assert account.email == "runner@example.com"
+        assert account.connected_at is not None
+        assert account.sync_status == "connected"
+
+
+def test_garmin_connect_with_mfa_requests_and_verifies_code(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: Any,
+) -> None:
+    challenge_id = "challenge-123"
+    verification_calls: list[tuple[str | None, str, int, int]] = []
+    monkeypatch.setattr(
+        settings_module, "start_garmin_login", lambda *_args, **_kwargs: challenge_id
+    )
+    monkeypatch.setattr(
+        settings_module,
+        "pending_garmin_login",
+        lambda candidate, **_kwargs: candidate == challenge_id,
+    )
+
+    def finish_login(candidate: str | None, code: str, *, account_id: int, user_id: int) -> str:
+        verification_calls.append((candidate, code, account_id, user_id))
+        return "runner@example.com"
+
+    monkeypatch.setattr(settings_module, "finish_garmin_login", finish_login)
+
+    started = client.post(
+        "/settings/garmin/connect",
+        data={"email": "runner@example.com", "password": "secret"},
+        follow_redirects=False,
+    )
+    mfa_page = client.get("/settings")
+
+    assert started.status_code == 303
+    assert "Anmeldung bestätigen" in mfa_page.text
+    assert 'autocomplete="one-time-code"' in mfa_page.text
+    with session_factory() as session:
+        account = session.scalar(select(GarminAccount))
+        assert account is not None
+        assert account.email is None
+        assert account.connected_at is None
+        assert account.sync_status == "mfa_required"
+        account_id = account.id
+        user_id = account.user_id
+
+    verified = client.post("/settings/garmin/mfa", data={"code": "123456"}, follow_redirects=False)
+
+    assert verified.status_code == 303
+    assert verification_calls == [(challenge_id, "123456", account_id, user_id)]
+    with session_factory() as session:
+        account = session.get(GarminAccount, account_id)
+        assert account is not None
+        assert account.email == "runner@example.com"
+        assert account.connected_at is not None
+        assert account.sync_status == "connected"
+
+
 def test_health_refresh_fetches_current_steps(
     client: TestClient,
     session_factory: sessionmaker[Session],

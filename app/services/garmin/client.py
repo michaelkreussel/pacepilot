@@ -1,8 +1,16 @@
 import logging
+import secrets
+import threading
+import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from garminconnect import Garmin
+from garminconnect.exceptions import (
+    GarminConnectAuthenticationError,
+    GarminConnectTooManyRequestsError,
+)
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -13,6 +21,27 @@ logger = logging.getLogger("uvicorn.error")
 
 class GarminUnavailableError(RuntimeError):
     pass
+
+
+class GarminMfaExpiredError(GarminUnavailableError):
+    pass
+
+
+MFA_CHALLENGE_TTL_SECONDS = 10 * 60
+
+
+@dataclass
+class _PendingMfaLogin:
+    client: Garmin
+    email: str
+    account_id: int
+    user_id: int
+    token_directory: Path
+    created_at: float
+
+
+_pending_mfa_logins: dict[str, _PendingMfaLogin] = {}
+_pending_mfa_lock = threading.Lock()
 
 
 def _token_directory(account_id: int | None) -> Path:
@@ -27,6 +56,121 @@ def _token_directory(account_id: int | None) -> Path:
     token_dir = base_dir / f"account-{account_id}"
     token_dir.mkdir(parents=True, exist_ok=True)
     return token_dir
+
+
+def _login_error(exc: Exception, *, mfa: bool = False) -> GarminUnavailableError:
+    if isinstance(exc, GarminConnectTooManyRequestsError):
+        return GarminUnavailableError(
+            "Zu viele Garmin-Anmeldeversuche. Bitte warte einige Minuten."
+        )
+    if isinstance(exc, GarminConnectAuthenticationError):
+        message = (
+            "Der Bestätigungscode ist ungültig oder abgelaufen."
+            if mfa
+            else "E-Mail-Adresse oder Passwort ist ungültig."
+        )
+        return GarminUnavailableError(message)
+    return GarminUnavailableError("Garmin Connect ist derzeit nicht erreichbar.")
+
+
+def _remove_expired_mfa_logins() -> None:
+    cutoff = time.monotonic() - MFA_CHALLENGE_TTL_SECONDS
+    expired = [
+        challenge_id
+        for challenge_id, login in _pending_mfa_logins.items()
+        if login.created_at < cutoff
+    ]
+    for challenge_id in expired:
+        del _pending_mfa_logins[challenge_id]
+
+
+def start_garmin_login(email: str, password: str, *, account_id: int, user_id: int) -> str | None:
+    """Start a credential login and return an opaque challenge ID when MFA is required."""
+    token_directory = _token_directory(account_id)
+    try:
+        client = Garmin(email=email, password=password, return_on_mfa=True)
+        mfa_status, _ = client.login()
+    except Exception as exc:
+        logger.exception("Garmin login failed")
+        raise _login_error(exc) from exc
+
+    if mfa_status != "needs_mfa":
+        try:
+            client.client.dump(str(token_directory))
+        except Exception as exc:
+            logger.exception("Garmin token persistence failed")
+            raise GarminUnavailableError(
+                "Der Garmin-Token konnte nicht gespeichert werden."
+            ) from exc
+        return None
+
+    client.password = None
+    challenge_id = secrets.token_urlsafe(32)
+    with _pending_mfa_lock:
+        _remove_expired_mfa_logins()
+        for existing_id, login in list(_pending_mfa_logins.items()):
+            if login.account_id == account_id or login.user_id == user_id:
+                del _pending_mfa_logins[existing_id]
+        _pending_mfa_logins[challenge_id] = _PendingMfaLogin(
+            client=client,
+            email=email,
+            account_id=account_id,
+            user_id=user_id,
+            token_directory=token_directory,
+            created_at=time.monotonic(),
+        )
+    return challenge_id
+
+
+def pending_garmin_login(challenge_id: str | None, *, account_id: int, user_id: int) -> bool:
+    if challenge_id is None:
+        return False
+    with _pending_mfa_lock:
+        _remove_expired_mfa_logins()
+        login = _pending_mfa_logins.get(challenge_id)
+        return login is not None and login.account_id == account_id and login.user_id == user_id
+
+
+def finish_garmin_login(
+    challenge_id: str | None,
+    mfa_code: str,
+    *,
+    account_id: int,
+    user_id: int,
+) -> str:
+    """Complete a pending MFA login, persist its token, and return the Garmin email."""
+    if challenge_id is None:
+        raise GarminMfaExpiredError(
+            "Die Garmin-Anmeldung ist abgelaufen. Bitte melde dich erneut an."
+        )
+
+    with _pending_mfa_lock:
+        _remove_expired_mfa_logins()
+        login = _pending_mfa_logins.get(challenge_id)
+    if login is None or login.account_id != account_id or login.user_id != user_id:
+        raise GarminMfaExpiredError(
+            "Die Garmin-Anmeldung ist abgelaufen. Bitte melde dich erneut an."
+        )
+
+    try:
+        login.client.resume_login({}, mfa_code.strip())
+        login.client.client.dump(str(login.token_directory))
+    except Exception as exc:
+        logger.exception("Garmin MFA verification failed")
+        raise _login_error(exc, mfa=True) from exc
+
+    with _pending_mfa_lock:
+        _pending_mfa_logins.pop(challenge_id, None)
+    return login.email
+
+
+def cancel_garmin_login(challenge_id: str | None, *, account_id: int, user_id: int) -> None:
+    if challenge_id is None:
+        return
+    with _pending_mfa_lock:
+        login = _pending_mfa_logins.get(challenge_id)
+        if login is not None and login.account_id == account_id and login.user_id == user_id:
+            del _pending_mfa_logins[challenge_id]
 
 
 def connect_garmin(

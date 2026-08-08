@@ -63,7 +63,7 @@ Für eine öffentliche Installation müssen die Callback-URLs HTTPS verwenden un
 
 ## Garmin verbinden
 
-Unter `Einstellungen` erfolgt die erste Anmeldung. Das Passwort wird nur an Garmin Connect weitergereicht. Der resultierende Token wird unter `GARMIN_TOKEN_DIR/account-<id>` gespeichert.
+Unter `Einstellungen` erfolgt die erste Anmeldung. Bei aktivierter MFA fragt PacePilot anschließend den von Garmin gesendeten oder in der Authenticator-App erzeugten Bestätigungscode ab. Passwort und Bestätigungscode werden nur an Garmin Connect weitergereicht. Der resultierende Token wird unter `GARMIN_TOKEN_DIR/account-<id>` gespeichert.
 
 Garmin Connect ist keine offizielle öffentliche API. MFA, Rate-Limits oder Änderungen auf Garmin-Seite können eine neue Anmeldung erforderlich machen. Garmin-Tokens liegen kontobezogen unter `GARMIN_TOKEN_DIR/account-<account id>/`. Ohne gültigen Token startet PacePilot weiterhin; nur Sync und Workout-Übertragung sind dann nicht verfügbar.
 
