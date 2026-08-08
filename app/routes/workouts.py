@@ -1,3 +1,5 @@
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import date
 from typing import Annotated
 from urllib.parse import urlencode
@@ -16,6 +18,7 @@ from app.services.garmin.client import (
     connect_garmin_account,
     message_from_exception,
 )
+from app.services.garmin.locks import GarminAccountBusyError, garmin_account_slot
 from app.services.garmin.workout_export import (
     delete_published_workout,
     push_workout,
@@ -200,9 +203,18 @@ def _get_workout(session: Session, user_id: int, workout_id: int) -> Workout:
     return workout
 
 
-def _garmin_client(session: Session, user: User) -> object:
+@contextmanager
+def _garmin_client(session: Session, user: User) -> Iterator[object]:
     account = get_or_create_garmin_account(session, user)
-    return connect_garmin_account(session, account)
+    if account.connected_at is None:
+        raise GarminUnavailableError("Garmin ist noch nicht verbunden.")
+    try:
+        with garmin_account_slot(account.id):
+            yield connect_garmin_account(session, account)
+    except GarminAccountBusyError as exc:
+        raise GarminUnavailableError(
+            "Für dieses Garmin-Konto läuft gerade eine andere Operation."
+        ) from exc
 
 
 def _replace_workout_steps(
@@ -297,7 +309,8 @@ def update_workout(
     _replace_workout_steps(workout, data, session)
     try:
         if workout.garmin_workout_id:
-            update_published_workout(_garmin_client(session, user), workout, previous_date)
+            with _garmin_client(session, user) as client:
+                update_published_workout(client, workout, previous_date)
             workout.status = "pushed"
         session.commit()
     except (GarminUnavailableError, WorkoutValidationError) as exc:
@@ -312,7 +325,8 @@ def delete_workout(workout_id: int, session: SessionDep, user: CurrentUser) -> R
     workout = _get_workout(session, user.id, workout_id)
     try:
         if workout.garmin_workout_id:
-            delete_published_workout(_garmin_client(session, user), workout)
+            with _garmin_client(session, user) as client:
+                delete_published_workout(client, workout)
         session.delete(workout)
         session.commit()
     except (GarminUnavailableError, WorkoutValidationError) as exc:
@@ -340,14 +354,14 @@ def publish(workout_id: int, session: SessionDep, user: CurrentUser) -> Redirect
             f"/workouts/{workout.id}?{urlencode({'error': error})}", status_code=303
         )
     try:
-        client = _garmin_client(session, user)
-        if not workout.garmin_workout_id:
-            workout.garmin_workout_id = upload_workout(client, workout)
+        with _garmin_client(session, user) as client:
+            if not workout.garmin_workout_id:
+                workout.garmin_workout_id = upload_workout(client, workout)
+                workout.status = "published"
+                session.commit()
+            schedule_published_workout(client, workout)
             workout.status = "published"
             session.commit()
-        schedule_published_workout(client, workout)
-        workout.status = "published"
-        session.commit()
     except (GarminUnavailableError, WorkoutValidationError) as exc:
         session.rollback()
         query = urlencode({"error": message_from_exception(exc)})
@@ -364,7 +378,8 @@ def push(workout_id: int, session: SessionDep, user: CurrentUser) -> RedirectRes
             f"/workouts/{workout.id}?{urlencode({'error': error})}", status_code=303
         )
     try:
-        push_workout(_garmin_client(session, user), workout)
+        with _garmin_client(session, user) as client:
+            push_workout(client, workout)
         workout.status = "pushed"
         session.commit()
     except (GarminUnavailableError, WorkoutValidationError) as exc:

@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.models import GarminAccount
+from app.services.garmin.locks import GarminAccountBusyError, garmin_account_slot
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -38,6 +39,7 @@ class _PendingMfaLogin:
     user_id: int
     token_directory: Path
     created_at: float
+    in_progress: bool = False
 
 
 _pending_mfa_logins: dict[str, _PendingMfaLogin] = {}
@@ -85,6 +87,16 @@ def _remove_expired_mfa_logins() -> None:
 
 
 def start_garmin_login(email: str, password: str, *, account_id: int, user_id: int) -> str | None:
+    try:
+        with garmin_account_slot(account_id):
+            return _start_garmin_login(email, password, account_id=account_id, user_id=user_id)
+    except GarminAccountBusyError as exc:
+        raise GarminUnavailableError(
+            "Für dieses Garmin-Konto läuft gerade eine andere Operation."
+        ) from exc
+
+
+def _start_garmin_login(email: str, password: str, *, account_id: int, user_id: int) -> str | None:
     """Start a credential login and return an opaque challenge ID when MFA is required."""
     token_directory = _token_directory(account_id)
     try:
@@ -139,6 +151,27 @@ def finish_garmin_login(
     user_id: int,
 ) -> str:
     """Complete a pending MFA login, persist its token, and return the Garmin email."""
+    try:
+        with garmin_account_slot(account_id):
+            return _finish_garmin_login(
+                challenge_id,
+                mfa_code,
+                account_id=account_id,
+                user_id=user_id,
+            )
+    except GarminAccountBusyError as exc:
+        raise GarminUnavailableError(
+            "Für dieses Garmin-Konto läuft gerade eine andere Operation."
+        ) from exc
+
+
+def _finish_garmin_login(
+    challenge_id: str | None,
+    mfa_code: str,
+    *,
+    account_id: int,
+    user_id: int,
+) -> str:
     if challenge_id is None:
         raise GarminMfaExpiredError(
             "Die Garmin-Anmeldung ist abgelaufen. Bitte melde dich erneut an."
@@ -147,7 +180,16 @@ def finish_garmin_login(
     with _pending_mfa_lock:
         _remove_expired_mfa_logins()
         login = _pending_mfa_logins.get(challenge_id)
-    if login is None or login.account_id != account_id or login.user_id != user_id:
+        if (
+            login is None
+            or login.account_id != account_id
+            or login.user_id != user_id
+            or login.in_progress
+        ):
+            login = None
+        else:
+            login.in_progress = True
+    if login is None:
         raise GarminMfaExpiredError(
             "Die Garmin-Anmeldung ist abgelaufen. Bitte melde dich erneut an."
         )
@@ -156,6 +198,10 @@ def finish_garmin_login(
         login.client.resume_login({}, mfa_code.strip())
         login.client.client.dump(str(login.token_directory))
     except Exception as exc:
+        with _pending_mfa_lock:
+            pending = _pending_mfa_logins.get(challenge_id)
+            if pending is login:
+                pending.in_progress = False
         logger.exception("Garmin MFA verification failed")
         raise _login_error(exc, mfa=True) from exc
 
@@ -173,12 +219,24 @@ def cancel_garmin_login(challenge_id: str | None, *, account_id: int, user_id: i
             del _pending_mfa_logins[challenge_id]
 
 
+def cancel_garmin_account_logins(*, account_id: int, user_id: int) -> None:
+    with _pending_mfa_lock:
+        for challenge_id, login in list(_pending_mfa_logins.items()):
+            if login.account_id == account_id and login.user_id == user_id:
+                del _pending_mfa_logins[challenge_id]
+
+
 def connect_garmin(
     email: str | None = None,
     password: str | None = None,
     *,
     account_id: int | None = None,
 ) -> Garmin:
+    logger.info(
+        "Initializing account-scoped Garmin session",
+        extra={"garmin_account_id": account_id, "uses_stored_token": True},
+    )
+    started = time.perf_counter()
     try:
         settings = get_settings()
         token_dir = _token_directory(account_id)
@@ -188,8 +246,22 @@ def connect_garmin(
         )
         client.login(str(token_dir))
     except Exception as exc:
-        logger.exception("Garmin login failed")
+        logger.exception(
+            "Account-scoped Garmin session initialization failed",
+            extra={
+                "garmin_account_id": account_id,
+                "duration_ms": round((time.perf_counter() - started) * 1000),
+                "error_type": type(exc).__name__,
+            },
+        )
         raise GarminUnavailableError("Garmin Connect ist derzeit nicht erreichbar.") from exc
+    logger.info(
+        "Account-scoped Garmin session initialized",
+        extra={
+            "garmin_account_id": account_id,
+            "duration_ms": round((time.perf_counter() - started) * 1000),
+        },
+    )
     return client
 
 
@@ -203,6 +275,10 @@ def connect_garmin_account(_session: Session, account: GarminAccount) -> Garmin:
 def message_from_exception(exc: Exception) -> str:
     if isinstance(exc, GarminUnavailableError):
         return str(exc)[:1000]
+    if isinstance(exc, GarminConnectTooManyRequestsError):
+        return "Garmin hat die Synchronisierung wegen zu vieler Anfragen begrenzt."
+    if isinstance(exc, GarminConnectAuthenticationError):
+        return "Die Garmin-Sitzung ist abgelaufen. Bitte verbinde das Konto erneut."
     return "Die Garmin-Operation ist unerwartet fehlgeschlagen."
 
 

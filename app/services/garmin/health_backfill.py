@@ -2,11 +2,11 @@ import logging
 import random
 import re
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from functools import partial
-from typing import Any
+from typing import Any, Literal
 
 from garminconnect.exceptions import (
     GarminConnectAuthenticationError,
@@ -39,9 +39,34 @@ DEFAULT_OVERLAP_DAYS = 7
 EMPTY_RESOURCE_REPROBE_DAYS = 28
 BODY_BATTERY_RANGE_DAYS = 31
 
-ProgressCallback = Callable[[str, date], None]
 StorePayload = Callable[[Session, int, date, Any], bool]
 HasData = Callable[[Any], bool]
+
+HealthProgressPhase = Literal[
+    "plan",
+    "day_start",
+    "operation_start",
+    "operation_complete",
+    "operation_error",
+    "operation_skipped",
+    "day_complete",
+    "resource_skipped",
+]
+
+
+@dataclass(frozen=True)
+class HealthProgressEvent:
+    phase: HealthProgressPhase
+    resource: str | None = None
+    day: date | None = None
+    planned: Mapping[str, tuple[date, ...]] | None = None
+    populated: bool | None = None
+    record_count: int | None = None
+    duration_ms: float | None = None
+    reason: str | None = None
+
+
+HealthProgressCallback = Callable[[HealthProgressEvent], None]
 
 
 @dataclass(frozen=True)
@@ -61,6 +86,7 @@ class ResourceSyncStats:
     earliest: date | None = None
     latest: date | None = None
     complete: bool = False
+    processed_days: set[date] = field(default_factory=set, repr=False)
 
 
 @dataclass
@@ -77,21 +103,14 @@ class HealthSyncResult:
 
     @property
     def unique_days_processed(self) -> int:
-        days: set[date] = set()
-        for stats in self.resources.values():
-            if stats.earliest is None or stats.latest is None:
-                continue
-            day = stats.earliest
-            while day <= stats.latest:
-                days.add(day)
-                day += timedelta(days=1)
-        return len(days)
+        return len(set().union(*(stats.processed_days for stats in self.resources.values())))
 
 
 class GarminPacer:
-    def __init__(self, delay: float) -> None:
+    def __init__(self, delay: float, log_context: Mapping[str, Any] | None = None) -> None:
         self.delay = max(delay, 0)
         self.last_call_at: float | None = None
+        self.log_context = dict(log_context or {})
 
     def call(self, operation: str, call: Callable[[], Any]) -> Any:
         if self.last_call_at is not None and self.delay:
@@ -99,11 +118,56 @@ class GarminPacer:
             wait = self.delay * random.uniform(0.9, 1.1) - elapsed  # noqa: S311
             if wait > 0:
                 time.sleep(wait)
-        logger.info("Garmin health sync: %s", operation)
+        logger.info(
+            "Garmin request start",
+            extra={"garmin_operation": operation, **self.log_context},
+        )
+        started = time.perf_counter()
         try:
-            return call()
+            result = call()
+        except Exception as exc:
+            duration_ms = round((time.perf_counter() - started) * 1000, 2)
+            status = _status_code(exc)
+            rate_limited = isinstance(exc, GarminConnectTooManyRequestsError) or status == 429
+            log = logger.warning if rate_limited else logger.error
+            log(
+                "Garmin request end",
+                extra={
+                    "garmin_operation": operation,
+                    "duration_ms": duration_ms,
+                    "data_returned": False,
+                    "record_count": 0,
+                    "http_status": status or (429 if rate_limited else None),
+                    "outcome": "rate_limited" if rate_limited else "error",
+                    **self.log_context,
+                },
+            )
+            raise
+        else:
+            logger.info(
+                "Garmin request end",
+                extra={
+                    "garmin_operation": operation,
+                    "duration_ms": round((time.perf_counter() - started) * 1000, 2),
+                    "data_returned": _record_count(result) > 0,
+                    "record_count": _record_count(result),
+                    "outcome": "success",
+                    **self.log_context,
+                },
+            )
+            return result
         finally:
             self.last_call_at = time.monotonic()
+
+
+def _record_count(payload: Any) -> int:
+    if payload is None:
+        return 0
+    if isinstance(payload, (list, tuple, set, frozenset)):
+        return len(payload)
+    if isinstance(payload, dict):
+        return int(bool(payload))
+    return 1
 
 
 def _number(value: object) -> int | float | None:
@@ -552,18 +616,16 @@ def _discover_earliest(
     stats: ResourceSyncStats,
     end: date,
     minimum: date,
+    payloads: dict[date, Any],
 ) -> date | None:
-    cache: dict[date, bool] = {}
-
     def populated(day: date) -> bool:
-        if day not in cache:
-            value = pacer.call(
+        if day not in payloads:
+            payloads[day] = pacer.call(
                 f"discover {resource.name} {day.isoformat()}",
                 lambda: resource.fetch(day.isoformat()),
             )
             stats.api_calls += 1
-            cache[day] = resource.has_data(value)
-        return cache[day]
+        return resource.has_data(payloads[day])
 
     recent = next(
         (
@@ -637,7 +699,38 @@ def _sync_failure(session: Session, user_id: int, resource: str, exc: Exception)
     session.commit()
 
 
-def _sync_daily_resource(
+@dataclass
+class _ResourcePlan:
+    resource: DailyResource
+    state: GarminSyncState
+    stats: ResourceSyncStats
+    initial: bool
+    days: tuple[date, ...] = ()
+    skipped_days: set[date] = field(default_factory=set)
+    payloads: dict[date, Any] = field(default_factory=dict)
+    body_battery: bool = False
+    skip_reason: str | None = None
+    disabled_reason: str | None = None
+
+
+def _dates_between(start: date, end: date) -> tuple[date, ...]:
+    return tuple(start + timedelta(days=offset) for offset in range((end - start).days + 1))
+
+
+def _emit(
+    progress: HealthProgressCallback | None,
+    event: HealthProgressEvent,
+) -> None:
+    if progress is not None:
+        progress(event)
+
+
+def _unsupported_reason(exc: Exception) -> str:
+    status = _status_code(exc)
+    return f"resource unsupported (HTTP {status})" if status else "resource unsupported"
+
+
+def _plan_resource(
     session: Session,
     user_id: int,
     resource: DailyResource,
@@ -646,28 +739,48 @@ def _sync_daily_resource(
     today: date,
     minimum: date,
     overlap_days: int,
-    progress: ProgressCallback | None,
-) -> ResourceSyncStats:
+    body_battery: bool = False,
+) -> _ResourcePlan:
     stats = ResourceSyncStats()
     state = get_or_create_sync_state(session, user_id, resource.name)
+    plan = _ResourcePlan(
+        resource=resource,
+        state=state,
+        stats=stats,
+        initial=not state.backfill_complete,
+        body_battery=body_battery,
+    )
     if _should_skip_empty_state(state, today):
         stats.complete = True
-        return stats
-    initial = not state.backfill_complete
+        plan.skip_reason = (
+            "resource previously marked unsupported"
+            if state.status == "unsupported"
+            else "empty resource is not due for reprobe"
+        )
+        return plan
+
     mark_sync_attempt(state)
     session.commit()
     try:
-        if initial and state.backfill_cursor_date is not None:
+        if plan.initial and state.backfill_cursor_date is not None:
             start = state.backfill_cursor_date
-        elif initial or state.newest_synced_date is None:
-            discovered = _discover_earliest(resource, pacer, stats, today, minimum)
+        elif plan.initial or state.newest_synced_date is None:
+            discovered = _discover_earliest(
+                resource,
+                pacer,
+                stats,
+                today,
+                minimum,
+                plan.payloads,
+            )
             if discovered is None:
                 state.status = "empty"
                 state.backfill_complete = True
                 state.last_success_at = utcnow()
                 session.commit()
                 stats.complete = True
-                return stats
+                plan.skip_reason = "no populated days found"
+                return plan
             start = discovered
             state.backfill_cursor_date = start
             session.commit()
@@ -675,164 +788,150 @@ def _sync_daily_resource(
             overlap_start = today - timedelta(days=overlap_days - 1)
             start = min(state.newest_synced_date + timedelta(days=1), overlap_start)
 
-        day = max(start, minimum)
-        skipped_days = empty_data_days(
-            session, user_id, resource.name, day, today - timedelta(days=1)
+        first_day = max(start, minimum)
+        plan.days = _dates_between(first_day, today)
+        plan.skipped_days = empty_data_days(
+            session, user_id, resource.name, first_day, today - timedelta(days=1)
         )
-        while day <= today:
-            if day in skipped_days:
-                day += timedelta(days=1)
-                continue
-            if progress is not None:
-                progress(resource.name, day)
+        return plan
+    except Exception as exc:
+        _sync_failure(session, user_id, resource.name, exc)
+        if _unsupported(exc):
+            stats.complete = True
+            plan.skip_reason = _unsupported_reason(exc)
+            return plan
+        raise
+
+
+def _body_battery_payload(
+    plan: _ResourcePlan,
+    client: Any,
+    pacer: GarminPacer,
+    day: date,
+) -> Any:
+    if day in plan.payloads:
+        return plan.payloads[day]
+
+    planned_days = set(plan.days)
+    chunk_end = day
+    while (chunk_end - day).days < BODY_BATTERY_RANGE_DAYS - 1:
+        candidate = chunk_end + timedelta(days=1)
+        if (
+            candidate not in planned_days
+            or candidate in plan.skipped_days
+            or candidate in plan.payloads
+        ):
+            break
+        chunk_end = candidate
+
+    payload = pacer.call(
+        f"body_battery {day.isoformat()} to {chunk_end.isoformat()}",
+        partial(client.get_body_battery, day.isoformat(), chunk_end.isoformat()),
+    )
+    plan.stats.api_calls += 1
+    entries = {
+        str(item.get("date")): item
+        for item in payload or []
+        if isinstance(item, dict) and item.get("date")
+    }
+    for chunk_day in _dates_between(day, chunk_end):
+        entry = entries.get(chunk_day.isoformat())
+        plan.payloads[chunk_day] = [entry] if entry is not None else []
+    return plan.payloads[day]
+
+
+def _execute_operation(
+    session: Session,
+    client: Any,
+    user_id: int,
+    plan: _ResourcePlan,
+    pacer: GarminPacer,
+    day: date,
+    today: date,
+    progress: HealthProgressCallback | None,
+) -> None:
+    resource = plan.resource
+    _emit(
+        progress,
+        HealthProgressEvent(phase="operation_start", resource=resource.name, day=day),
+    )
+    started = time.perf_counter()
+    try:
+        if plan.body_battery:
+            payload = _body_battery_payload(plan, client, pacer, day)
+        elif day in plan.payloads:
+            payload = plan.payloads[day]
+        else:
             payload = pacer.call(
                 f"{resource.name} {day.isoformat()}",
                 partial(resource.fetch, day.isoformat()),
             )
-            stats.api_calls += 1
-            populated = resource.store(session, user_id, day, payload)
-            set_daily_data_status(
-                session, user_id, day, resource.name, "complete" if populated else "empty"
-            )
-            next_day = day + timedelta(days=1)
-            mark_sync_success(
-                state,
-                oldest_date=day,
-                newest_date=day,
-                backfill_cursor_date=next_day if initial and next_day <= today else None,
-                backfill_complete=True if initial and next_day > today else None,
-            )
-            session.commit()
-            stats.days_processed += 1
-            stats.populated_days += int(populated)
-            stats.empty_days += int(not populated)
-            stats.earliest = day if stats.earliest is None else min(stats.earliest, day)
-            stats.latest = day if stats.latest is None else max(stats.latest, day)
-            day = next_day
-        stats.complete = state.backfill_complete
-        return stats
+            plan.stats.api_calls += 1
+
+        populated = resource.store(session, user_id, day, payload)
+        set_daily_data_status(
+            session,
+            user_id,
+            day,
+            resource.name,
+            "complete" if populated else "empty",
+        )
+        next_day = day + timedelta(days=1)
+        mark_sync_success(
+            plan.state,
+            oldest_date=day,
+            newest_date=day,
+            backfill_cursor_date=next_day if plan.initial and next_day <= today else None,
+            backfill_complete=True if plan.initial and next_day > today else None,
+        )
+        session.commit()
     except Exception as exc:
         _sync_failure(session, user_id, resource.name, exc)
-        if _unsupported(exc):
-            stats.complete = True
-            return stats
-        raise
-
-
-def _sync_body_battery(
-    session: Session,
-    client: Any,
-    user_id: int,
-    pacer: GarminPacer,
-    *,
-    today: date,
-    minimum: date,
-    overlap_days: int,
-    progress: ProgressCallback | None,
-) -> ResourceSyncStats:
-    resource = DailyResource(
-        "body_battery",
-        lambda day: client.get_body_battery(day),
-        _body_battery_has_data,
-        _store_body_battery,
-    )
-    stats = ResourceSyncStats()
-    state = get_or_create_sync_state(session, user_id, resource.name)
-    if _should_skip_empty_state(state, today):
-        stats.complete = True
-        return stats
-    initial = not state.backfill_complete
-    mark_sync_attempt(state)
-    session.commit()
-    try:
-        if initial and state.backfill_cursor_date is not None:
-            start = state.backfill_cursor_date
-        elif initial or state.newest_synced_date is None:
-            discovered = _discover_earliest(resource, pacer, stats, today, minimum)
-            if discovered is None:
-                state.status = "empty"
-                state.backfill_complete = True
-                state.last_success_at = utcnow()
-                session.commit()
-                stats.complete = True
-                return stats
-            start = discovered
-            state.backfill_cursor_date = start
-            session.commit()
-        else:
-            start = min(
-                state.newest_synced_date + timedelta(days=1),
-                today - timedelta(days=overlap_days - 1),
-            )
-
-        chunk_start = max(start, minimum)
-        skipped_days = empty_data_days(
-            session, user_id, resource.name, chunk_start, today - timedelta(days=1)
+        duration_ms = round((time.perf_counter() - started) * 1000, 2)
+        reason = _unsupported_reason(exc) if _unsupported(exc) else message_from_exception(exc)
+        _emit(
+            progress,
+            HealthProgressEvent(
+                phase="operation_error",
+                resource=resource.name,
+                day=day,
+                duration_ms=duration_ms,
+                reason=reason,
+            ),
         )
-        while chunk_start <= today:
-            if chunk_start in skipped_days:
-                chunk_start += timedelta(days=1)
-                continue
-            chunk_end = chunk_start
-            while (
-                chunk_end < today
-                and (chunk_end - chunk_start).days < BODY_BATTERY_RANGE_DAYS - 1
-                and chunk_end + timedelta(days=1) not in skipped_days
-            ):
-                chunk_end += timedelta(days=1)
-            if progress is not None:
-                progress(resource.name, chunk_start)
-            payload = pacer.call(
-                f"body_battery {chunk_start.isoformat()} to {chunk_end.isoformat()}",
-                partial(
-                    client.get_body_battery,
-                    chunk_start.isoformat(),
-                    chunk_end.isoformat(),
+        if _unsupported(exc):
+            plan.disabled_reason = reason
+            plan.stats.complete = True
+            _emit(
+                progress,
+                HealthProgressEvent(
+                    phase="resource_skipped",
+                    resource=resource.name,
+                    day=day,
+                    reason=reason,
                 ),
             )
-            stats.api_calls += 1
-            entries = {
-                str(item.get("date")): item
-                for item in payload or []
-                if isinstance(item, dict) and item.get("date")
-            }
-            day = chunk_start
-            while day <= chunk_end:
-                day_payload = [entries[day.isoformat()]] if day.isoformat() in entries else []
-                populated = _store_body_battery(session, user_id, day, day_payload)
-                set_daily_data_status(
-                    session,
-                    user_id,
-                    day,
-                    resource.name,
-                    "complete" if populated else "empty",
-                )
-                stats.days_processed += 1
-                stats.populated_days += int(populated)
-                stats.empty_days += int(not populated)
-                day += timedelta(days=1)
-            next_day = chunk_end + timedelta(days=1)
-            mark_sync_success(
-                state,
-                oldest_date=chunk_start,
-                newest_date=chunk_end,
-                backfill_cursor_date=next_day if initial and next_day <= today else None,
-                backfill_complete=True if initial and next_day > today else None,
-            )
-            session.commit()
-            stats.earliest = (
-                chunk_start if stats.earliest is None else min(stats.earliest, chunk_start)
-            )
-            stats.latest = chunk_end if stats.latest is None else max(stats.latest, chunk_end)
-            chunk_start = next_day
-        stats.complete = state.backfill_complete
-        return stats
-    except Exception as exc:
-        _sync_failure(session, user_id, resource.name, exc)
-        if _unsupported(exc):
-            stats.complete = True
-            return stats
+            return
         raise
+
+    stats = plan.stats
+    stats.days_processed += 1
+    stats.populated_days += int(populated)
+    stats.empty_days += int(not populated)
+    stats.earliest = day if stats.earliest is None else min(stats.earliest, day)
+    stats.latest = day if stats.latest is None else max(stats.latest, day)
+    stats.processed_days.add(day)
+    _emit(
+        progress,
+        HealthProgressEvent(
+            phase="operation_complete",
+            resource=resource.name,
+            day=day,
+            populated=populated,
+            record_count=_record_count(payload),
+            duration_ms=round((time.perf_counter() - started) * 1000, 2),
+        ),
+    )
 
 
 def sync_health_history(
@@ -844,16 +943,23 @@ def sync_health_history(
     minimum: date = MIN_HISTORY_DATE,
     overlap_days: int = DEFAULT_OVERLAP_DAYS,
     delay: float = 0.75,
-    progress: ProgressCallback | None = None,
+    progress: HealthProgressCallback | None = None,
+    log_context: Mapping[str, Any] | None = None,
 ) -> HealthSyncResult:
     target_day = today or date.today()
     if minimum > target_day:
         raise ValueError("minimum history date cannot be after today")
     if overlap_days < 1:
         raise ValueError("overlap_days must be positive")
-    pacer = GarminPacer(delay)
+    pacer = GarminPacer(delay, log_context)
     resources = [
         DailyResource("daily_summary", client.get_user_summary, _summary_has_data, _store_summary),
+        DailyResource(
+            "body_battery",
+            lambda day: client.get_body_battery(day),
+            _body_battery_has_data,
+            _store_body_battery,
+        ),
         DailyResource("sleep", client.get_sleep_data, _sleep_has_data, _store_sleep),
         DailyResource("hrv", client.get_hrv_data, _hrv_has_data, _store_hrv),
         DailyResource("spo2", client.get_spo2_data, _spo2_has_data, _store_spo2),
@@ -872,8 +978,9 @@ def sync_health_history(
         ),
     ]
     result = HealthSyncResult()
-    for resource in resources[:1]:
-        result.resources[resource.name] = _sync_daily_resource(
+    plans: list[_ResourcePlan] = []
+    for resource in resources:
+        plan = _plan_resource(
             session,
             user_id,
             resource,
@@ -881,27 +988,70 @@ def sync_health_history(
             today=target_day,
             minimum=minimum,
             overlap_days=overlap_days,
-            progress=progress,
+            body_battery=resource.name == "body_battery",
         )
-    result.resources["body_battery"] = _sync_body_battery(
-        session,
-        client,
-        user_id,
-        pacer,
-        today=target_day,
-        minimum=minimum,
-        overlap_days=overlap_days,
-        progress=progress,
+        plans.append(plan)
+        result.resources[resource.name] = plan.stats
+
+    _emit(
+        progress,
+        HealthProgressEvent(
+            phase="plan",
+            planned={plan.resource.name: plan.days for plan in plans},
+        ),
     )
-    for resource in resources[1:]:
-        result.resources[resource.name] = _sync_daily_resource(
-            session,
-            user_id,
-            resource,
-            pacer,
-            today=target_day,
-            minimum=minimum,
-            overlap_days=overlap_days,
-            progress=progress,
-        )
+    for plan in plans:
+        if plan.skip_reason is not None:
+            _emit(
+                progress,
+                HealthProgressEvent(
+                    phase="resource_skipped",
+                    resource=plan.resource.name,
+                    reason=plan.skip_reason,
+                ),
+            )
+
+    all_days = sorted({day for plan in plans for day in plan.days})
+    for day in all_days:
+        _emit(progress, HealthProgressEvent(phase="day_start", day=day))
+        for plan in plans:
+            if day not in plan.days:
+                continue
+            if day in plan.skipped_days:
+                _emit(
+                    progress,
+                    HealthProgressEvent(
+                        phase="operation_skipped",
+                        resource=plan.resource.name,
+                        day=day,
+                        reason="previously confirmed empty",
+                    ),
+                )
+                continue
+            if plan.disabled_reason is not None:
+                _emit(
+                    progress,
+                    HealthProgressEvent(
+                        phase="operation_skipped",
+                        resource=plan.resource.name,
+                        day=day,
+                        reason=plan.disabled_reason,
+                    ),
+                )
+                continue
+            _execute_operation(
+                session,
+                client,
+                user_id,
+                plan,
+                pacer,
+                day,
+                target_day,
+                progress,
+            )
+        _emit(progress, HealthProgressEvent(phase="day_complete", day=day))
+
+    for plan in plans:
+        if plan.skip_reason is None and plan.disabled_reason is None:
+            plan.stats.complete = plan.state.backfill_complete
     return result

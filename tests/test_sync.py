@@ -13,6 +13,7 @@ from app.models import (
     GarminAccount,
     GarminDevice,
     GarminSyncState,
+    SyncEvent,
     User,
 )
 from app.services.garmin import sync as sync_module
@@ -182,6 +183,8 @@ def test_sync_normalizes_and_stores_data(
         assert result.stage == "complete"
         assert result.message == "Synchronisierung abgeschlossen"
         assert result.current_item == result.total_items == 2
+        assert result.days_completed == result.days_total == 2
+        assert result.operations_completed == result.operations_total == 16
         assert result.activities_synced == 1
         assert result.health_days_synced == 2
         activity = session.scalar(select(Activity))
@@ -204,6 +207,7 @@ def test_sync_normalizes_and_stores_data(
         assert health.sleep_score == 82
         assert health.hrv_average == 54.0
         assert session.scalar(select(GarminDevice)) is not None
+        assert session.scalar(select(SyncEvent).where(SyncEvent.status == "success")) is not None
 
 
 def test_sync_releases_lock_when_initial_commit_fails(
@@ -224,4 +228,19 @@ def test_sync_releases_lock_when_initial_commit_fails(
         with pytest.raises(RuntimeError):
             sync_module.sync_garmin(session, account)
 
-    assert not sync_module.sync_lock.locked()
+    assert not sync_module.account_sync_active(account.id)
+
+
+def test_sync_slots_are_isolated_per_account() -> None:
+    with sync_module._sync_slot(101):
+        assert sync_module.account_sync_active(101)
+        with sync_module._sync_slot(202):
+            assert sync_module.account_sync_active(202)
+        with (
+            pytest.raises(sync_module.SyncAlreadyRunningError),
+            sync_module._sync_slot(101),
+        ):
+            pass
+
+    assert not sync_module.account_sync_active(101)
+    assert not sync_module.account_sync_active(202)

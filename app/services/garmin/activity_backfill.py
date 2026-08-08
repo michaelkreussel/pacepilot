@@ -3,7 +3,8 @@ import hashlib
 import json
 import logging
 import re
-from collections.abc import Callable
+import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from functools import partial
@@ -39,6 +40,7 @@ logger = logging.getLogger("uvicorn.error")
 ACTIVITY_RESOURCE = "activities"
 DEFAULT_PAGE_SIZE = 100
 ProgressCallback = Callable[[str, int, int], None]
+CompletionCallback = Callable[[str, int, int, str, date | None, float], None]
 
 FINGERPRINT_FIELDS = (
     "activityId",
@@ -200,6 +202,14 @@ def _optional_call(
     except Exception as exc:
         if isinstance(exc, GarminConnectNotFoundError) or _status_code(exc) == 404:
             result.api_calls += 1
+            logger.info(
+                "Optional Garmin activity resource skipped",
+                extra={
+                    "garmin_operation": operation,
+                    "skip_reason": "not_found",
+                    "http_status": 404,
+                },
+            )
             return empty
         raise
 
@@ -401,6 +411,14 @@ def _process_activity(
     activity_id = str(item.get("activityId") or "")
     started_at = _parse_datetime(item.get("startTimeLocal") or item.get("startTimeGMT"))
     if not activity_id or started_at is None:
+        logger.warning(
+            "Malformed Garmin activity skipped",
+            extra={
+                "garmin_activity_id": activity_id or None,
+                "has_activity_id": bool(activity_id),
+                "has_valid_start_time": started_at is not None,
+            },
+        )
         return "skipped"
     fingerprint = activity_fingerprint(item)
     existing = find_activity_by_garmin_id(session, user_id, activity_id)
@@ -529,11 +547,13 @@ def sync_activity_history(
     delay: float = 0.75,
     page_size: int = DEFAULT_PAGE_SIZE,
     progress: ProgressCallback | None = None,
+    completion: CompletionCallback | None = None,
+    log_context: Mapping[str, Any] | None = None,
 ) -> ActivitySyncResult:
     if not 1 <= page_size <= 1000:
         raise ValueError("page_size must be between 1 and 1000")
     result = ActivitySyncResult()
-    pacer = GarminPacer(delay)
+    pacer = GarminPacer(delay, log_context)
     state = get_or_create_sync_state(session, user_id, ACTIVITY_RESOURCE)
     initial = not state.backfill_complete
     mark_sync_attempt(state)
@@ -556,6 +576,7 @@ def sync_activity_history(
                 activity_id = str(item.get("activityId") or "")
                 if progress is not None:
                     progress(activity_id, result.activities_seen + 1, result.remote_count)
+                operation_started = time.perf_counter()
                 outcome = _process_activity(session, client, user_id, item, pacer, result)
                 result.activities_seen += 1
                 if outcome == "inserted":
@@ -572,6 +593,15 @@ def sync_activity_history(
                     result.oldest = day if result.oldest is None else min(result.oldest, day)
                     result.newest = day if result.newest is None else max(result.newest, day)
                 session.commit()
+                if completion is not None:
+                    completion(
+                        activity_id,
+                        result.activities_seen,
+                        result.remote_count,
+                        outcome,
+                        started_at.date() if started_at is not None else None,
+                        (time.perf_counter() - operation_started) * 1000,
+                    )
 
             offset += len(items)
             mark_sync_success(

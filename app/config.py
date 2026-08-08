@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     garmin_password: str | None = None
     health_sync_overlap_days: int = Field(default=7, ge=1, le=31)
     sync_interval_minutes: int = Field(default=60, ge=5)
+    garmin_sync_workers: int = Field(default=2, ge=1, le=8)
     garmin_call_delay_seconds: float = Field(default=0.75, ge=0, le=10)
     scheduler_enabled: bool = True
     session_secret: str | None = Field(default=None, min_length=32)

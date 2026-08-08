@@ -1,81 +1,73 @@
-.sync-progress {
-  margin-top: 22px;
-}
-
-.sync-progress form {
-  margin-top: 18px;
-}
-
+.sync-progress { margin-top: 22px; }
+.sync-progress form { margin-top: 18px; }
 .sync-progress-heading,
 .sync-progress-heading > div,
 .sync-progress-meta,
-.sync-result {
-  align-items: center;
-  display: flex;
-  gap: 10px;
-  justify-content: space-between;
-}
-
+.sync-result { align-items: center; display: flex; gap: 12px; justify-content: space-between; }
+.sync-progress-heading > div > div { display: grid; gap: 2px; }
 .sync-progress-heading small,
-.sync-progress-meta {
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.sync-progress-track {
-  background: #e6e7e1;
-  border-radius: 99px;
-  height: 8px;
-  margin: 13px 0 9px;
-  overflow: hidden;
-}
-
-.sync-progress-track span {
-  background: var(--orange);
-  border-radius: 99px;
-  display: block;
-  height: 100%;
-  transition: width 0.35s ease;
-  width: 0;
-}
-
-.sync-progress-track.indeterminate span {
-  animation: sync-slide 1.4s ease-in-out infinite;
-  width: 36%;
-}
-
-.sync-spinner {
-  animation: sync-spin 0.8s linear infinite;
-  border: 2px solid #ccd2ce;
-  border-radius: 50%;
-  border-top-color: var(--orange);
-  height: 13px;
-  width: 13px;
-}
-
-.sync-result {
-  align-items: flex-start;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.sync-result span {
-  font-size: 12px;
-}
-
-@keyframes sync-spin {
-  to { transform: rotate(360deg); }
-}
-
-@keyframes sync-slide {
-  from { transform: translateX(-110%); }
-  to { transform: translateX(290%); }
-}
-
-@media (max-width: 560px) {
+.sync-progress-meta { color: var(--muted); font-size: 12px; }
+.sync-kicker { color: var(--orange-dark); font-size: 9px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
+.sync-progress-count { align-items: baseline; display: flex; gap: 8px; margin-top: 18px; }
+.sync-progress-count strong { font: 800 22px "Manrope", sans-serif; }
+.sync-progress-count span { color: var(--muted); font-size: 12px; }
+.sync-progress-track { background: #e6e7e1; border-radius: 99px; height: 9px; margin: 9px 0; overflow: hidden; }
+.sync-progress-track span { background: linear-gradient(90deg, var(--orange), #ff8a58); border-radius: 99px; display: block; height: 100%; transition: width .35s ease; width: 0; }
+.sync-progress-track.indeterminate span { animation: sync-slide 1.4s ease-in-out infinite; width: 36%; }
+.sync-spinner { animation: sync-spin .8s linear infinite; border: 2px solid #ccd2ce; border-radius: 50%; border-top-color: var(--orange); flex: 0 0 auto; height: 15px; width: 15px; }
+.sync-current { background: #f1f1eb; border: 1px solid #e1e2da; border-radius: 13px; display: grid; gap: 12px; grid-template-columns: 1fr 1fr; margin-top: 17px; padding: 14px 16px; }
+.sync-current div { display: grid; gap: 3px; }
+.sync-current span { color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.sync-current strong { font-size: 13px; }
+.sync-metrics { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 12px; }
+.sync-metric { align-items: center; background: #f3f3ed; border: 1px solid #e2e3dc; border-radius: 99px; color: var(--muted); display: inline-flex; font-size: 11px; gap: 6px; padding: 5px 9px; }
+.sync-metric i { background: #c7cdc9; border-radius: 50%; height: 6px; width: 6px; }
+.sync-metric.running { border-color: #f4b39f; color: var(--orange-dark); }
+.sync-metric.running i { animation: sync-pulse 1s ease-in-out infinite; background: var(--orange); }
+.sync-metric.success { background: #e7f3ed; border-color: #bddbcd; color: var(--green); }
+.sync-metric.success i { background: #2d876c; }
+.sync-metric.error { background: #fff0ed; border-color: #f1beb3; color: #a33a26; }
+.sync-metric.error i { background: #d94b30; }
+.sync-metric.skipped { opacity: .7; }
+.sync-result { align-items: flex-start; flex-direction: column; gap: 4px; }
+.sync-result span { font-size: 12px; }
+.garmin-connection-controls { align-items: flex-end; display: grid; gap: 12px; justify-items: end; }
+.garmin-account-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.garmin-account-actions form { margin: 0; }
+.garmin-account-actions .button { padding: 9px 12px; white-space: nowrap; }
+.sync-debug { border-top: 1px solid var(--line); margin-top: 19px; padding-top: 13px; }
+.sync-debug summary { align-items: center; cursor: pointer; display: flex; justify-content: space-between; list-style: none; }
+.sync-debug summary::-webkit-details-marker { display: none; }
+.sync-debug summary span { display: grid; gap: 2px; }
+.sync-debug summary small,
+.sync-debug summary i { color: var(--muted); font-size: 10px; font-style: normal; }
+.sync-debug-toolbar { display: flex; justify-content: flex-end; margin-top: 10px; }
+.sync-debug-toolbar .button { font-size: 11px; padding: 7px 10px; }
+.sync-event-list { display: grid; gap: 2px; margin-top: 10px; max-height: 350px; overflow: auto; padding-right: 4px; }
+.sync-event { align-items: center; border-radius: 8px; display: grid; font-size: 11px; gap: 8px; grid-template-columns: 54px 8px minmax(130px, 1fr) auto auto auto; padding: 7px 8px; }
+.sync-event:hover { background: #f3f3ed; }
+.sync-event time,
+.sync-event small { color: var(--muted); font-size: 10px; white-space: nowrap; }
+.sync-event > div { display: flex; gap: 6px; min-width: 0; }
+.sync-event > div span { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sync-event-mark { background: #809089; border-radius: 50%; height: 7px; width: 7px; }
+.sync-event.success .sync-event-mark { background: #2d876c; }
+.sync-event.warning .sync-event-mark { background: #d7982e; }
+.sync-event.error .sync-event-mark { background: #d94b30; }
+.sync-event.running .sync-event-mark { animation: sync-pulse 1s ease-in-out infinite; background: var(--orange); }
+@keyframes sync-spin { to { transform: rotate(360deg); } }
+@keyframes sync-slide { from { transform: translateX(-110%); } to { transform: translateX(290%); } }
+@keyframes sync-pulse { 50% { opacity: .35; transform: scale(.8); } }
+@media (max-width: 700px) {
   .sync-progress-heading,
-  .sync-progress-meta {
-    align-items: flex-start;
-    flex-direction: column;
-  }
+  .sync-progress-meta { align-items: flex-start; flex-direction: column; }
+  .sync-current { grid-template-columns: 1fr; }
+  .sync-event { grid-template-columns: 48px 8px minmax(0, 1fr); }
+  .sync-event > small { display: none; }
+  .sync-event > div { display: grid; gap: 1px; }
+  .garmin-account-actions,
+  .garmin-account-actions form,
+  .garmin-account-actions .button { width: 100%; }
+  .garmin-connection-controls { grid-column: 1 / -1; justify-items: stretch; width: 100%; }
+  .sync-debug-toolbar .button { width: 100%; }
 }

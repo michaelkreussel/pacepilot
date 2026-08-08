@@ -67,6 +67,8 @@ Unter `Einstellungen` erfolgt die erste Anmeldung. Bei aktivierter MFA fragt Pac
 
 Garmin Connect ist keine offizielle öffentliche API. MFA, Rate-Limits oder Änderungen auf Garmin-Seite können eine neue Anmeldung erforderlich machen. Garmin-Tokens liegen kontobezogen unter `GARMIN_TOKEN_DIR/account-<account id>/`. Ohne gültigen Token startet PacePilot weiterhin; nur Sync und Workout-Übertragung sind dann nicht verfügbar.
 
+Synchronisierungen laufen als kontobezogene Hintergrundjobs. Verschiedene Konten können bis zum konfigurierten `GARMIN_SYNC_WORKERS`-Limit parallel arbeiten; ein zweiter Lauf für dasselbe Konto wird ausgeschlossen, damit Sitzung, Token und Datenbank-Cursor nicht konkurrierend verändert werden.
+
 ## Docker
 
 ```bash
@@ -85,6 +87,7 @@ Der Container führt beim Start `alembic upgrade head` aus und startet genau ein
 | `GARMIN_TOKEN_DIR` | `./data/garmin-tokens` | Garmin-Tokenablage |
 | `HEALTH_SYNC_OVERLAP_DAYS` | `7` | erneut geladene aktuelle Health-Tage |
 | `SYNC_INTERVAL_MINUTES` | `60` | APScheduler-Intervall |
+| `GARMIN_SYNC_WORKERS` | `2` | Maximale Anzahl gleichzeitig synchronisierter Garmin-Konten |
 | `GARMIN_CALL_DELAY_SECONDS` | `0.75` | Mindestabstand historischer Garmin-Abfragen |
 | `SCHEDULER_ENABLED` | `true` | Hintergrundjobs aktivieren |
 | `SESSION_SECRET` | Development-Fallback ohne Login | Signatur der Session-Cookies; mit aktiviertem Login zwingend setzen |
@@ -96,7 +99,7 @@ Der Container führt beim Start `alembic upgrade head` aus und startet genau ein
 | `LLM_BASE_URL` | `https://openrouter.ai/api/v1` | OpenRouter API-Basis-URL |
 | `LLM_MODEL` | leer | OpenRouter Modell-ID, zum Beispiel `openai/gpt-4o-mini` |
 
-SQLite muss auf einem lokalen Volume liegen, nicht auf SMB oder NFS. Mehrere Uvicorn-Worker sind wegen Scheduler und Prozess-Lock nicht unterstützt.
+SQLite muss auf einem lokalen Volume liegen, nicht auf SMB oder NFS. Mehrere Uvicorn-Worker sind wegen Scheduler und prozesslokaler Kontosperren nicht unterstützt.
 Für eine öffentliche HTTPS-Installation müssen `ENVIRONMENT=production`, `SESSION_SECRET` und `SESSION_HTTPS_ONLY=true` gesetzt sein.
 
 ## Qualitätssicherung

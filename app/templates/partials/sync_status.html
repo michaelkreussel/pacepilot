@@ -8,20 +8,68 @@
   {% endif %}
 >
   {% if account.sync_status == 'queued' %}
-    <div class="sync-progress-heading"><div><span class="sync-spinner"></span><strong>Synchronisierung wartet</strong></div><small>Der Hintergrundjob startet gleich.</small></div>
+    <div class="sync-progress-heading">
+      <div><span class="sync-spinner"></span><div><span class="sync-kicker">Garmin Sync</span><strong>Synchronisierung wartet</strong></div></div>
+      <small>Der kontoeigene Hintergrundjob startet gleich.</small>
+    </div>
     <div class="sync-progress-track indeterminate"><span></span></div>
   {% elif sync_run and sync_active %}
     <div class="sync-progress-heading">
-      <div><span class="sync-spinner"></span><strong>{{ sync_run.message or 'Synchronisierung läuft' }}</strong></div>
-      <small>{{ duration_seconds }} s{% if sync_run.total_items %} · {{ sync_run.current_item }}/{{ sync_run.total_items }} Tage{% endif %}</small>
+      <div><span class="sync-spinner"></span><div><span class="sync-kicker">Synchronisierung</span><strong>{{ sync_run.message or 'Garmin-Daten werden geladen' }}</strong></div></div>
+      <small>{{ duration_seconds }} s</small>
     </div>
-    <div class="sync-progress-track {{ 'indeterminate' if progress_percent is none else '' }}"><span{% if progress_percent is not none %} style="width: {{ progress_percent }}%"{% endif %}></span></div>
-    <div class="sync-progress-meta"><span>Schritt: {{ sync_run.stage or 'Vorbereitung' }}</span><span>{{ sync_run.activities_synced }} Aktivitäten · {{ sync_run.health_days_synced }} Health-Tage</span></div>
+
+    {% if sync_run.days_total %}
+      <div class="sync-progress-count"><strong>{{ sync_run.days_completed }} / {{ sync_run.days_total }}</strong><span>Tage synchronisiert</span></div>
+      <div class="sync-progress-track"><span style="width: {{ progress_percent }}%"></span></div>
+      <div class="sync-progress-meta"><span>{{ remaining_days }} Tage verbleibend</span><span>{{ sync_run.operations_completed }} / {{ sync_run.operations_total }} Metriken</span></div>
+    {% else %}
+      <div class="sync-progress-track indeterminate"><span></span></div>
+      <div class="sync-progress-meta"><span>{{ sync_run.activities_processed }} Aktivitäten geprüft</span><span>{{ sync_run.stage|replace('_', ' ') }}</span></div>
+    {% endif %}
+
+    <div class="sync-current">
+      <div><span>Aktueller Tag</span><strong>{% if sync_run.current_day %}{{ sync_run.current_day|date }}{% else %}Noch in Vorbereitung{% endif %}</strong></div>
+      <div><span>Aktuelle Operation</span><strong>{{ sync_run.current_operation or sync_run.stage or 'Vorbereitung' }}</strong></div>
+    </div>
+
+    {% if sync_run.current_day and sync_run.stage == 'health' %}
+      <div class="sync-metrics" aria-label="Metriken des aktuellen Tages">
+        {% for metric in current_metrics %}
+          <span class="sync-metric {{ metric.status }}"><i></i>{{ metric.label }}</span>
+        {% endfor %}
+      </div>
+    {% endif %}
   {% elif sync_run and sync_run.status == 'ok' %}
-    <div class="sync-result success-note"><strong>Letzter Lauf abgeschlossen</strong><span>{{ sync_run.activities_synced }} Aktivitäten und {{ sync_run.health_days_synced }} Health-Tage in {{ duration_seconds }} s</span></div>
+    <div class="sync-result success-note"><strong>Letzter Lauf abgeschlossen</strong><span>{{ sync_run.activities_synced }} Aktivitäten und {{ sync_run.days_completed }} Health-Tage in {{ duration_seconds }} s</span></div>
   {% elif account.sync_error or (sync_run and sync_run.status == 'error') %}
     <div class="alert error compact"><strong>Synchronisierung fehlgeschlagen</strong><br>{{ account.sync_error or sync_run.error }}</div>
   {% endif %}
+
+  {% if sync_run and sync_events %}
+    <details
+      class="sync-debug"
+      x-data="{ open: localStorage.getItem('pacepilot-sync-debug') !== 'closed' }"
+      x-bind:open="open"
+      @toggle="open = $el.open; localStorage.setItem('pacepilot-sync-debug', open ? 'open' : 'closed')"
+    >
+      <summary><span><strong>Aktivitätsprotokoll</strong><small>Letzte {{ sync_events|length }} Ereignisse</small></span><i>Details</i></summary>
+      <div class="sync-debug-toolbar"><a class="button secondary" href="/settings/sync-runs/{{ sync_run.id }}/export" download>Alle Schritte als JSON exportieren</a></div>
+      <div class="sync-event-list">
+        {% for event in sync_events %}
+          <div class="sync-event {{ event.level }} {{ event.status }}">
+            <time>{{ event.created_at.strftime('%H:%M:%S') }}</time>
+            <span class="sync-event-mark" aria-hidden="true"></span>
+            <div><strong>{{ metric_labels.get(event.resource, event.resource|replace('_', ' ')|title) if event.resource else event.category|replace('_', ' ')|title }}</strong><span>{{ event.message }}</span></div>
+            {% if event.day %}<small>{{ event.day|date }}</small>{% endif %}
+            {% if event.record_count is not none %}<small>{{ event.record_count }} Datensätze</small>{% endif %}
+            {% if event.duration_ms is not none %}<small>{{ event.duration_ms }} ms</small>{% endif %}
+          </div>
+        {% endfor %}
+      </div>
+    </details>
+  {% endif %}
+
   <form method="post" action="/settings/garmin/sync">
     <button class="button" type="submit" {% if sync_active %}disabled{% endif %}>
       {% if sync_active %}Synchronisierung läuft …{% else %}Jetzt synchronisieren{% endif %}

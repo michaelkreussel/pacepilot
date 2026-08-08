@@ -12,7 +12,7 @@
 
 - `app.main:app` is one process containing FastAPI, server-rendered Jinja pages, SQLite access, Garmin synchronization, and APScheduler. There is no separate frontend build or worker service.
 - App lifespan creates data/token directories and starts the scheduler, but does not migrate the database. Apply Alembic migrations before startup; the Docker command already does this.
-- Keep deployment at one Uvicorn worker. Garmin sync exclusion is an in-process `threading.Lock`, and every worker would start its own scheduler. SQLite must remain on a local filesystem, not SMB/NFS.
+- Keep deployment at one Uvicorn worker. Garmin sync exclusion uses in-process per-account `threading.Lock` instances, and every worker would start its own scheduler. SQLite must remain on a local filesystem, not SMB/NFS.
 - `app.config.get_settings()` is cached, and `app.database` creates its engine at import time. Set database/environment overrides before importing the app; route tests override `get_db` instead of replacing the global engine.
 - The app intentionally uses the first database user as a lazily-created local default user. It has no HTTP authentication, multi-user isolation, or CSRF protection.
 

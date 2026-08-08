@@ -3,8 +3,24 @@
 {% block content %}
 <div class="page-heading"><div><p class="eyebrow">System</p><h1>Einstellungen</h1><p>Verbindungen und Synchronisierung verwalten.</p></div></div>
 {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+{% if notice %}<div class="alert success-note">{{ notice }}</div>{% endif %}
 <section class="settings-grid">
-  <article class="card connection-card"><div class="integration-mark">G</div><div class="connection-copy"><p class="eyebrow">Integration</p><h2>Garmin Connect</h2><p>Tokens werden lokal im Datenverzeichnis gespeichert. Dein Passwort wird nicht in SQLite abgelegt.</p></div><div class="connection-status {{ account.sync_status }}"><span class="status-dot"></span>{{ account.sync_status|replace('_', ' ') }}</div></article>
+  <article class="card connection-card garmin-connection-card">
+    <div class="integration-mark">G</div>
+    <div class="connection-copy"><p class="eyebrow">Integration</p><h2>Garmin Connect</h2><p>Abmelden entfernt die lokale Anmeldung. Das Löschen importierter Daten lässt die Garmin-Verbindung und Tokens bestehen.</p></div>
+    <div class="garmin-connection-controls">
+      <div class="connection-status {{ account.sync_status }}"><span class="status-dot"></span>{{ account.sync_status|replace('_', ' ') }}</div>
+      <div class="garmin-account-actions">
+        <form method="post" action="/settings/garmin/disconnect" onsubmit="return confirm('Garmin wirklich abmelden? Importierte Daten bleiben erhalten.')">
+          <button class="button secondary" type="submit" {% if not account.connected_at and not mfa_required %}disabled{% endif %}>Abmelden</button>
+        </form>
+        <form method="post" action="/settings/garmin/data/delete" onsubmit="return confirm('Alle aus Garmin importierten Daten und lokalen Rohdateien löschen? Die Garmin-Verbindung bleibt aktiv und lokale Workouts bleiben erhalten.')">
+          <input type="hidden" name="confirmation" value="delete">
+          <button class="button danger" type="submit">Importierte Daten löschen</button>
+        </form>
+      </div>
+    </div>
+  </article>
   {% if account.connected_at %}
   <article class="card settings-panel"><h2>Verbunden</h2><div class="metric-list"><div><span>Konto</span><strong>{{ account.email or 'Token-Anmeldung' }}</strong></div><div><span>Verbunden seit</span><strong>{{ account.connected_at|date }}</strong></div><div><span>Letzter Sync</span><strong>{{ account.last_sync_at|datetime }}</strong></div></div>{% include "partials/sync_status.html" %}</article>
   {% elif mfa_required %}

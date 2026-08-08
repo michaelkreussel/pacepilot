@@ -10,7 +10,12 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.config import get_settings
 from app.models import DailyDataStatus, DailyFitness, DailyHealth, GarminSyncState, SleepStage, User
 from app.services.garmin import client as client_module
-from app.services.garmin.health_backfill import sync_health_history
+from app.services.garmin.health_backfill import (
+    HealthProgressEvent,
+    HealthSyncResult,
+    ResourceSyncStats,
+    sync_health_history,
+)
 
 
 class FakeHealthGarmin:
@@ -354,6 +359,115 @@ def test_unsupported_metric_is_recorded_without_blocking_backfill(
         assert state.status == "unsupported"
         assert state.backfill_complete is True
         assert result.resources["training_status"].complete is True
+
+
+def test_health_progress_is_planned_first_and_runs_day_major(
+    session_factory: sessionmaker[Session],
+) -> None:
+    client = FakeHealthGarmin()
+    today = date(2026, 1, 10)
+    events: list[HealthProgressEvent] = []
+
+    with session_factory() as session:
+        user = _user(session)
+        sync_health_history(
+            session,
+            client,
+            user.id,
+            today=today,
+            minimum=today - timedelta(days=1),
+            delay=0,
+            progress=events.append,
+        )
+
+    assert events[0].phase == "plan"
+    assert events[0].planned is not None
+    assert tuple(events[0].planned) == (
+        "daily_summary",
+        "body_battery",
+        "sleep",
+        "hrv",
+        "spo2",
+        "vo2max",
+        "training_readiness",
+        "training_status",
+    )
+    assert events[0].planned["daily_summary"] == (today - timedelta(days=1), today)
+
+    day_events = [event for event in events if event.day is not None]
+    for day in (today - timedelta(days=1), today):
+        current = [event for event in day_events if event.day == day]
+        assert current[0].phase == "day_start"
+        assert current[-1].phase == "day_complete"
+        assert [event.resource for event in current if event.phase == "operation_complete"] == [
+            "daily_summary",
+            "body_battery",
+            "sleep",
+            "hrv",
+            "vo2max",
+        ]
+
+    first_day_start = next(
+        index for index, event in enumerate(events) if event.phase == "day_start"
+    )
+    assert all(event.phase in {"plan", "resource_skipped"} for event in events[:first_day_start])
+
+    first_day_complete = next(
+        index
+        for index, event in enumerate(events)
+        if event.phase == "day_complete" and event.day == today - timedelta(days=1)
+    )
+    second_day_start = next(
+        index
+        for index, event in enumerate(events)
+        if event.phase == "day_start" and event.day == today
+    )
+    assert first_day_complete < second_day_start
+
+
+def test_unique_days_processed_uses_exact_completed_dates() -> None:
+    first = date(2026, 1, 5)
+    last = date(2026, 1, 7)
+    stats = ResourceSyncStats(
+        days_processed=2,
+        earliest=first,
+        latest=last,
+        processed_days={first, last},
+    )
+
+    result = HealthSyncResult(resources={"daily_summary": stats})
+
+    assert result.unique_days_processed == 2
+
+
+def test_discovery_payloads_are_reused_during_execution(
+    session_factory: sessionmaker[Session],
+) -> None:
+    client = FakeHealthGarmin()
+    today = date(2026, 1, 10)
+
+    with session_factory() as session:
+        user = _user(session)
+        sync_health_history(
+            session,
+            client,
+            user.id,
+            today=today,
+            minimum=today,
+            delay=0,
+        )
+
+    for resource in (
+        "daily_summary",
+        "body_battery",
+        "sleep",
+        "hrv",
+        "spo2",
+        "vo2max",
+        "training_readiness",
+        "training_status",
+    ):
+        assert client.calls.count((resource, today.isoformat())) == 1
 
 
 def test_account_token_directories_are_isolated(monkeypatch: Any, tmp_path: Path) -> None:

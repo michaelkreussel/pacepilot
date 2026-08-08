@@ -28,6 +28,7 @@ def test_initial_migration_matches_models(tmp_path: Path) -> None:
         "garmin_sync_states",
         "oauth_identities",
         "sleep_stages",
+        "sync_events",
         "sync_runs",
         "users",
         "workout_steps",

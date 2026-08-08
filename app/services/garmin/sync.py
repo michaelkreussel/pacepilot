@@ -1,82 +1,189 @@
 import logging
-import threading
 import time
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import Callable, Mapping
+from contextlib import nullcontext
 from datetime import UTC, date, datetime
-from functools import partial
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.models import DailyHealth, GarminAccount, GarminDevice, SyncRun
+from app.models import DailyHealth, GarminAccount, GarminDevice, SyncEvent, SyncRun
 from app.models.user import utcnow
 from app.services.garmin.activity_backfill import sync_activity_history
 from app.services.garmin.client import (
-    connect_garmin,
+    GarminUnavailableError,
     connect_garmin_account,
     message_from_exception,
 )
-from app.services.garmin.health_backfill import sync_health_history
+from app.services.garmin.health_backfill import HealthProgressEvent, sync_health_history
+from app.services.garmin.locks import (
+    GarminAccountBusyError,
+    garmin_account_active,
+    garmin_account_slot,
+)
 
-sync_lock = threading.Lock()
 logger = logging.getLogger("uvicorn.error")
 
+METRIC_LABELS = {
+    "daily_summary": "Tagesübersicht",
+    "body_battery": "Body Battery",
+    "sleep": "Schlaf",
+    "hrv": "HRV",
+    "spo2": "Sauerstoffsättigung",
+    "vo2max": "VO₂max",
+    "training_readiness": "Trainingsbereitschaft",
+    "training_status": "Trainingsstatus",
+    "activities": "Aktivitäten",
+    "devices": "Geräte",
+    "login": "Anmeldung",
+}
 
-class SyncAlreadyRunningError(RuntimeError):
-    pass
+SyncAlreadyRunningError = GarminAccountBusyError
+_sync_slot = garmin_account_slot
+account_sync_active = garmin_account_active
 
 
-@contextmanager
-def _sync_slot(*, wait: bool = False) -> Iterator[None]:
-    if not sync_lock.acquire(blocking=wait):
-        raise SyncAlreadyRunningError("Eine Garmin-Synchronisierung läuft bereits.")
-    try:
-        yield
-    finally:
-        sync_lock.release()
+def _record_count(value: Any) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return len(value)
+    if isinstance(value, Mapping):
+        return int(bool(value))
+    return 1
 
 
-def _timed_garmin_call[T](run_id: int, operation: str, call: Callable[[], T]) -> T:
-    started = time.perf_counter()
-    logger.info("Garmin sync %s: %s started", run_id, operation)
-    try:
-        result = call()
-    except Exception:
-        logger.exception(
-            "Garmin sync %s: %s failed after %.1f s",
-            run_id,
-            operation,
-            time.perf_counter() - started,
-        )
-        raise
-    logger.info(
-        "Garmin sync %s: %s finished in %.1f s",
-        run_id,
-        operation,
-        time.perf_counter() - started,
+def _event(
+    session: Session,
+    run: SyncRun,
+    message: str,
+    *,
+    level: str = "info",
+    category: str = "sync",
+    status: str = "info",
+    resource: str | None = None,
+    day: date | None = None,
+    operation: str | None = None,
+    duration_ms: float | None = None,
+    record_count: int | None = None,
+) -> SyncEvent:
+    event = SyncEvent(
+        sync_run_id=run.id,
+        level=level,
+        category=category,
+        status=status,
+        resource=resource,
+        day=day,
+        operation=operation,
+        message=message[:500],
+        duration_ms=round(duration_ms) if duration_ms is not None else None,
+        record_count=record_count,
     )
-    return result
+    session.add(event)
+    session.commit()
+    log_level = (
+        logging.ERROR
+        if level == "error"
+        else logging.WARNING
+        if level == "warning"
+        else logging.INFO
+    )
+    logger.log(
+        log_level,
+        "Garmin sync event: %s",
+        message,
+        extra={
+            "sync_run_id": run.id,
+            "sync_user_id": run.user_id,
+            "sync_category": category,
+            "sync_status": status,
+            "garmin_resource": resource,
+            "sync_day": day.isoformat() if day else None,
+            "garmin_operation": operation,
+            "duration_ms": event.duration_ms,
+            "record_count": record_count,
+        },
+    )
+    return event
 
 
-def _set_progress(
+def _finish_event(
+    session: Session,
+    event: SyncEvent,
+    *,
+    status: str,
+    level: str,
+    message: str,
+    duration_ms: float,
+    record_count: int | None = None,
+) -> None:
+    event.status = status
+    event.level = level
+    event.message = message[:500]
+    event.duration_ms = round(duration_ms)
+    event.record_count = record_count
+
+
+def _timed_garmin_call[T](
     session: Session,
     run: SyncRun,
     *,
-    stage: str,
+    resource: str,
+    operation: str,
     message: str,
-    current: int | None = None,
-    total: int | None = None,
-) -> None:
-    run.stage = stage
-    run.message = message
-    if current is not None:
-        run.current_item = current
-    if total is not None:
-        run.total_items = total
+    call: Callable[[], T],
+) -> T:
+    run.current_operation = operation
+    event = _event(
+        session,
+        run,
+        message,
+        category="request",
+        status="running",
+        resource=resource,
+        operation=operation,
+    )
+    started = time.perf_counter()
+    try:
+        result = call()
+    except Exception as exc:
+        duration_ms = (time.perf_counter() - started) * 1000
+        _finish_event(
+            session,
+            event,
+            status="error",
+            level="error",
+            message=f"{message} fehlgeschlagen",
+            duration_ms=duration_ms,
+        )
+        session.commit()
+        logger.exception(
+            "Garmin sync request failed",
+            extra={
+                "sync_run_id": run.id,
+                "sync_user_id": run.user_id,
+                "garmin_resource": resource,
+                "garmin_operation": operation,
+                "duration_ms": round(duration_ms),
+                "error_type": type(exc).__name__,
+            },
+        )
+        raise
+    duration_ms = (time.perf_counter() - started) * 1000
+    count = _record_count(result)
+    _finish_event(
+        session,
+        event,
+        status="success",
+        level="success",
+        message=f"{message} abgeschlossen",
+        duration_ms=duration_ms,
+        record_count=count,
+    )
     session.commit()
+    return result
 
 
 def _number(data: dict[str, Any], *keys: str) -> int | float | None:
@@ -109,15 +216,13 @@ def _store_daily_summary(
 
 
 def refresh_daily_summary(session: Session, user_id: int, day: date | None = None) -> None:
-    with _sync_slot():
+    account = session.scalar(select(GarminAccount).where(GarminAccount.user_id == user_id))
+    if account is None or account.connected_at is None:
+        raise GarminUnavailableError("Garmin ist noch nicht verbunden.")
+    with garmin_account_slot(account.id):
         try:
             target_day = day or date.today()
-            account = session.scalar(select(GarminAccount).where(GarminAccount.user_id == user_id))
-            client = (
-                connect_garmin_account(session, account)
-                if account is not None
-                else connect_garmin()
-            )
+            client = connect_garmin_account(session, account)
             summary = client.get_user_summary(target_day.isoformat()) or {}
             _store_daily_summary(session, user_id, target_day, summary)
             session.commit()
@@ -126,8 +231,19 @@ def refresh_daily_summary(session: Session, user_id: int, day: date | None = Non
             raise
 
 
-def _sync_devices(session: Session, client: Any, account: GarminAccount, run_id: int) -> None:
-    devices = _timed_garmin_call(run_id, "devices", client.get_devices) or []
+def _sync_devices(session: Session, client: Any, account: GarminAccount, run: SyncRun) -> None:
+    devices = (
+        _timed_garmin_call(
+            session,
+            run,
+            resource="devices",
+            operation="get_devices",
+            message="Garmin-Geräte abrufen",
+            call=client.get_devices,
+        )
+        or []
+    )
+    writes = 0
     for item in devices:
         if not isinstance(item, dict):
             continue
@@ -148,12 +264,188 @@ def _sync_devices(session: Session, client: Any, account: GarminAccount, run_id:
         device.name = str(item.get("displayName") or item.get("deviceName") or "Garmin-Gerät")
         device.model = str(item.get("productDisplayName") or item.get("productType") or "") or None
         device.last_seen_at = utcnow()
+        writes += 1
+    session.commit()
+    _event(
+        session,
+        run,
+        f"{writes} Geräte in der Datenbank aktualisiert",
+        category="database",
+        status="success",
+        level="success",
+        resource="devices",
+        operation="store_devices",
+        record_count=writes,
+    )
+
+
+class _HealthProgress:
+    def __init__(self, session: Session, run: SyncRun) -> None:
+        self.session = session
+        self.run = run
+        self.active_operations: dict[tuple[str, date], SyncEvent] = {}
+
+    def __call__(self, update: HealthProgressEvent) -> None:
+        if update.phase == "plan":
+            planned = update.planned or {}
+            days = {day for resource_days in planned.values() for day in resource_days}
+            self.run.days_total = len(days)
+            self.run.operations_total = sum(
+                len(resource_days) for resource_days in planned.values()
+            )
+            self.run.current_item = 0
+            self.run.total_items = self.run.days_total
+            self.run.stage = "health"
+            self.run.message = f"{self.run.days_total} Tage werden synchronisiert"
+            self.session.commit()
+            if days:
+                _event(
+                    self.session,
+                    self.run,
+                    (
+                        f"Health-Plan: {len(days)} Tage von {min(days).isoformat()} "
+                        f"bis {max(days).isoformat()}, {self.run.operations_total} Operationen"
+                    ),
+                    category="plan",
+                    status="success",
+                    level="success",
+                )
+            else:
+                _event(
+                    self.session,
+                    self.run,
+                    "Keine Health-Tage müssen aktualisiert werden",
+                    category="plan",
+                    status="skipped",
+                    level="info",
+                )
+            return
+
+        label = METRIC_LABELS.get(update.resource or "", update.resource or "Garmin")
+        if update.phase == "day_start" and update.day is not None:
+            self.run.current_day = update.day
+            self.run.current_operation = None
+            self.run.message = f"Daten für {update.day.strftime('%d.%m.%Y')} werden geladen"
+            self.session.commit()
+            return
+
+        if update.phase == "operation_start" and update.resource and update.day:
+            self.run.current_day = update.day
+            self.run.current_operation = label
+            self.run.message = f"{label} für {update.day.strftime('%d.%m.%Y')} wird geladen"
+            event = _event(
+                self.session,
+                self.run,
+                f"{label} wird abgerufen",
+                category="metric",
+                status="running",
+                resource=update.resource,
+                day=update.day,
+                operation="fetch_and_store",
+            )
+            self.active_operations[(update.resource, update.day)] = event
+            return
+
+        if (
+            update.phase in {"operation_complete", "operation_error"}
+            and update.resource
+            and update.day
+        ):
+            event = self.active_operations.pop((update.resource, update.day), None)
+            if event is None:
+                event = _event(
+                    self.session,
+                    self.run,
+                    label,
+                    category="metric",
+                    status="running",
+                    resource=update.resource,
+                    day=update.day,
+                    operation="fetch_and_store",
+                )
+            if update.phase == "operation_complete":
+                suffix = (
+                    f"{update.record_count} Datensätze"
+                    if update.record_count is not None
+                    else "gespeichert"
+                )
+                _finish_event(
+                    self.session,
+                    event,
+                    status="success",
+                    level="success",
+                    message=f"{label}: {suffix}",
+                    duration_ms=update.duration_ms or 0,
+                    record_count=update.record_count,
+                )
+                self.run.operations_completed += 1
+            else:
+                self.run.operations_completed += 1
+                _finish_event(
+                    self.session,
+                    event,
+                    status="error",
+                    level="error",
+                    message=f"{label}: {update.reason or 'Operation fehlgeschlagen'}",
+                    duration_ms=update.duration_ms or 0,
+                )
+            self.session.commit()
+            return
+
+        if update.phase == "operation_skipped" and update.resource and update.day:
+            self.run.operations_completed += 1
+            _event(
+                self.session,
+                self.run,
+                f"{label} übersprungen: {update.reason or 'keine Aktualisierung erforderlich'}",
+                category="metric",
+                status="skipped",
+                level="info",
+                resource=update.resource,
+                day=update.day,
+                operation="skip",
+            )
+            return
+
+        if update.phase == "resource_skipped" and update.resource:
+            _event(
+                self.session,
+                self.run,
+                f"{label} übersprungen: {update.reason or 'nicht verfügbar'}",
+                category="metric",
+                status="skipped",
+                level="warning" if "unsupported" in (update.reason or "") else "info",
+                resource=update.resource,
+            )
+            return
+
+        if update.phase == "day_complete" and update.day is not None:
+            self.run.days_completed = min(self.run.days_completed + 1, self.run.days_total)
+            self.run.health_days_synced = self.run.days_completed
+            self.run.current_item = self.run.days_completed
+            self.run.current_operation = "Tag abgeschlossen"
+            self.run.message = f"{update.day.strftime('%d.%m.%Y')} vollständig synchronisiert"
+            self.session.commit()
+            _event(
+                self.session,
+                self.run,
+                "Tag vollständig synchronisiert",
+                category="day",
+                status="success",
+                level="success",
+                day=update.day,
+            )
 
 
 def sync_garmin(
-    session: Session, account: GarminAccount, *, wait_for_slot: bool = False
+    session: Session,
+    account: GarminAccount,
+    *,
+    wait_for_slot: bool = False,
+    slot_acquired: bool = False,
 ) -> SyncRun:
-    with _sync_slot(wait=wait_for_slot):
+    slot = nullcontext() if slot_acquired else garmin_account_slot(account.id, wait=wait_for_slot)
+    with slot:
         run = SyncRun(
             user_id=account.user_id,
             stage="starting",
@@ -165,33 +457,74 @@ def sync_garmin(
             account.sync_status = "running"
             account.sync_error = None
             session.commit()
-            logger.info("Garmin sync %s: started for account %s", run.id, account.id)
+            _event(
+                session,
+                run,
+                f"Sync für Benutzer {account.user_id} und Konto {account.id} gestartet",
+                category="sync",
+                status="running",
+            )
             settings = get_settings()
-            _set_progress(
-                session,
-                run,
-                stage="login",
-                message="Verbindung zu Garmin Connect wird hergestellt",
-            )
+            run.stage = "login"
+            run.message = "Garmin-Sitzung wird für dieses Konto initialisiert"
+            session.commit()
             client = _timed_garmin_call(
-                run.id, "login", partial(connect_garmin_account, session, account)
-            )
-            _set_progress(
                 session,
                 run,
-                stage="activities",
-                message="Aktivitätsverlauf wird aktualisiert",
+                resource="login",
+                operation="initialize_account_session",
+                message="Kontoeigene Garmin-Sitzung initialisieren",
+                call=lambda: connect_garmin_account(session, account),
             )
 
-            def report_activity(_activity_id: str, current: int, total: int) -> None:
-                _set_progress(
+            run.stage = "activities"
+            run.message = "Aktivitätsverlauf wird geprüft"
+            run.current_operation = "Aktivitätsliste"
+            session.commit()
+            active_activities: dict[str, SyncEvent] = {}
+
+            def report_activity(activity_id: str, current: int, total: int) -> None:
+                run.activities_processed = current - 1
+                run.activities_total = total
+                run.current_operation = f"Aktivität {activity_id}"
+                run.message = f"Aktivität {current} wird geprüft"
+                active_activities[activity_id] = _event(
                     session,
                     run,
-                    stage="activities",
-                    message=f"Aktivität {current} von {total} wird geladen",
-                    current=current,
-                    total=total,
+                    f"Aktivität {activity_id} wird geprüft",
+                    category="activity",
+                    status="running",
+                    resource="activities",
+                    operation="sync_activity",
                 )
+
+            def complete_activity(
+                activity_id: str,
+                current: int,
+                total: int,
+                outcome: str,
+                activity_day: date | None,
+                duration_ms: float,
+            ) -> None:
+                run.activities_processed = current
+                run.activities_total = total
+                event = active_activities.pop(activity_id)
+                skipped = outcome == "skipped"
+                _finish_event(
+                    session,
+                    event,
+                    status="skipped" if skipped else "success",
+                    level="info" if skipped else "success",
+                    message=(
+                        f"Aktivität {activity_id} unverändert"
+                        if skipped
+                        else f"Aktivität {activity_id} {outcome}"
+                    ),
+                    duration_ms=duration_ms,
+                    record_count=0 if skipped else 1,
+                )
+                event.day = activity_day
+                session.commit()
 
             activity_result = sync_activity_history(
                 session,
@@ -199,75 +532,106 @@ def sync_garmin(
                 account.user_id,
                 delay=settings.garmin_call_delay_seconds,
                 progress=report_activity,
+                completion=complete_activity,
+                log_context={"sync_run_id": run.id, "sync_user_id": account.user_id},
             )
             run.activities_synced = activity_result.inserted + activity_result.updated
             session.commit()
-            health_progress = 0
+            _event(
+                session,
+                run,
+                (
+                    f"Aktivitäten abgeschlossen: {activity_result.inserted} neu, "
+                    f"{activity_result.updated} aktualisiert, {activity_result.skipped} unverändert"
+                ),
+                category="activity",
+                status="success",
+                level="success",
+                resource="activities",
+                record_count=run.activities_synced,
+            )
 
-            def report_health(resource: str, day: date) -> None:
-                nonlocal health_progress
-                health_progress += 1
-                _set_progress(
-                    session,
-                    run,
-                    stage="health",
-                    message=f"{resource} für {day.strftime('%d.%m.%Y')} wird geladen",
-                    current=health_progress,
-                )
-
+            run.stage = "health_planning"
+            run.message = "Health-Datenbereiche und Metriken werden ermittelt"
+            run.current_operation = "Health-Planung"
+            session.commit()
+            health_progress = _HealthProgress(session, run)
             health_result = sync_health_history(
                 session,
                 client,
                 account.user_id,
                 overlap_days=settings.health_sync_overlap_days,
                 delay=settings.garmin_call_delay_seconds,
-                progress=report_health,
+                progress=health_progress,
+                log_context={"sync_run_id": run.id, "sync_user_id": account.user_id},
             )
-            run.health_days_synced = health_result.unique_days_processed
-            run.current_item = health_result.unique_days_processed
-            run.total_items = health_result.unique_days_processed
+            run.health_days_synced = run.days_completed
             session.commit()
-            _set_progress(
-                session,
-                run,
-                stage="devices",
-                message="Garmin-Geräte werden aktualisiert",
-            )
-            _sync_devices(session, client, account, run.id)
+
+            run.stage = "devices"
+            run.message = "Garmin-Geräte werden aktualisiert"
+            run.current_operation = "Geräteliste"
+            session.commit()
+            _sync_devices(session, client, account, run)
+
             account.last_sync_at = datetime.now(UTC).replace(tzinfo=None)
             account.sync_status = "ok"
             account.sync_error = None
             run.status = "ok"
             run.stage = "complete"
             run.message = "Synchronisierung abgeschlossen"
-            run.current_item = run.total_items
+            run.current_operation = None
+            run.current_item = run.days_completed
+            run.total_items = run.days_total
             run.finished_at = utcnow()
             session.commit()
-            logger.info(
-                "Garmin sync %s: completed in %.1f s (%s activities, %s health days)",
-                run.id,
-                time.perf_counter() - started,
-                run.activities_synced,
-                run.health_days_synced,
+            duration_ms = (time.perf_counter() - started) * 1000
+            _event(
+                session,
+                run,
+                (
+                    f"Sync abgeschlossen: {run.activities_synced} Aktivitäten, "
+                    f"{run.days_completed} Health-Tage, "
+                    f"{health_result.api_calls} Health-API-Aufrufe"
+                ),
+                category="sync",
+                status="success",
+                level="success",
+                duration_ms=duration_ms,
             )
         except Exception as exc:
             session.rollback()
             failed_account = session.get(GarminAccount, account.id)
             failed_run = session.get(SyncRun, run.id) if run.id is not None else None
+            error_message = message_from_exception(exc)
             if failed_account is not None:
                 failed_account.sync_status = "error"
-                failed_account.sync_error = message_from_exception(exc)
+                failed_account.sync_error = error_message
             if failed_run is not None:
                 failed_run.status = "error"
                 failed_run.stage = "error"
                 failed_run.message = "Synchronisierung fehlgeschlagen"
-                failed_run.error = message_from_exception(exc)
+                failed_run.error = error_message
                 failed_run.finished_at = utcnow()
+                session.add(
+                    SyncEvent(
+                        sync_run_id=failed_run.id,
+                        level="error",
+                        category="sync",
+                        status="error",
+                        message="Synchronisierung fehlgeschlagen",
+                        duration_ms=round((time.perf_counter() - started) * 1000),
+                    )
+                )
             session.commit()
             logger.exception(
-                "Garmin sync %s: aborted after %.1f s: %s",
-                run.id,
-                time.perf_counter() - started,
-                message_from_exception(exc),
+                "Garmin sync aborted",
+                extra={
+                    "sync_run_id": run.id,
+                    "sync_user_id": account.user_id,
+                    "garmin_account_id": account.id,
+                    "duration_ms": round((time.perf_counter() - started) * 1000),
+                    "error_type": type(exc).__name__,
+                },
             )
         return run

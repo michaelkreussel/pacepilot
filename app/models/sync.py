@@ -21,7 +21,34 @@ class SyncRun(Base):
     total_items: Mapped[int] = mapped_column(Integer, default=0)
     activities_synced: Mapped[int] = mapped_column(Integer, default=0)
     health_days_synced: Mapped[int] = mapped_column(Integer, default=0)
+    activities_processed: Mapped[int] = mapped_column(Integer, default=0)
+    activities_total: Mapped[int] = mapped_column(Integer, default=0)
+    days_completed: Mapped[int] = mapped_column(Integer, default=0)
+    days_total: Mapped[int] = mapped_column(Integer, default=0)
+    operations_completed: Mapped[int] = mapped_column(Integer, default=0)
+    operations_total: Mapped[int] = mapped_column(Integer, default=0)
+    current_day: Mapped[date | None] = mapped_column(Date)
+    current_operation: Mapped[str | None] = mapped_column(String(200))
     error: Mapped[str | None] = mapped_column(String(1000))
+
+
+class SyncEvent(Base):
+    __tablename__ = "sync_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    sync_run_id: Mapped[int] = mapped_column(
+        ForeignKey("sync_runs.id", ondelete="CASCADE"), index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    level: Mapped[str] = mapped_column(String(10), default="info")
+    category: Mapped[str] = mapped_column(String(30), default="sync")
+    status: Mapped[str] = mapped_column(String(20), default="info")
+    resource: Mapped[str | None] = mapped_column(String(50))
+    day: Mapped[date | None] = mapped_column(Date)
+    operation: Mapped[str | None] = mapped_column(String(200))
+    message: Mapped[str] = mapped_column(String(500))
+    duration_ms: Mapped[int | None] = mapped_column(Integer)
+    record_count: Mapped[int | None] = mapped_column(Integer)
 
 
 class GarminSyncState(Base):
