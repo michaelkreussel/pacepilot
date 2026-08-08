@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +15,7 @@ from app.models import (
     GarminSyncState,
     User,
 )
-from app.services.garmin.activity_backfill import sync_activity_history
+from app.services.garmin.activity_backfill import _parse_datetime, sync_activity_history
 from app.services.garmin.activity_details import load_activity_details
 
 
@@ -56,6 +56,11 @@ def _activity(
         "vigorousIntensityMinutes": 15,
         "differenceBodyBattery": -18,
     }
+
+
+def test_provider_timestamps_are_normalized_to_naive_utc() -> None:
+    assert _parse_datetime(0) == datetime(1970, 1, 1)
+    assert _parse_datetime("2026-08-08T12:00:00+02:00") == datetime(2026, 8, 8, 10)
 
 
 class FakeActivityGarmin:

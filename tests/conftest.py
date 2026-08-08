@@ -29,7 +29,9 @@ def session_factory() -> Generator[sessionmaker[Session]]:
 
 
 @pytest.fixture
-def client(session_factory: sessionmaker[Session]) -> Generator[TestClient]:
+def client(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> Generator[TestClient]:
     def override_database() -> Generator[Session]:
         with session_factory() as session:
             yield session
@@ -43,24 +45,32 @@ def client(session_factory: sessionmaker[Session]) -> Generator[TestClient]:
         request.state.current_user = user
         return user
 
-    get_settings().scheduler_enabled = False
+    previous_overrides = dict(app.dependency_overrides)
+    monkeypatch.setattr(get_settings(), "scheduler_enabled", False)
     app.dependency_overrides[get_db] = override_database
     app.dependency_overrides[get_current_user] = override_current_user
-    with TestClient(app) as test_client:
-        yield test_client
-    app.dependency_overrides.clear()
+    try:
+        with TestClient(app) as test_client:
+            yield test_client
+    finally:
+        app.dependency_overrides.clear()
+        app.dependency_overrides.update(previous_overrides)
 
 
 @pytest.fixture
 def unauthenticated_client(
-    session_factory: sessionmaker[Session],
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
 ) -> Generator[TestClient]:
     def override_database() -> Generator[Session]:
         with session_factory() as session:
             yield session
 
-    get_settings().scheduler_enabled = False
+    previous_overrides = dict(app.dependency_overrides)
+    monkeypatch.setattr(get_settings(), "scheduler_enabled", False)
     app.dependency_overrides[get_db] = override_database
-    with TestClient(app) as test_client:
-        yield test_client
-    app.dependency_overrides.clear()
+    try:
+        with TestClient(app) as test_client:
+            yield test_client
+    finally:
+        app.dependency_overrides.clear()
+        app.dependency_overrides.update(previous_overrides)

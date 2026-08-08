@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from datetime import date
+from math import isfinite
 
 SPORTS = {"running", "cycling", "walking", "hiking"}
 STEP_TYPES = {"warmup", "interval", "recovery", "cooldown"}
@@ -34,6 +35,8 @@ class WorkoutValidationError(ValueError):
 def validate_workout(workout: WorkoutInput) -> None:
     if not workout.name.strip():
         raise WorkoutValidationError("Bitte einen Namen angeben.")
+    if len(workout.name) > 200:
+        raise WorkoutValidationError("Der Name darf höchstens 200 Zeichen lang sein.")
     if workout.sport not in SPORTS:
         raise WorkoutValidationError("Diese Sportart wird noch nicht unterstützt.")
     if not workout.steps:
@@ -43,7 +46,11 @@ def validate_workout(workout: WorkoutInput) -> None:
             raise WorkoutValidationError("Ein Trainingsschritt hat einen ungültigen Typ.")
         if step.duration_type not in DURATION_TYPES:
             raise WorkoutValidationError("Ein Trainingsschritt hat eine ungültige Dauer.")
-        if step.duration_value is None or step.duration_value <= 0:
+        if (
+            step.duration_value is None
+            or not isfinite(step.duration_value)
+            or step.duration_value <= 0
+        ):
             raise WorkoutValidationError("Zeit und Distanz müssen größer als null sein.")
         if not 1 <= step.repeat_count <= 50:
             raise WorkoutValidationError("Wiederholungen müssen zwischen 1 und 50 liegen.")
@@ -54,7 +61,12 @@ def validate_workout(workout: WorkoutInput) -> None:
                 raise WorkoutValidationError("Pace-Ziele sind derzeit nur beim Laufen möglich.")
             if step.target_min is None or step.target_max is None:
                 raise WorkoutValidationError("Für ein Pace-Ziel beide Grenzen angeben.")
-            if step.target_min <= 0 or step.target_max <= 0:
+            if (
+                not isfinite(step.target_min)
+                or not isfinite(step.target_max)
+                or step.target_min <= 0
+                or step.target_max <= 0
+            ):
                 raise WorkoutValidationError("Pace-Grenzen müssen größer als null sein.")
             if step.target_min > step.target_max:
                 raise WorkoutValidationError(

@@ -39,8 +39,7 @@ Normalized children include:
 
 Sampled chart detail remains compressed JSON because it is larger and is already consumed by the
 activity-detail UI. Raw activity summaries and details are isolated under
-`data/raw/activities/user-<user id>/<year>/`. The loader falls back to the previous shared path for
-legacy files.
+`data/raw/activities/user-<user id>/<year>/`.
 
 GPS samples remain inside Garmin's compressed sampled detail used by the existing map; they are not
 normalized into SQLite or used for historical trend aggregation.

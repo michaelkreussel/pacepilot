@@ -61,13 +61,11 @@ http://localhost:8000/auth/github/callback
 
 Für eine öffentliche Installation müssen die Callback-URLs HTTPS verwenden und `SESSION_HTTPS_ONLY=true` gesetzt sein. Client-Secrets und `SESSION_SECRET` dürfen nicht in Git eingecheckt werden.
 
-Bestehende Installationen können den bisherigen lokalen Nutzer samt Trainingsdaten genau einmal übernehmen. Setze dazu vor dem ersten OAuth-Login `AUTH_LEGACY_USER_EMAIL` auf die beim Provider verifizierte E-Mail-Adresse des Besitzers. Ohne diese Einstellung wird für jede neue externe Identität ein neuer Nutzer angelegt. Identitäten verschiedener Provider werden nicht automatisch allein aufgrund derselben E-Mail-Adresse zusammengeführt.
-
 ## Garmin verbinden
 
 Unter `Einstellungen` erfolgt die erste Anmeldung. Das Passwort wird nur an Garmin Connect weitergereicht. Der resultierende Token wird unter `GARMIN_TOKEN_DIR/account-<id>` gespeichert.
 
-Garmin Connect ist keine offizielle öffentliche API. MFA, Rate-Limits oder Änderungen auf Garmin-Seite können eine neue Anmeldung erforderlich machen. Bei MFA kann ein außerhalb der Weboberfläche erzeugter Token in `GARMIN_TOKEN_DIR` abgelegt werden. Ohne gültigen Token startet PacePilot weiterhin; nur Sync und Workout-Übertragung sind dann nicht verfügbar.
+Garmin Connect ist keine offizielle öffentliche API. MFA, Rate-Limits oder Änderungen auf Garmin-Seite können eine neue Anmeldung erforderlich machen. Garmin-Tokens liegen kontobezogen unter `GARMIN_TOKEN_DIR/account-<account id>/`. Ohne gültigen Token startet PacePilot weiterhin; nur Sync und Workout-Übertragung sind dann nicht verfügbar.
 
 ## Docker
 
@@ -81,10 +79,10 @@ Der Container führt beim Start `alembic upgrade head` aus und startet genau ein
 
 | Variable | Standard | Zweck |
 | --- | --- | --- |
+| `ENVIRONMENT` | `development` | `production` erzwingt sichere Session-Cookies und deaktiviert OpenAPI-Dokumentation |
 | `DATABASE_URL` | `sqlite:///./data/app.db` | SQLAlchemy-Verbindung |
 | `DATA_DIR` | `./data` | Rohdaten und lokale Laufzeitdaten |
 | `GARMIN_TOKEN_DIR` | `./data/garmin-tokens` | Garmin-Tokenablage |
-| `SYNC_DAYS` | `14` | Zeitraum je Synchronisierung |
 | `HEALTH_SYNC_OVERLAP_DAYS` | `7` | erneut geladene aktuelle Health-Tage |
 | `SYNC_INTERVAL_MINUTES` | `60` | APScheduler-Intervall |
 | `GARMIN_CALL_DELAY_SECONDS` | `0.75` | Mindestabstand historischer Garmin-Abfragen |
@@ -93,13 +91,13 @@ Der Container führt beim Start `alembic upgrade head` aus und startet genau ein
 | `SESSION_HTTPS_ONLY` | `false` | Session-Cookie ausschließlich über HTTPS senden |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | leer | Google-OpenID-Connect-Anwendung |
 | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | leer | GitHub-OAuth2-Anwendung |
-| `AUTH_LEGACY_USER_EMAIL` | leer | verifizierte E-Mail für die einmalige Übernahme bestehender Daten |
 | `GARMIN_EMAIL`, `GARMIN_PASSWORD` | leer | optionale unbeaufsichtigte Neuanmeldung |
 | `LLM_API_KEY` | leer | OpenRouter API-Key für den KI-Coach |
 | `LLM_BASE_URL` | `https://openrouter.ai/api/v1` | OpenRouter API-Basis-URL |
 | `LLM_MODEL` | leer | OpenRouter Modell-ID, zum Beispiel `openai/gpt-4o-mini` |
 
 SQLite muss auf einem lokalen Volume liegen, nicht auf SMB oder NFS. Mehrere Uvicorn-Worker sind wegen Scheduler und Prozess-Lock nicht unterstützt.
+Für eine öffentliche HTTPS-Installation müssen `ENVIRONMENT=production`, `SESSION_SECRET` und `SESSION_HTTPS_ONLY=true` gesetzt sein.
 
 ## Qualitätssicherung
 

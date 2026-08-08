@@ -30,8 +30,7 @@ can add it later without creating hourly empty requests.
 ## Multi-account Isolation
 
 Every data row and cursor is scoped by `user_id`. Garmin tokens are stored under
-`GARMIN_TOKEN_DIR/account-<account id>/`. The first existing connected account can adopt the legacy
-root `garmin_tokens.json` once; newly connected accounts write directly to their own directory.
+`GARMIN_TOKEN_DIR/account-<account id>/`.
 
 The HTTP application still needs authentication and user selection before it is safe as a public
 multi-user service. The synchronization and persistence layer no longer assumes that all connected

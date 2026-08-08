@@ -1,17 +1,24 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Form, Request
+from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse
 
 from app.auth import CurrentUser
 from app.config import get_settings
 from app.database import SessionDep
-from app.services.training_agent.backend import TrainingAgentError
+from app.services.training_agent.backend import TrainingAgentError, TrainingSnapshot
 from app.services.training_agent.context import build_training_snapshot
 from app.services.training_agent.dependencies import TrainingAgentDep
 from app.web import context, templates
 
 router = APIRouter(prefix="/coach")
+
+
+def _training_snapshot(session: SessionDep, user: CurrentUser) -> TrainingSnapshot:
+    return build_training_snapshot(session, user.id)
+
+
+TrainingSnapshotDep = Annotated[TrainingSnapshot, Depends(_training_snapshot)]
 
 
 @router.get("", response_class=HTMLResponse)
@@ -35,9 +42,8 @@ def coach(request: Request, agent: TrainingAgentDep, _: CurrentUser) -> HTMLResp
 @router.post("", response_class=HTMLResponse)
 async def ask_coach(
     request: Request,
-    session: SessionDep,
-    user: CurrentUser,
     agent: TrainingAgentDep,
+    snapshot: TrainingSnapshotDep,
     message: Annotated[str, Form(max_length=4000)],
 ) -> HTMLResponse:
     settings = get_settings()
@@ -54,7 +60,7 @@ async def ask_coach(
         status_code = 503
     else:
         try:
-            answer = await agent.respond(message, build_training_snapshot(session, user.id))
+            answer = await agent.respond(message, snapshot)
         except TrainingAgentError as exc:
             error = str(exc)
             status_code = 502

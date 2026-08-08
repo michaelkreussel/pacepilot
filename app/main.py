@@ -10,6 +10,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from app.auth import AuthenticationRequired
 from app.config import get_settings
+from app.database import engine
 from app.jobs.scheduler import start_scheduler, stop_scheduler
 from app.routes import activities, auth, coach, dashboard, plans, profile, settings, workouts
 
@@ -26,12 +27,19 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     app_settings.data_dir.mkdir(parents=True, exist_ok=True)
     app_settings.garmin_token_dir.mkdir(parents=True, exist_ok=True)
     start_scheduler()
-    yield
-    stop_scheduler()
+    try:
+        yield
+    finally:
+        stop_scheduler()
+        engine.dispose()
 
 
 settings_config = get_settings()
-app = FastAPI(title=settings_config.app_name, lifespan=lifespan)
+app = FastAPI(
+    title=settings_config.app_name,
+    lifespan=lifespan,
+    openapi_url=None if settings_config.environment == "production" else "/openapi.json",
+)
 app.add_middleware(
     SessionMiddleware,
     secret_key=settings_config.session_secret or "development-only-change-me-development-only",

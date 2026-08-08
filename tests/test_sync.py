@@ -2,6 +2,7 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -135,8 +136,7 @@ def test_sync_normalizes_and_stores_data(
     session_factory: sessionmaker[Session], monkeypatch: Any, tmp_path: Path
 ) -> None:
     settings = get_settings()
-    settings.data_dir = tmp_path
-    settings.sync_days = 2
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
     monkeypatch.setattr(settings, "health_sync_overlap_days", 2)
     monkeypatch.setattr(settings, "garmin_call_delay_seconds", 0)
     monkeypatch.setattr(
@@ -204,3 +204,24 @@ def test_sync_normalizes_and_stores_data(
         assert health.sleep_score == 82
         assert health.hrv_average == 54.0
         assert session.scalar(select(GarminDevice)) is not None
+
+
+def test_sync_releases_lock_when_initial_commit_fails(
+    session_factory: sessionmaker[Session], monkeypatch: Any
+) -> None:
+    with session_factory() as session:
+        user = User(display_name="Test")
+        session.add(user)
+        session.flush()
+        account = GarminAccount(user_id=user.id, sync_status="connected")
+        session.add(account)
+        session.commit()
+
+        def fail_commit() -> None:
+            raise RuntimeError("database unavailable")
+
+        monkeypatch.setattr(session, "commit", fail_commit)
+        with pytest.raises(RuntimeError):
+            sync_module.sync_garmin(session, account)
+
+    assert not sync_module.sync_lock.locked()

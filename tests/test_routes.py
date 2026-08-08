@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from datetime import UTC, date, datetime
 from typing import Any
 
@@ -7,6 +8,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.models import DailyHealth, GarminAccount, Workout
 from app.routes import plans as plans_module
+from app.routes import settings as settings_module
 from app.routes import workouts as workouts_module
 from app.services.garmin import sync as sync_module
 
@@ -44,6 +46,10 @@ def test_main_pages_render(client: TestClient) -> None:
         assert "PacePilot" in response.text
 
     assert client.get("/api/health").json() == {"status": "ok"}
+
+    openapi = client.get("/openapi.json").json()
+    assert "303" in openapi["paths"]["/workouts/{workout_id}/publish"]["post"]["responses"]
+    assert "303" in openapi["paths"]["/settings/garmin/sync"]["post"]["responses"]
 
 
 def test_training_plan_month_view_shows_calendar_weeks_and_workouts(
@@ -158,6 +164,16 @@ def test_invalid_workout_is_rejected(client: TestClient) -> None:
     )
     assert response.status_code == 422
     assert "Bitte einen Namen angeben" in response.text
+
+
+def test_non_finite_workout_duration_is_rejected(client: TestClient) -> None:
+    data = _workout_data()
+    data["duration_value"] = ["nan", "30", "5"]
+
+    response = client.post("/workouts", data=data)
+
+    assert response.status_code == 422
+    assert "größer als null" in response.text
 
 
 def test_edit_draft_workout(client: TestClient, session_factory: sessionmaker[Session]) -> None:
@@ -308,3 +324,117 @@ def test_delete_pushed_workout_removes_garmin_workout(
     assert garmin.deleted == ["12345"]
     with session_factory() as session:
         assert session.scalar(select(Workout)) is None
+
+
+def test_publish_retry_reuses_uploaded_garmin_workout(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: Any,
+) -> None:
+    created = client.post("/workouts", data=_workout_data(), follow_redirects=False)
+    location = created.headers["location"]
+    client.post(f"{location}/confirm")
+
+    class FakeGarmin:
+        uploads = 0
+        schedule_attempts = 0
+        fail_schedule = True
+
+        def upload_workout(self, _payload: dict[str, Any]) -> dict[str, str]:
+            self.uploads += 1
+            return {"workoutId": "remote-123"}
+
+        def get_scheduled_workouts(self, _year: int, _month: int) -> list[object]:
+            return []
+
+        def schedule_workout(self, _workout_id: str, _day: str) -> None:
+            self.schedule_attempts += 1
+            if self.fail_schedule:
+                raise RuntimeError("temporary Garmin failure")
+
+    garmin = FakeGarmin()
+    monkeypatch.setattr(
+        workouts_module,
+        "connect_garmin_account",
+        lambda _session, _account: garmin,
+    )
+
+    failed = client.post(f"{location}/publish", follow_redirects=False)
+
+    assert failed.status_code == 303
+    assert "error=" in failed.headers["location"]
+    with session_factory() as session:
+        workout = session.scalar(select(Workout))
+        assert workout is not None
+        assert workout.garmin_workout_id == "remote-123"
+        assert workout.status == "published"
+
+    garmin.fail_schedule = False
+    retried = client.post(f"{location}/publish", follow_redirects=False)
+
+    assert retried.status_code == 303
+    assert garmin.uploads == 1
+    assert garmin.schedule_attempts == 2
+
+
+def test_draft_workout_with_remote_id_cannot_be_pushed(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: Any,
+) -> None:
+    created = client.post("/workouts", data=_workout_data(), follow_redirects=False)
+    location = created.headers["location"]
+    with session_factory() as session:
+        workout = session.scalar(select(Workout))
+        assert workout is not None
+        workout.garmin_workout_id = "remote-123"
+        session.commit()
+
+    def fail_connect(*_args: object) -> object:
+        raise AssertionError("draft workout contacted Garmin")
+
+    monkeypatch.setattr(workouts_module, "connect_garmin_account", fail_connect)
+
+    response = client.post(f"{location}/push", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert "error=" in response.headers["location"]
+    with session_factory() as session:
+        workout = session.scalar(select(Workout))
+        assert workout is not None
+        assert workout.status == "draft"
+
+
+def test_manual_sync_is_queued_once(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: Any,
+) -> None:
+    client.get("/settings")
+    with session_factory() as session:
+        account = session.scalar(select(GarminAccount))
+        assert account is not None
+        account.connected_at = datetime.now(UTC).replace(tzinfo=None)
+        session.commit()
+        account_id = account.id
+
+    queued: set[int] = set()
+
+    def queue_once(queued_account_id: int, mark_queued: Callable[[], None]) -> bool:
+        if queued_account_id in queued:
+            return False
+        mark_queued()
+        queued.add(queued_account_id)
+        return True
+
+    monkeypatch.setattr(settings_module, "queue_account_sync", queue_once)
+
+    first = client.post("/settings/garmin/sync", follow_redirects=False)
+    second = client.post("/settings/garmin/sync", follow_redirects=False)
+
+    assert first.status_code == second.status_code == 303
+    assert queued == {account_id}
+    with session_factory() as session:
+        account = session.get(GarminAccount, account_id)
+        assert account is not None
+        assert account.sync_status == "queued"

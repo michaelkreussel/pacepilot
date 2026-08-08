@@ -1,9 +1,11 @@
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 from urllib.parse import urlencode
 
 from authlib.integrations.base_client.errors import OAuthError
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from httpx import HTTPError
 
@@ -77,10 +79,18 @@ async def _github_profile(client: Any, token: dict[str, Any]) -> IdentityProfile
     profile_response = await client.get("user", token=token)
     profile_response.raise_for_status()
     profile = profile_response.json()
+    if not isinstance(profile, dict):
+        raise OAuthError(description="GitHub hat kein gültiges Benutzerprofil geliefert")
     emails_response = await client.get("user/emails", token=token)
     emails_response.raise_for_status()
     emails = emails_response.json()
-    verified_emails = [item for item in emails if item.get("verified") and item.get("email")]
+    if not isinstance(emails, list):
+        raise OAuthError(description="GitHub hat keine gültigen E-Mail-Adressen geliefert")
+    verified_emails = [
+        item
+        for item in emails
+        if isinstance(item, dict) and item.get("verified") and item.get("email")
+    ]
     selected_email = next((item for item in verified_emails if item.get("primary")), None)
     if selected_email is None and verified_emails:
         selected_email = verified_emails[0]
@@ -117,17 +127,18 @@ async def oauth_callback(
         query = urlencode({"error": "Die Anmeldung konnte nicht abgeschlossen werden."})
         return RedirectResponse(f"/login?{query}", status_code=303)
 
-    settings = get_settings()
-    user = get_or_create_oauth_user(
-        session,
-        provider=provider,
-        subject=profile.subject,
-        display_name=profile.display_name,
-        email=profile.email,
-        email_verified=profile.email_verified,
-        username=profile.username,
-        avatar_url=profile.avatar_url,
-        legacy_user_email=settings.auth_legacy_user_email,
+    user = await run_in_threadpool(
+        partial(
+            get_or_create_oauth_user,
+            session,
+            provider=provider,
+            subject=profile.subject,
+            display_name=profile.display_name,
+            email=profile.email,
+            email_verified=profile.email_verified,
+            username=profile.username,
+            avatar_url=profile.avatar_url,
+        )
     )
     redirect_target = _safe_next(request.session.pop("post_login_redirect", "/"))
     request.session.clear()
@@ -135,7 +146,7 @@ async def oauth_callback(
     return RedirectResponse(redirect_target, status_code=303)
 
 
-@router.post("/logout")
+@router.post("/logout", response_class=RedirectResponse, status_code=303)
 def logout(request: Request) -> RedirectResponse:
     request.session.clear()
     return RedirectResponse("/login", status_code=303)

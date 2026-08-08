@@ -6,7 +6,6 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.auth import oauth
 from app.models import OAuthIdentity, User
-from app.repositories.users import get_or_create_oauth_user
 
 
 class FakeGoogleClient:
@@ -79,42 +78,3 @@ def test_logout_clears_session(unauthenticated_client: TestClient, monkeypatch: 
     assert response.status_code == 303
     assert response.headers["location"] == "/login"
     assert unauthenticated_client.get("/", follow_redirects=False).status_code == 303
-
-
-def test_legacy_user_is_only_adopted_by_matching_verified_email(
-    session_factory: sessionmaker[Session],
-) -> None:
-    with session_factory() as session:
-        legacy = User(display_name="Legacy")
-        session.add(legacy)
-        session.commit()
-        legacy_id = legacy.id
-
-        adopted = get_or_create_oauth_user(
-            session,
-            provider="google",
-            subject="allowed",
-            display_name="Allowed",
-            email="owner@example.com",
-            email_verified=True,
-            username=None,
-            avatar_url=None,
-            legacy_user_email="owner@example.com",
-        )
-
-        assert adopted.id == legacy_id
-
-    with session_factory() as session:
-        separate = get_or_create_oauth_user(
-            session,
-            provider="github",
-            subject="different",
-            display_name="Different",
-            email="other@example.com",
-            email_verified=True,
-            username="different",
-            avatar_url=None,
-            legacy_user_email="owner@example.com",
-        )
-
-        assert separate.id != legacy_id

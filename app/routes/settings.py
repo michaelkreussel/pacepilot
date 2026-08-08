@@ -1,20 +1,22 @@
 from datetime import UTC, datetime
-from functools import partial
 from typing import Annotated
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, BackgroundTasks, Form, Request
-from fastapi.concurrency import run_in_threadpool
+from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import select
 
 from app.auth import CurrentUser
-from app.database import SessionDep, SessionLocal
+from app.database import SessionDep
+from app.jobs.scheduler import queue_account_sync
 from app.models import GarminAccount, SyncRun
 from app.models.user import utcnow
 from app.repositories.users import get_or_create_garmin_account
-from app.services.garmin.client import connect_garmin, message_from_exception
-from app.services.garmin.sync import SyncAlreadyRunningError, sync_garmin
+from app.services.garmin.client import (
+    GarminUnavailableError,
+    connect_garmin,
+    message_from_exception,
+)
 from app.web import context, templates
 
 router = APIRouter(prefix="/settings")
@@ -46,17 +48,6 @@ def _sync_view(account: GarminAccount, sync_run: SyncRun | None) -> dict[str, ob
     }
 
 
-def _manual_sync(account_id: int) -> None:
-    with SessionLocal() as session:
-        account = session.get(GarminAccount, account_id)
-        if account is None:
-            return
-        try:
-            sync_garmin(session, account)
-        except SyncAlreadyRunningError:
-            return
-
-
 @router.get("", response_class=HTMLResponse)
 def settings_page(
     request: Request,
@@ -83,8 +74,8 @@ def sync_status(request: Request, session: SessionDep, user: CurrentUser) -> HTM
     )
 
 
-@router.post("/garmin/connect")
-async def connect_account(
+@router.post("/garmin/connect", response_class=RedirectResponse, status_code=303)
+def connect_account(
     session: SessionDep,
     user: CurrentUser,
     email: Annotated[str, Form()],
@@ -92,15 +83,8 @@ async def connect_account(
 ) -> RedirectResponse:
     account = get_or_create_garmin_account(session, user)
     try:
-        await run_in_threadpool(
-            partial(
-                connect_garmin,
-                email.strip(),
-                password,
-                account_id=account.id,
-            )
-        )
-    except Exception as exc:
+        connect_garmin(email.strip(), password, account_id=account.id)
+    except GarminUnavailableError as exc:
         account.sync_status = "error"
         account.sync_error = message_from_exception(exc)
         session.commit()
@@ -115,9 +99,8 @@ async def connect_account(
     return RedirectResponse("/settings", status_code=303)
 
 
-@router.post("/garmin/sync")
+@router.post("/garmin/sync", response_class=RedirectResponse, status_code=303)
 def start_sync(
-    background_tasks: BackgroundTasks,
     session: SessionDep,
     user: CurrentUser,
 ) -> RedirectResponse:
@@ -125,7 +108,10 @@ def start_sync(
     if account.connected_at is None:
         query = urlencode({"error": "Garmin ist noch nicht verbunden."})
         return RedirectResponse(f"/settings?{query}", status_code=303)
-    account.sync_status = "queued"
-    session.commit()
-    background_tasks.add_task(_manual_sync, account.id)
+
+    def mark_queued() -> None:
+        account.sync_status = "queued"
+        session.commit()
+
+    queue_account_sync(account.id, mark_queued)
     return RedirectResponse("/settings", status_code=303)

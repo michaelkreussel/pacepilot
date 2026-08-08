@@ -24,6 +24,19 @@ def test_validator_rejects_zero_duration() -> None:
         validate_workout(workout)
 
 
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_validator_rejects_non_finite_duration(value: float) -> None:
+    workout = WorkoutInput(
+        name="Intervals",
+        sport="running",
+        scheduled_for=date.today(),
+        description="",
+        steps=[StepInput("interval", "time", value)],
+    )
+    with pytest.raises(WorkoutValidationError):
+        validate_workout(workout)
+
+
 def test_validator_accepts_distance_warmup_and_pace_target() -> None:
     workout = WorkoutInput(
         name="Distance warmup",

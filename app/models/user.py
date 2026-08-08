@@ -26,9 +26,15 @@ class User(Base):
     garmin_account: Mapped["GarminAccount | None"] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
-    activities: Mapped[list["Activity"]] = relationship(back_populates="user")
-    health_days: Mapped[list["DailyHealth"]] = relationship(back_populates="user")
-    workouts: Mapped[list["Workout"]] = relationship(back_populates="user")
+    activities: Mapped[list["Activity"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan", passive_deletes=True
+    )
+    health_days: Mapped[list["DailyHealth"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan", passive_deletes=True
+    )
+    workouts: Mapped[list["Workout"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan", passive_deletes=True
+    )
     oauth_identities: Mapped[list["OAuthIdentity"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )

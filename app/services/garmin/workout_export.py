@@ -1,7 +1,9 @@
+from collections.abc import Callable
 from datetime import date
 from typing import Any
 
 from app.models import Workout
+from app.services.garmin.client import GarminUnavailableError
 from app.services.planning.validator import WorkoutValidationError
 
 SPORT_TYPES = {
@@ -143,25 +145,59 @@ def _create_model(workout: Workout) -> Any:
     )
 
 
-def publish_workout(client: Any, workout: Workout) -> str:
+def _garmin_call[T](message: str, call: Callable[..., T], *args: Any) -> T:
+    try:
+        return call(*args)
+    except Exception as exc:
+        raise GarminUnavailableError(message) from exc
+
+
+def upload_workout(client: Any, workout: Workout) -> str:
     model = _create_model(workout)
-    response = client.upload_workout(model.to_dict())
+    response = _garmin_call(
+        "Das Workout konnte nicht bei Garmin erstellt werden.",
+        client.upload_workout,
+        model.to_dict(),
+    )
+    if not isinstance(response, dict):
+        raise GarminUnavailableError("Garmin hat eine ungültige Antwort zurückgegeben.")
     workout_id = str(response.get("workoutId") or "")
     if not workout_id:
-        raise RuntimeError("Garmin hat keine Workout-ID zurückgegeben.")
-    if workout.scheduled_for is not None:
-        client.schedule_workout(workout_id, workout.scheduled_for.isoformat())
+        raise GarminUnavailableError("Garmin hat keine Workout-ID zurückgegeben.")
     return workout_id
+
+
+def schedule_published_workout(client: Any, workout: Workout) -> None:
+    if not workout.garmin_workout_id:
+        raise WorkoutValidationError("Das Workout muss zuerst veröffentlicht werden.")
+    if workout.scheduled_for is not None and not _scheduled_workout_ids(
+        client, workout.garmin_workout_id, workout.scheduled_for
+    ):
+        _garmin_call(
+            "Das Workout konnte nicht im Garmin-Kalender geplant werden.",
+            client.schedule_workout,
+            workout.garmin_workout_id,
+            workout.scheduled_for.isoformat(),
+        )
 
 
 def push_workout(client: Any, workout: Workout) -> None:
     if not workout.garmin_workout_id:
         raise WorkoutValidationError("Das Workout muss zuerst veröffentlicht werden.")
-    client.push_workout_to_device(workout.garmin_workout_id)
+    _garmin_call(
+        "Das Workout konnte nicht an das Garmin-Gerät gesendet werden.",
+        client.push_workout_to_device,
+        workout.garmin_workout_id,
+    )
 
 
 def _scheduled_workout_ids(client: Any, workout_id: str, scheduled_for: date) -> list[str]:
-    calendar = client.get_scheduled_workouts(scheduled_for.year, scheduled_for.month)
+    calendar = _garmin_call(
+        "Der Garmin-Kalender konnte nicht geladen werden.",
+        client.get_scheduled_workouts,
+        scheduled_for.year,
+        scheduled_for.month,
+    )
     scheduled_ids: list[str] = []
 
     def collect(value: Any) -> None:
@@ -187,24 +223,46 @@ def _unschedule_workout(client: Any, workout_id: str, scheduled_for: date | None
     if scheduled_for is None:
         return
     for scheduled_id in _scheduled_workout_ids(client, workout_id, scheduled_for):
-        client.unschedule_workout(scheduled_id)
+        _garmin_call(
+            "Die bisherige Garmin-Planung konnte nicht entfernt werden.",
+            client.unschedule_workout,
+            scheduled_id,
+        )
 
 
 def update_published_workout(client: Any, workout: Workout, previous_date: date | None) -> None:
     if not workout.garmin_workout_id:
         raise WorkoutValidationError("Das Workout muss zuerst veröffentlicht werden.")
-    client.update_workout(workout.garmin_workout_id, _create_model(workout).to_dict())
+    _garmin_call(
+        "Das Workout konnte bei Garmin nicht aktualisiert werden.",
+        client.update_workout,
+        workout.garmin_workout_id,
+        _create_model(workout).to_dict(),
+    )
     if previous_date != workout.scheduled_for:
         _unschedule_workout(client, workout.garmin_workout_id, previous_date)
         if workout.scheduled_for is not None and not _scheduled_workout_ids(
             client, workout.garmin_workout_id, workout.scheduled_for
         ):
-            client.schedule_workout(workout.garmin_workout_id, workout.scheduled_for.isoformat())
-    client.push_workout_to_device(workout.garmin_workout_id)
+            _garmin_call(
+                "Das Workout konnte nicht im Garmin-Kalender geplant werden.",
+                client.schedule_workout,
+                workout.garmin_workout_id,
+                workout.scheduled_for.isoformat(),
+            )
+    _garmin_call(
+        "Das Workout konnte nicht an das Garmin-Gerät gesendet werden.",
+        client.push_workout_to_device,
+        workout.garmin_workout_id,
+    )
 
 
 def delete_published_workout(client: Any, workout: Workout) -> None:
     if not workout.garmin_workout_id:
         return
     _unschedule_workout(client, workout.garmin_workout_id, workout.scheduled_for)
-    client.delete_workout(workout.garmin_workout_id)
+    _garmin_call(
+        "Das Workout konnte bei Garmin nicht gelöscht werden.",
+        client.delete_workout,
+        workout.garmin_workout_id,
+    )

@@ -293,12 +293,9 @@ def test_unsupported_metric_is_recorded_without_blocking_backfill(
         assert result.resources["training_status"].complete is True
 
 
-def test_account_token_directories_are_isolated_and_adopt_legacy_token(
-    monkeypatch: Any, tmp_path: Path
-) -> None:
+def test_account_token_directories_are_isolated(monkeypatch: Any, tmp_path: Path) -> None:
     settings = get_settings()
     monkeypatch.setattr(settings, "garmin_token_dir", tmp_path)
-    (tmp_path / "garmin_tokens.json").write_text('{"legacy": true}', encoding="utf-8")
     login_paths: list[Path] = []
 
     class FakeGarmin:
@@ -310,9 +307,7 @@ def test_account_token_directories_are_isolated_and_adopt_legacy_token(
 
     monkeypatch.setattr(client_module, "Garmin", FakeGarmin)
 
-    client_module.connect_garmin(account_id=1, adopt_legacy_tokens=True)
+    client_module.connect_garmin(account_id=1)
     client_module.connect_garmin(account_id=2)
 
     assert login_paths == [tmp_path / "account-1", tmp_path / "account-2"]
-    assert (tmp_path / "account-1" / "garmin_tokens.json").is_file()
-    assert not (tmp_path / "account-2" / "garmin_tokens.json").exists()
