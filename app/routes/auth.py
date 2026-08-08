@@ -10,7 +10,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from httpx import HTTPError
 
 from app.auth import PROVIDERS, SESSION_USER_ID, configured_providers, oauth
-from app.config import get_settings
+from app.config import Settings, get_settings
 from app.database import SessionDep
 from app.repositories.users import get_or_create_oauth_user
 from app.web import context, templates
@@ -32,6 +32,12 @@ def _safe_next(value: str | None) -> str:
     if value and value.startswith("/") and not value.startswith("//"):
         return value
     return "/"
+
+
+def _callback_url(request: Request, provider: str, settings: Settings) -> str:
+    if settings.public_base_url:
+        return f"{settings.public_base_url.rstrip('/')}/auth/{provider}/callback"
+    return str(request.url_for("oauth_callback", provider=provider))
 
 
 @router.get("/login", response_class=HTMLResponse)
@@ -57,7 +63,8 @@ async def oauth_login(provider: str, request: Request, next: str | None = None) 
         raise HTTPException(status_code=404, detail="Anmeldeanbieter nicht konfiguriert")
     request.session.clear()
     request.session["post_login_redirect"] = _safe_next(next)
-    redirect_uri = request.url_for("oauth_callback", provider=provider)
+    settings = get_settings()
+    redirect_uri = _callback_url(request, provider, settings)
     return await client.authorize_redirect(request, redirect_uri)
 
 

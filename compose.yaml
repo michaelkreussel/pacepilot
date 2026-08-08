@@ -5,7 +5,7 @@ services:
     ports:
       - "${PORT:-8000}:8000"
     volumes:
-      - pacepilot-data:/data
+      - ${DATA_DIR:-./data}:/data
     environment:
       ENVIRONMENT: ${ENVIRONMENT:-development}
       DATABASE_URL: sqlite:////data/app.db
@@ -13,6 +13,7 @@ services:
       GARMIN_TOKEN_DIR: /data/garmin-tokens
       SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET must be set}
       SESSION_HTTPS_ONLY: ${SESSION_HTTPS_ONLY:-false}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
@@ -21,6 +22,3 @@ services:
       LLM_BASE_URL: ${LLM_BASE_URL:-https://openrouter.ai/api/v1}
       LLM_MODEL: ${LLM_MODEL:-}
     restart: unless-stopped
-
-volumes:
-  pacepilot-data:
