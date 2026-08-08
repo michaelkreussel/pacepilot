@@ -20,6 +20,13 @@ class Settings(BaseSettings):
     sync_interval_minutes: int = Field(default=60, ge=5)
     garmin_call_delay_seconds: float = Field(default=0.75, ge=0, le=10)
     scheduler_enabled: bool = True
+    session_secret: str | None = Field(default=None, min_length=32)
+    session_https_only: bool = False
+    google_client_id: str | None = None
+    google_client_secret: str | None = None
+    github_client_id: str | None = None
+    github_client_secret: str | None = None
+    auth_legacy_user_email: str | None = None
     llm_api_key: str | None = None
     llm_base_url: str = "https://openrouter.ai/api/v1"
     llm_model: str = ""

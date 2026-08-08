@@ -26,6 +26,7 @@ def test_initial_migration_matches_models(tmp_path: Path) -> None:
         "garmin_accounts",
         "garmin_devices",
         "garmin_sync_states",
+        "oauth_identities",
         "sleep_stages",
         "sync_runs",
         "users",
@@ -69,6 +70,6 @@ def test_migration_adopts_legacy_create_all_schema(tmp_path: Path) -> None:
         health_updated_at = connection.execute(
             text("SELECT updated_at FROM daily_health WHERE id = 1")
         ).scalar()
-    assert revision == "20260808_02"
+    assert revision == "20260808_03"
     assert activity_count == 1
     assert health_updated_at is not None

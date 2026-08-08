@@ -2,7 +2,6 @@ from datetime import date
 from typing import Any
 
 from app.models import Workout
-from app.services.garmin.client import connect_garmin
 from app.services.planning.validator import WorkoutValidationError
 
 SPORT_TYPES = {
@@ -144,8 +143,7 @@ def _create_model(workout: Workout) -> Any:
     )
 
 
-def publish_workout(workout: Workout) -> str:
-    client = connect_garmin()
+def publish_workout(client: Any, workout: Workout) -> str:
     model = _create_model(workout)
     response = client.upload_workout(model.to_dict())
     workout_id = str(response.get("workoutId") or "")
@@ -156,10 +154,10 @@ def publish_workout(workout: Workout) -> str:
     return workout_id
 
 
-def push_workout(workout: Workout) -> None:
+def push_workout(client: Any, workout: Workout) -> None:
     if not workout.garmin_workout_id:
         raise WorkoutValidationError("Das Workout muss zuerst veröffentlicht werden.")
-    connect_garmin().push_workout_to_device(workout.garmin_workout_id)
+    client.push_workout_to_device(workout.garmin_workout_id)
 
 
 def _scheduled_workout_ids(client: Any, workout_id: str, scheduled_for: date) -> list[str]:
@@ -192,10 +190,9 @@ def _unschedule_workout(client: Any, workout_id: str, scheduled_for: date | None
         client.unschedule_workout(scheduled_id)
 
 
-def update_published_workout(workout: Workout, previous_date: date | None) -> None:
+def update_published_workout(client: Any, workout: Workout, previous_date: date | None) -> None:
     if not workout.garmin_workout_id:
         raise WorkoutValidationError("Das Workout muss zuerst veröffentlicht werden.")
-    client = connect_garmin()
     client.update_workout(workout.garmin_workout_id, _create_model(workout).to_dict())
     if previous_date != workout.scheduled_for:
         _unschedule_workout(client, workout.garmin_workout_id, previous_date)
@@ -206,9 +203,8 @@ def update_published_workout(workout: Workout, previous_date: date | None) -> No
     client.push_workout_to_device(workout.garmin_workout_id)
 
 
-def delete_published_workout(workout: Workout) -> None:
+def delete_published_workout(client: Any, workout: Workout) -> None:
     if not workout.garmin_workout_id:
         return
-    client = connect_garmin()
     _unschedule_workout(client, workout.garmin_workout_id, workout.scheduled_for)
     client.delete_workout(workout.garmin_workout_id)

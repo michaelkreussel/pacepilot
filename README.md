@@ -5,6 +5,7 @@ PacePilot ist ein kleiner, selbst gehosteter Trainingsbegleiter für Garmin Conn
 ## Aktueller Umfang
 
 - Garmin-Anmeldung mit kontobezogen gespeichertem Token, ohne Passwortspeicherung in SQLite
+- Anmeldung über Google OpenID Connect oder GitHub OAuth2 mit signierter Session
 - fortsetzbare historische Synchronisierung von Health-Tageswerten, Schlaf, HRV und Fitnesswerten
 - vollständiger, inkrementeller Aktivitätsverlauf mit Runden, Zonen und Krafttrainingssätzen
 - deterministische Gesundheits-, Readiness- und sportartspezifische Trainingsanalysen
@@ -32,7 +33,7 @@ uv run alembic upgrade head
 uv run uvicorn app.main:app --reload
 ```
 
-Danach ist PacePilot unter <http://localhost:8000> erreichbar. Beim ersten Seitenaufruf wird der lokale Standardnutzer erzeugt.
+Danach ist PacePilot unter <http://localhost:8000> erreichbar. Vor dem ersten Login muss mindestens ein Anmeldeanbieter konfiguriert sein.
 
 Die Konfiguration kann aus `.env` gelesen werden:
 
@@ -41,6 +42,26 @@ cp .env.example .env
 ```
 
 Unter Windows kann die Beispieldatei einfach als `.env` dupliziert werden.
+
+## Anmeldung konfigurieren
+
+PacePilot verwendet [Authlib](https://authlib.org/) für OAuth2 und OpenID Connect. Google wird über OpenID Connect Discovery angebunden. GitHub stellt für Benutzer-Logins kein OpenID Connect bereit und wird deshalb über den OAuth2-Flow sowie die verifizierte GitHub-E-Mail-API angebunden.
+
+1. Erzeuge `SESSION_SECRET` mit mindestens 32 zufälligen Bytes, zum Beispiel mit `python -c "import secrets; print(secrets.token_urlsafe(48))"`.
+2. Lege bei Google und/oder GitHub eine OAuth-Anwendung an.
+3. Trage Client-ID und Client-Secret in `.env` ein.
+4. Hinterlege beim Provider die passende Callback-URL.
+
+Lokale Callback-URLs:
+
+```text
+http://localhost:8000/auth/google/callback
+http://localhost:8000/auth/github/callback
+```
+
+Für eine öffentliche Installation müssen die Callback-URLs HTTPS verwenden und `SESSION_HTTPS_ONLY=true` gesetzt sein. Client-Secrets und `SESSION_SECRET` dürfen nicht in Git eingecheckt werden.
+
+Bestehende Installationen können den bisherigen lokalen Nutzer samt Trainingsdaten genau einmal übernehmen. Setze dazu vor dem ersten OAuth-Login `AUTH_LEGACY_USER_EMAIL` auf die beim Provider verifizierte E-Mail-Adresse des Besitzers. Ohne diese Einstellung wird für jede neue externe Identität ein neuer Nutzer angelegt. Identitäten verschiedener Provider werden nicht automatisch allein aufgrund derselben E-Mail-Adresse zusammengeführt.
 
 ## Garmin verbinden
 
@@ -68,6 +89,11 @@ Der Container führt beim Start `alembic upgrade head` aus und startet genau ein
 | `SYNC_INTERVAL_MINUTES` | `60` | APScheduler-Intervall |
 | `GARMIN_CALL_DELAY_SECONDS` | `0.75` | Mindestabstand historischer Garmin-Abfragen |
 | `SCHEDULER_ENABLED` | `true` | Hintergrundjobs aktivieren |
+| `SESSION_SECRET` | Development-Fallback ohne Login | Signatur der Session-Cookies; mit aktiviertem Login zwingend setzen |
+| `SESSION_HTTPS_ONLY` | `false` | Session-Cookie ausschließlich über HTTPS senden |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | leer | Google-OpenID-Connect-Anwendung |
+| `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | leer | GitHub-OAuth2-Anwendung |
+| `AUTH_LEGACY_USER_EMAIL` | leer | verifizierte E-Mail für die einmalige Übernahme bestehender Daten |
 | `GARMIN_EMAIL`, `GARMIN_PASSWORD` | leer | optionale unbeaufsichtigte Neuanmeldung |
 | `LLM_API_KEY` | leer | OpenRouter API-Key für den KI-Coach |
 | `LLM_BASE_URL` | `https://openrouter.ai/api/v1` | OpenRouter API-Basis-URL |
@@ -99,4 +125,4 @@ migrations/          Alembic-Schemaänderungen
 tests/               Integrations- und Unit-Tests
 ```
 
-PacePilot ist derzeit für einen lokalen Standardnutzer ausgelegt. Vor einer öffentlich erreichbaren Mehrnutzerinstallation fehlen noch HTTP-Authentifizierung, Nutzerverwaltung und CSRF-Schutz.
+PacePilot trennt Anwendungsdaten anhand des angemeldeten Nutzers. Für eine öffentlich erreichbare Installation bleiben administrative Nutzerverwaltung und zusätzliche CSRF-Härtung für zustandsändernde Formulare wichtige Betriebsaufgaben.

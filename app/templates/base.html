@@ -28,7 +28,13 @@
         <a class="nav-item {{ 'active' if active_page == 'workout-new' else '' }}" href="/workouts/new">Workout erstellen</a>
         <a class="nav-item {{ 'active' if active_page == 'coach' else '' }}" href="/coach">KI-Coach <span class="nav-badge">Beta</span></a>
       </nav>
-      <a class="nav-item settings-link {{ 'active' if active_page == 'settings' else '' }}" href="/settings">Einstellungen</a>
+      <div class="sidebar-footer">
+        <a class="nav-item {{ 'active' if active_page == 'settings' else '' }}" href="/settings">Einstellungen</a>
+        <div class="signed-in-user">
+          <span>{{ current_user.display_name }}</span>
+          <form method="post" action="/logout"><button type="submit">Abmelden</button></form>
+        </div>
+      </div>
     </aside>
     <main class="main">
       <header class="mobile-header">

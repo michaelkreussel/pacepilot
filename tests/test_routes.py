@@ -7,8 +7,8 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.models import DailyHealth, GarminAccount, Workout
 from app.routes import plans as plans_module
+from app.routes import workouts as workouts_module
 from app.services.garmin import sync as sync_module
-from app.services.garmin import workout_export as workout_export_module
 
 
 def _workout_data(
@@ -233,7 +233,13 @@ def test_edit_pushed_workout_updates_garmin_and_device(
             return {}
 
     garmin = FakeGarmin()
-    monkeypatch.setattr(workout_export_module, "connect_garmin", lambda: garmin)
+    connected_account_ids: list[int] = []
+
+    def connect_test_account(_session: Session, account: GarminAccount) -> FakeGarmin:
+        connected_account_ids.append(account.id)
+        return garmin
+
+    monkeypatch.setattr(workouts_module, "connect_garmin_account", connect_test_account)
 
     response = client.post(
         location,
@@ -250,6 +256,11 @@ def test_edit_pushed_workout_updates_garmin_and_device(
     with session_factory() as session:
         workout = session.scalar(select(Workout))
         assert workout is not None
+        account = session.scalar(
+            select(GarminAccount).where(GarminAccount.user_id == workout.user_id)
+        )
+        assert account is not None
+        assert connected_account_ids == [account.id]
         assert workout.name == "Garmin Update"
         assert workout.scheduled_for == date(2026, 8, 10)
         assert workout.status == "pushed"
@@ -283,7 +294,11 @@ def test_delete_pushed_workout_removes_garmin_workout(
             self.deleted.append(workout_id)
 
     garmin = FakeGarmin()
-    monkeypatch.setattr(workout_export_module, "connect_garmin", lambda: garmin)
+    monkeypatch.setattr(
+        workouts_module,
+        "connect_garmin_account",
+        lambda _session, _account: garmin,
+    )
 
     response = client.post(f"{location}/delete", follow_redirects=False)
 

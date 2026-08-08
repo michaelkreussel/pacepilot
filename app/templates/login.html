@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Anmelden · PacePilot</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', path='/css/app.css') }}?v=20260808-1">
+</head>
+<body class="login-body">
+  <main class="login-shell">
+    <section class="login-intro">
+      <a class="brand" href="/login"><span class="brand-mark">P</span><span>PacePilot</span></a>
+      <p class="eyebrow light">Dein Training. Dein Rhythmus.</p>
+      <h1>Trainingsdaten gehören in sichere Hände.</h1>
+      <p>PacePilot verbindet Planung, Erholung und Garmin-Daten in deinem persönlichen Trainingsraum.</p>
+    </section>
+    <section class="login-card" aria-labelledby="login-title">
+      <p class="eyebrow">Willkommen zurück</p>
+      <h2 id="login-title">Bei PacePilot anmelden</h2>
+      <p class="login-copy">Wähle deinen bestehenden Account. PacePilot erhält niemals dein Passwort.</p>
+      {% if error %}<div class="alert" role="alert">{{ error }}</div>{% endif %}
+      {% if providers %}
+        <div class="login-providers">
+          {% for provider in providers %}
+            <a class="button login-provider login-provider-{{ provider.name }}" href="/auth/{{ provider.name }}/login?next={{ next | urlencode }}">
+              <span class="provider-mark">{{ 'G' if provider.name == 'google' else 'GH' }}</span>
+              Weiter mit {{ provider.label }}
+            </a>
+          {% endfor %}
+        </div>
+      {% else %}
+        <div class="alert" role="status">Es ist noch kein Anmeldeanbieter konfiguriert.</div>
+      {% endif %}
+      <p class="login-note">Mit der Anmeldung wird nur eine verifizierte Identität mit deinen PacePilot-Daten verknüpft.</p>
+    </section>
+  </main>
+</body>
+</html>

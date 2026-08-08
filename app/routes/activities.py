@@ -4,9 +4,9 @@ from typing import Annotated
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 
+from app.auth import CurrentUser
 from app.database import SessionDep
 from app.repositories.activities import find_activity, list_activities_filtered
-from app.repositories.users import get_or_create_default_user
 from app.services.garmin.activity_details import load_activity_details
 from app.web import context, templates
 
@@ -17,13 +17,13 @@ router = APIRouter(prefix="/activities")
 def activities(
     request: Request,
     session: SessionDep,
+    user: CurrentUser,
     from_date: Annotated[date | None, Query(alias="from")] = None,
     to_date: Annotated[date | None, Query(alias="to")] = None,
     sport: str | None = None,
 ) -> HTMLResponse:
     if from_date is not None and to_date is not None and from_date > to_date:
         raise HTTPException(status_code=400, detail="Der Start darf nicht nach dem Ende liegen")
-    user = get_or_create_default_user(session)
     return templates.TemplateResponse(
         request,
         "activities/index.html",
@@ -46,8 +46,9 @@ def activities(
 
 
 @router.get("/{activity_id}", response_class=HTMLResponse)
-def activity_detail(activity_id: int, request: Request, session: SessionDep) -> HTMLResponse:
-    user = get_or_create_default_user(session)
+def activity_detail(
+    activity_id: int, request: Request, session: SessionDep, user: CurrentUser
+) -> HTMLResponse:
     activity = find_activity(session, user.id, activity_id)
     if activity is None:
         raise HTTPException(status_code=404, detail="Aktivität nicht gefunden")

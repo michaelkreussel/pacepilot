@@ -3,9 +3,9 @@ from typing import Annotated
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse
 
+from app.auth import CurrentUser
 from app.config import get_settings
 from app.database import SessionDep
-from app.repositories.users import get_or_create_default_user
 from app.services.training_agent.backend import TrainingAgentError
 from app.services.training_agent.context import build_training_snapshot
 from app.services.training_agent.dependencies import TrainingAgentDep
@@ -15,7 +15,7 @@ router = APIRouter(prefix="/coach")
 
 
 @router.get("", response_class=HTMLResponse)
-def coach(request: Request, agent: TrainingAgentDep) -> HTMLResponse:
+def coach(request: Request, agent: TrainingAgentDep, _: CurrentUser) -> HTMLResponse:
     settings = get_settings()
     return templates.TemplateResponse(
         request,
@@ -36,6 +36,7 @@ def coach(request: Request, agent: TrainingAgentDep) -> HTMLResponse:
 async def ask_coach(
     request: Request,
     session: SessionDep,
+    user: CurrentUser,
     agent: TrainingAgentDep,
     message: Annotated[str, Form(max_length=4000)],
 ) -> HTMLResponse:
@@ -52,7 +53,6 @@ async def ask_coach(
         error = "Konfiguriere zuerst OpenRouter, bevor du den Coach fragst."
         status_code = 503
     else:
-        user = get_or_create_default_user(session)
         try:
             answer = await agent.respond(message, build_training_snapshot(session, user.id))
         except TrainingAgentError as exc:

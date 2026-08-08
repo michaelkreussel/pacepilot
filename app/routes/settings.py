@@ -8,10 +8,11 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import select
 
+from app.auth import CurrentUser
 from app.database import SessionDep, SessionLocal
 from app.models import GarminAccount, SyncRun
 from app.models.user import utcnow
-from app.repositories.users import get_or_create_default_user, get_or_create_garmin_account
+from app.repositories.users import get_or_create_garmin_account
 from app.services.garmin.client import connect_garmin, message_from_exception
 from app.services.garmin.sync import SyncAlreadyRunningError, sync_garmin
 from app.web import context, templates
@@ -60,9 +61,9 @@ def _manual_sync(account_id: int) -> None:
 def settings_page(
     request: Request,
     session: SessionDep,
+    user: CurrentUser,
     error: str | None = None,
 ) -> HTMLResponse:
-    user = get_or_create_default_user(session)
     account = get_or_create_garmin_account(session, user)
     values = _sync_view(account, _latest_sync(session, user.id))
     return templates.TemplateResponse(
@@ -73,8 +74,7 @@ def settings_page(
 
 
 @router.get("/sync-status", response_class=HTMLResponse)
-def sync_status(request: Request, session: SessionDep) -> HTMLResponse:
-    user = get_or_create_default_user(session)
+def sync_status(request: Request, session: SessionDep, user: CurrentUser) -> HTMLResponse:
     account = get_or_create_garmin_account(session, user)
     return templates.TemplateResponse(
         request,
@@ -86,10 +86,10 @@ def sync_status(request: Request, session: SessionDep) -> HTMLResponse:
 @router.post("/garmin/connect")
 async def connect_account(
     session: SessionDep,
+    user: CurrentUser,
     email: Annotated[str, Form()],
     password: Annotated[str, Form()],
 ) -> RedirectResponse:
-    user = get_or_create_default_user(session)
     account = get_or_create_garmin_account(session, user)
     try:
         await run_in_threadpool(
@@ -119,8 +119,8 @@ async def connect_account(
 def start_sync(
     background_tasks: BackgroundTasks,
     session: SessionDep,
+    user: CurrentUser,
 ) -> RedirectResponse:
-    user = get_or_create_default_user(session)
     account = get_or_create_garmin_account(session, user)
     if account.connected_at is None:
         query = urlencode({"error": "Garmin ist noch nicht verbunden."})

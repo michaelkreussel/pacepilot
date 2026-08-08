@@ -57,4 +57,8 @@ templates.env.filters.update(
 
 
 def context(request: Request, **values: Any) -> dict[str, Any]:
-    return {"request": request, **values}
+    return {
+        "request": request,
+        "current_user": getattr(request.state, "current_user", None),
+        **values,
+    }

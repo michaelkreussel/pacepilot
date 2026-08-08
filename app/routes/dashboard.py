@@ -6,10 +6,11 @@ from fastapi.responses import HTMLResponse
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
+from app.auth import CurrentUser
 from app.database import SessionDep
 from app.models import Activity, DailyHealth, Workout
 from app.repositories.health import recent_health
-from app.repositories.users import get_or_create_default_user, get_or_create_garmin_account
+from app.repositories.users import get_or_create_garmin_account
 from app.services.analytics.training_load import calculate_weekly_load
 from app.services.garmin.sync import SyncAlreadyRunningError, refresh_daily_summary
 from app.web import context, templates
@@ -24,8 +25,7 @@ def _today_health(session: SessionDep, user_id: int) -> DailyHealth | None:
 
 
 @router.get("/", response_class=HTMLResponse)
-def dashboard(request: Request, session: SessionDep) -> HTMLResponse:
-    user = get_or_create_default_user(session)
+def dashboard(request: Request, session: SessionDep, user: CurrentUser) -> HTMLResponse:
     account = get_or_create_garmin_account(session, user)
     latest_activity = session.scalar(
         select(Activity)
@@ -60,8 +60,7 @@ def dashboard(request: Request, session: SessionDep) -> HTMLResponse:
 
 
 @router.get("/health", response_class=HTMLResponse)
-def health_cards(request: Request, session: SessionDep) -> HTMLResponse:
-    user = get_or_create_default_user(session)
+def health_cards(request: Request, session: SessionDep, user: CurrentUser) -> HTMLResponse:
     latest_health = _today_health(session, user.id)
     return templates.TemplateResponse(
         request,
@@ -75,8 +74,7 @@ def health_cards(request: Request, session: SessionDep) -> HTMLResponse:
 
 
 @router.post("/health", response_class=HTMLResponse)
-def refresh_health_cards(request: Request, session: SessionDep) -> HTMLResponse:
-    user = get_or_create_default_user(session)
+def refresh_health_cards(request: Request, session: SessionDep, user: CurrentUser) -> HTMLResponse:
     account = get_or_create_garmin_account(session, user)
     if account.connected_at is not None:
         with suppress(SyncAlreadyRunningError):

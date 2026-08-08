@@ -4,9 +4,9 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import HTMLResponse
 
+from app.auth import CurrentUser
 from app.database import SessionDep
 from app.models import Workout
-from app.repositories.users import get_or_create_default_user
 from app.repositories.workouts import workouts_between
 from app.web import context, templates
 
@@ -32,11 +32,11 @@ MONTH_NAMES = (
 def training_plan(
     request: Request,
     session: SessionDep,
+    user: CurrentUser,
     view: Literal["week", "month"] = "week",
     week: Annotated[int, Query(ge=-52, le=52)] = 0,
     month: Annotated[int, Query(ge=-120, le=120)] = 0,
 ) -> HTMLResponse:
-    user = get_or_create_default_user(session)
     today = date.today()
 
     if view == "month":

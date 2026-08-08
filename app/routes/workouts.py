@@ -5,11 +5,12 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from sqlalchemy.orm import Session
 
+from app.auth import CurrentUser
 from app.database import SessionDep
-from app.models import Workout, WorkoutStep
-from app.repositories.users import get_or_create_default_user
+from app.models import User, Workout, WorkoutStep
+from app.repositories.users import get_or_create_garmin_account
 from app.repositories.workouts import find_workout
-from app.services.garmin.client import message_from_exception
+from app.services.garmin.client import connect_garmin_account, message_from_exception
 from app.services.garmin.workout_export import (
     delete_published_workout,
     publish_workout,
@@ -129,7 +130,7 @@ async def _parse_workout(request: Request) -> WorkoutInput:
 
 
 @router.get("/new", response_class=HTMLResponse)
-def new_workout(request: Request) -> HTMLResponse:
+def new_workout(request: Request, _: CurrentUser) -> HTMLResponse:
     return templates.TemplateResponse(
         request,
         "workouts/form.html",
@@ -145,7 +146,7 @@ def new_workout(request: Request) -> HTMLResponse:
 
 
 @router.post("", response_class=HTMLResponse)
-async def create_workout(request: Request, session: SessionDep) -> Response:
+async def create_workout(request: Request, session: SessionDep, user: CurrentUser) -> Response:
     try:
         data = await _parse_workout(request)
     except WorkoutValidationError as exc:
@@ -162,7 +163,6 @@ async def create_workout(request: Request, session: SessionDep) -> Response:
             ),
             status_code=422,
         )
-    user = get_or_create_default_user(session)
     workout = Workout(
         user_id=user.id,
         name=data.name,
@@ -177,12 +177,16 @@ async def create_workout(request: Request, session: SessionDep) -> Response:
     return RedirectResponse(f"/workouts/{workout.id}", status_code=303)
 
 
-def _get_workout(session: Session, workout_id: int) -> Workout:
-    user = get_or_create_default_user(session)
-    workout = find_workout(session, user.id, workout_id)
+def _get_workout(session: Session, user_id: int, workout_id: int) -> Workout:
+    workout = find_workout(session, user_id, workout_id)
     if workout is None:
         raise HTTPException(status_code=404, detail="Workout nicht gefunden")
     return workout
+
+
+def _garmin_client(session: Session, user: User) -> object:
+    account = get_or_create_garmin_account(session, user)
+    return connect_garmin_account(session, account)
 
 
 def _replace_workout_steps(workout: Workout, data: WorkoutInput) -> None:
@@ -207,6 +211,7 @@ def workout_detail(
     workout_id: int,
     request: Request,
     session: SessionDep,
+    user: CurrentUser,
     error: str | None = None,
 ) -> HTMLResponse:
     return templates.TemplateResponse(
@@ -215,15 +220,17 @@ def workout_detail(
         context(
             request,
             active_page="plans",
-            workout=_get_workout(session, workout_id),
+            workout=_get_workout(session, user.id, workout_id),
             error=error,
         ),
     )
 
 
 @router.get("/{workout_id}/edit", response_class=HTMLResponse)
-def edit_workout(workout_id: int, request: Request, session: SessionDep) -> HTMLResponse:
-    workout = _get_workout(session, workout_id)
+def edit_workout(
+    workout_id: int, request: Request, session: SessionDep, user: CurrentUser
+) -> HTMLResponse:
+    workout = _get_workout(session, user.id, workout_id)
     return templates.TemplateResponse(
         request,
         "workouts/form.html",
@@ -239,8 +246,10 @@ def edit_workout(workout_id: int, request: Request, session: SessionDep) -> HTML
 
 
 @router.post("/{workout_id}", response_class=HTMLResponse)
-async def update_workout(workout_id: int, request: Request, session: SessionDep) -> Response:
-    workout = _get_workout(session, workout_id)
+async def update_workout(
+    workout_id: int, request: Request, session: SessionDep, user: CurrentUser
+) -> Response:
+    workout = _get_workout(session, user.id, workout_id)
     try:
         data = await _parse_workout(request)
     except WorkoutValidationError as exc:
@@ -266,7 +275,7 @@ async def update_workout(workout_id: int, request: Request, session: SessionDep)
     _replace_workout_steps(workout, data)
     try:
         if workout.garmin_workout_id:
-            update_published_workout(workout, previous_date)
+            update_published_workout(_garmin_client(session, user), workout, previous_date)
             workout.status = "pushed"
         session.commit()
     except Exception as exc:
@@ -277,10 +286,11 @@ async def update_workout(workout_id: int, request: Request, session: SessionDep)
 
 
 @router.post("/{workout_id}/delete")
-def delete_workout(workout_id: int, session: SessionDep) -> RedirectResponse:
-    workout = _get_workout(session, workout_id)
+def delete_workout(workout_id: int, session: SessionDep, user: CurrentUser) -> RedirectResponse:
+    workout = _get_workout(session, user.id, workout_id)
     try:
-        delete_published_workout(workout)
+        if workout.garmin_workout_id:
+            delete_published_workout(_garmin_client(session, user), workout)
         session.delete(workout)
         session.commit()
     except Exception as exc:
@@ -291,8 +301,8 @@ def delete_workout(workout_id: int, session: SessionDep) -> RedirectResponse:
 
 
 @router.post("/{workout_id}/confirm")
-def confirm_workout(workout_id: int, session: SessionDep) -> RedirectResponse:
-    workout = _get_workout(session, workout_id)
+def confirm_workout(workout_id: int, session: SessionDep, user: CurrentUser) -> RedirectResponse:
+    workout = _get_workout(session, user.id, workout_id)
     if workout.status == "draft":
         workout.status = "confirmed"
         session.commit()
@@ -300,8 +310,8 @@ def confirm_workout(workout_id: int, session: SessionDep) -> RedirectResponse:
 
 
 @router.post("/{workout_id}/publish")
-def publish(workout_id: int, session: SessionDep) -> RedirectResponse:
-    workout = _get_workout(session, workout_id)
+def publish(workout_id: int, session: SessionDep, user: CurrentUser) -> RedirectResponse:
+    workout = _get_workout(session, user.id, workout_id)
     if workout.status not in {"confirmed", "published", "pushed"}:
         error = "Bitte den Entwurf vor der Übertragung bestätigen."
         return RedirectResponse(
@@ -309,7 +319,7 @@ def publish(workout_id: int, session: SessionDep) -> RedirectResponse:
         )
     try:
         if not workout.garmin_workout_id:
-            workout.garmin_workout_id = publish_workout(workout)
+            workout.garmin_workout_id = publish_workout(_garmin_client(session, user), workout)
         workout.status = "published"
         session.commit()
     except Exception as exc:
@@ -320,10 +330,10 @@ def publish(workout_id: int, session: SessionDep) -> RedirectResponse:
 
 
 @router.post("/{workout_id}/push")
-def push(workout_id: int, session: SessionDep) -> RedirectResponse:
-    workout = _get_workout(session, workout_id)
+def push(workout_id: int, session: SessionDep, user: CurrentUser) -> RedirectResponse:
+    workout = _get_workout(session, user.id, workout_id)
     try:
-        push_workout(workout)
+        push_workout(_garmin_client(session, user), workout)
         workout.status = "pushed"
         session.commit()
     except Exception as exc:

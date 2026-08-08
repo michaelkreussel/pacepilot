@@ -5,8 +5,9 @@ from typing import Any, Literal
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
+from app.auth import CurrentUser
 from app.database import SessionDep
-from app.repositories.users import get_or_create_default_user, get_or_create_garmin_account
+from app.repositories.users import get_or_create_garmin_account
 from app.services.analytics import AthleteDataService
 from app.services.analytics.health_trends import MetricTrend
 from app.services.analytics.training_trends import RecentWorkout, TrainingTimelinePoint
@@ -574,6 +575,7 @@ def _decorate_charts(charts: list[dict[str, Any]]) -> None:
 def profile(
     request: Request,
     session: SessionDep,
+    user: CurrentUser,
     period: Period = "month",
     end: date | None = None,
 ) -> HTMLResponse:
@@ -587,7 +589,6 @@ def profile(
         )
     days = next(days for key, _, days in PERIODS if key == period)
     start = end_date - timedelta(days=days - 1)
-    user = get_or_create_default_user(session)
     account = get_or_create_garmin_account(session, user)
     analytics = AthleteDataService(session, user.id, as_of=end_date)
     recovery = analytics.get_current_recovery_state()
