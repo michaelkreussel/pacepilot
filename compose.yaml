@@ -5,7 +5,7 @@ services:
     ports:
       - "${PORT:-8000}:8000"
     volumes:
-      - pacepilot-data:/data
+      - ${DATA_DIR:-./data}:/data
     environment:
       ENVIRONMENT: ${ENVIRONMENT:-development}
       DATABASE_URL: sqlite:////data/app.db
@@ -21,6 +21,3 @@ services:
       LLM_BASE_URL: ${LLM_BASE_URL:-https://openrouter.ai/api/v1}
       LLM_MODEL: ${LLM_MODEL:-}
     restart: unless-stopped
-
-volumes:
-  pacepilot-data:
