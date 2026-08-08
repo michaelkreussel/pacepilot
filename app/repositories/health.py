@@ -78,6 +78,22 @@ def latest_health_on_or_before(session: Session, user_id: int, day: date) -> Dai
     )
 
 
+def empty_data_days(
+    session: Session, user_id: int, resource: str, start: date, end: date
+) -> set[date]:
+    return set(
+        session.scalars(
+            select(DailyDataStatus.day).where(
+                DailyDataStatus.user_id == user_id,
+                DailyDataStatus.resource == resource,
+                DailyDataStatus.status == "empty",
+                DailyDataStatus.day >= start,
+                DailyDataStatus.day <= end,
+            )
+        )
+    )
+
+
 def replace_sleep_stages(
     session: Session, health: DailyHealth, stages: Iterable[SleepStage]
 ) -> None:

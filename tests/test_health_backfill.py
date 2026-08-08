@@ -21,7 +21,10 @@ class FakeHealthGarmin:
         self.steps = 8_000
         self.fail_hrv_once = fail_hrv_once
         self.unsupported_readiness = unsupported_readiness
+        self.empty_summary_days: set[date] = set()
+        self.empty_body_battery_days: set[date] = set()
         self.calls: list[tuple[str, str]] = []
+        self.body_battery_ranges: list[tuple[date, date]] = []
 
     def _day(self, resource: str, value: str) -> date:
         self.calls.append((resource, value))
@@ -29,7 +32,7 @@ class FakeHealthGarmin:
 
     def get_user_summary(self, value: str) -> dict[str, Any]:
         day = self._day("daily_summary", value)
-        if day < self.health_start:
+        if day < self.health_start or day in self.empty_summary_days:
             return {"calendarDate": value, "totalSteps": 0}
         return {
             "calendarDate": value,
@@ -52,16 +55,27 @@ class FakeHealthGarmin:
     def get_body_battery(self, start: str, end: str | None = None) -> list[dict[str, Any]]:
         first = self._day("body_battery", start)
         last = date.fromisoformat(end) if end else first
+        self.body_battery_ranges.append((first, last))
         result = []
         day = first
         while day <= last:
             result.append(
                 {
                     "date": day.isoformat(),
-                    "charged": 60 if day >= self.health_start else None,
-                    "drained": 55 if day >= self.health_start else None,
+                    "charged": (
+                        60
+                        if day >= self.health_start and day not in self.empty_body_battery_days
+                        else None
+                    ),
+                    "drained": (
+                        55
+                        if day >= self.health_start and day not in self.empty_body_battery_days
+                        else None
+                    ),
                     "bodyBatteryValuesArray": (
-                        [[1, 20], [2, 80]] if day >= self.health_start else [[1, None]]
+                        [[1, 20], [2, 80]]
+                        if day >= self.health_start and day not in self.empty_body_battery_days
+                        else [[1, None]]
                     ),
                 }
             )
@@ -219,6 +233,55 @@ def test_health_backfill_is_idempotent_and_updates_recent_overlap(
         updated = session.scalar(select(DailyHealth).where(DailyHealth.day == today))
         assert updated is not None
         assert updated.steps == 9_000
+
+
+def test_health_backfill_does_not_refetch_past_empty_days(
+    session_factory: sessionmaker[Session],
+) -> None:
+    client = FakeHealthGarmin()
+    today = date(2026, 1, 10)
+    empty_day = today - timedelta(days=1)
+    client.empty_summary_days.add(empty_day)
+    client.empty_body_battery_days.add(empty_day)
+
+    with session_factory() as session:
+        user = _user(session)
+        sync_health_history(
+            session,
+            client,
+            user.id,
+            today=today,
+            minimum=date(2026, 1, 1),
+            overlap_days=3,
+            delay=0,
+        )
+        empty_statuses = set(
+            session.scalars(
+                select(DailyDataStatus.resource).where(
+                    DailyDataStatus.user_id == user.id,
+                    DailyDataStatus.day == empty_day,
+                    DailyDataStatus.status == "empty",
+                )
+            )
+        )
+        assert {"daily_summary", "body_battery"} <= empty_statuses
+
+        client.calls.clear()
+        client.body_battery_ranges.clear()
+        sync_health_history(
+            session,
+            client,
+            user.id,
+            today=today,
+            minimum=date(2026, 1, 1),
+            overlap_days=3,
+            delay=0,
+        )
+
+        assert ("daily_summary", empty_day.isoformat()) not in client.calls
+        assert not any(start <= empty_day <= end for start, end in client.body_battery_ranges)
+        assert ("daily_summary", today.isoformat()) in client.calls
+        assert ("body_battery", today.isoformat()) in client.calls
 
 
 def test_health_backfill_resumes_after_failure(

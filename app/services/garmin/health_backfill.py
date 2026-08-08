@@ -19,6 +19,7 @@ from app.models import GarminSyncState, SleepStage
 from app.models.user import utcnow
 from app.repositories.fitness import get_or_create_daily_fitness
 from app.repositories.health import (
+    empty_data_days,
     get_or_create_health_day,
     replace_sleep_stages,
     set_daily_data_status,
@@ -675,7 +676,13 @@ def _sync_daily_resource(
             start = min(state.newest_synced_date + timedelta(days=1), overlap_start)
 
         day = max(start, minimum)
+        skipped_days = empty_data_days(
+            session, user_id, resource.name, day, today - timedelta(days=1)
+        )
         while day <= today:
+            if day in skipped_days:
+                day += timedelta(days=1)
+                continue
             if progress is not None:
                 progress(resource.name, day)
             payload = pacer.call(
@@ -759,8 +766,20 @@ def _sync_body_battery(
             )
 
         chunk_start = max(start, minimum)
+        skipped_days = empty_data_days(
+            session, user_id, resource.name, chunk_start, today - timedelta(days=1)
+        )
         while chunk_start <= today:
-            chunk_end = min(chunk_start + timedelta(days=BODY_BATTERY_RANGE_DAYS - 1), today)
+            if chunk_start in skipped_days:
+                chunk_start += timedelta(days=1)
+                continue
+            chunk_end = chunk_start
+            while (
+                chunk_end < today
+                and (chunk_end - chunk_start).days < BODY_BATTERY_RANGE_DAYS - 1
+                and chunk_end + timedelta(days=1) not in skipped_days
+            ):
+                chunk_end += timedelta(days=1)
             if progress is not None:
                 progress(resource.name, chunk_start)
             payload = pacer.call(
