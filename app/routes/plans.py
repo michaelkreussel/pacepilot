@@ -56,8 +56,9 @@ def training_plan(
             for offset in range((calendar_end - calendar_start).days + 1)
         }
         for workout in workouts:
-            if workout.scheduled_for in month_by_day:
-                month_by_day[workout.scheduled_for].append(workout)
+            scheduled_for = workout.scheduled_for
+            if scheduled_for is not None and scheduled_for in month_by_day:
+                month_by_day[scheduled_for].append(workout)
 
         month_weeks: list[tuple[int, dict[date, list[Workout]]]] = []
         week_start = calendar_start
@@ -90,8 +91,9 @@ def training_plan(
     workouts = workouts_between(session, user.id, monday, sunday)
     by_day: dict[date, list[Workout]] = {monday + timedelta(days=offset): [] for offset in range(7)}
     for workout in workouts:
-        if workout.scheduled_for in by_day:
-            by_day[workout.scheduled_for].append(workout)
+        scheduled_for = workout.scheduled_for
+        if scheduled_for is not None and scheduled_for in by_day:
+            by_day[scheduled_for].append(workout)
     return templates.TemplateResponse(
         request,
         "plans/index.html",

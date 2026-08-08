@@ -107,7 +107,7 @@ SQLite muss auf einem lokalen Volume liegen, nicht auf SMB oder NFS. Mehrere Uvi
 uv run pytest
 uv run ruff check .
 uv run ruff format --check .
-uv run mypy app
+uv run ty check
 ```
 
 ## Projektstruktur

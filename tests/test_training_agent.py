@@ -89,7 +89,8 @@ async def test_agno_backend_returns_text_response() -> None:
 @pytest.mark.asyncio
 async def test_agno_backend_hides_provider_errors() -> None:
     class FailingAgnoAgent:
-        async def arun(self, _prompt: str) -> None:
+        async def arun(self, prompt: str) -> None:
+            del prompt
             raise RuntimeError("secret provider detail")
 
     backend = AgnoTrainingAgent.__new__(AgnoTrainingAgent)

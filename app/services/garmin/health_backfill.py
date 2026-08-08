@@ -126,6 +126,11 @@ def _first_number(value: Any, *keys: str) -> int | float | None:
     return None
 
 
+def _first_int(value: Any, *keys: str) -> int | None:
+    number = _first_number(value, *keys)
+    return round(number) if number is not None else None
+
+
 def _first_text(value: Any, *keys: str) -> str | None:
     wanted = set(keys)
     if isinstance(value, dict):
@@ -258,24 +263,20 @@ def _store_summary(session: Session, user_id: int, day: date, payload: Any) -> b
     _clear_fields(health, SUMMARY_FIELDS)
     if not isinstance(payload, dict) or not _summary_has_data(payload):
         return False
-    health.steps = _first_number(payload, "totalSteps")  # type: ignore[assignment]
+    health.steps = _first_int(payload, "totalSteps")
     health.distance_m = _first_number(payload, "totalDistanceMeters")
-    health.total_calories = _first_number(payload, "totalKilocalories")  # type: ignore[assignment]
-    health.active_calories = _first_number(payload, "activeKilocalories")  # type: ignore[assignment]
-    health.resting_hr = _first_number(payload, "restingHeartRate")  # type: ignore[assignment]
-    health.min_hr = _first_number(payload, "minHeartRate")  # type: ignore[assignment]
-    health.max_hr = _first_number(payload, "maxHeartRate")  # type: ignore[assignment]
-    health.stress_average = _first_number(payload, "averageStressLevel")  # type: ignore[assignment]
-    health.stress_max = _first_number(payload, "maxStressLevel")  # type: ignore[assignment]
-    health.body_battery_high = _first_number(payload, "bodyBatteryHighestValue")  # type: ignore[assignment]
-    health.body_battery_low = _first_number(payload, "bodyBatteryLowestValue")  # type: ignore[assignment]
+    health.total_calories = _first_int(payload, "totalKilocalories")
+    health.active_calories = _first_int(payload, "activeKilocalories")
+    health.resting_hr = _first_int(payload, "restingHeartRate")
+    health.min_hr = _first_int(payload, "minHeartRate")
+    health.max_hr = _first_int(payload, "maxHeartRate")
+    health.stress_average = _first_int(payload, "averageStressLevel")
+    health.stress_max = _first_int(payload, "maxStressLevel")
+    health.body_battery_high = _first_int(payload, "bodyBatteryHighestValue")
+    health.body_battery_low = _first_int(payload, "bodyBatteryLowestValue")
     health.waking_respiration_average = _first_number(payload, "avgWakingRespirationValue")
-    health.moderate_intensity_minutes = _first_number(  # type: ignore[assignment]
-        payload, "moderateIntensityMinutes"
-    )
-    health.vigorous_intensity_minutes = _first_number(  # type: ignore[assignment]
-        payload, "vigorousIntensityMinutes"
-    )
+    health.moderate_intensity_minutes = _first_int(payload, "moderateIntensityMinutes")
+    health.vigorous_intensity_minutes = _first_int(payload, "vigorousIntensityMinutes")
     return True
 
 
@@ -362,7 +363,7 @@ def _store_sleep(session: Session, user_id: int, day: date, payload: Any) -> boo
     health.next_sleep_need_seconds = _sleep_need_seconds(next_need.get("actual"))
     health.sleep_average_hr = _first_number(dto, "avgHeartRate")
     health.sleep_average_stress = _first_number(dto, "avgSleepStress")
-    health.sleep_body_battery_change = _first_number(payload, "bodyBatteryChange")  # type: ignore[assignment]
+    health.sleep_body_battery_change = _first_int(payload, "bodyBatteryChange")
     health.sleep_respiration_average = _first_number(
         dto, "averageRespirationValue", "avgRespirationValue"
     )
@@ -443,9 +444,9 @@ def _store_readiness(session: Session, user_id: int, day: date, payload: Any) ->
         ),
         next((item for item in entries if isinstance(item, dict)), {}),
     )
-    fitness.garmin_training_readiness_score = _first_number(entry, "score")  # type: ignore[assignment]
+    fitness.garmin_training_readiness_score = _first_int(entry, "score")
     fitness.garmin_training_readiness_level = _first_text(entry, "level")
-    fitness.recovery_time_minutes = _first_number(entry, "recoveryTime")  # type: ignore[assignment]
+    fitness.recovery_time_minutes = _first_int(entry, "recoveryTime")
     return True
 
 
@@ -515,8 +516,8 @@ def _store_body_battery(session: Session, user_id: int, day: date, payload: Any)
     ]
     health.body_battery_high = round(max(values)) if values else None
     health.body_battery_low = round(min(values)) if values else None
-    health.body_battery_charged = _first_number(entry, "charged")  # type: ignore[assignment]
-    health.body_battery_drained = _first_number(entry, "drained")  # type: ignore[assignment]
+    health.body_battery_charged = _first_int(entry, "charged")
+    health.body_battery_drained = _first_int(entry, "drained")
     return True
 
 

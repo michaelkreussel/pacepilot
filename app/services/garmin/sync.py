@@ -76,6 +76,11 @@ def _number(data: dict[str, Any], *keys: str) -> int | float | None:
     return None
 
 
+def _integer(data: dict[str, Any], *keys: str) -> int | None:
+    number = _number(data, *keys)
+    return round(number) if number is not None else None
+
+
 def _store_daily_summary(
     session: Session, user_id: int, day: date, summary: dict[str, Any]
 ) -> DailyHealth:
@@ -85,10 +90,10 @@ def _store_daily_summary(
     if health is None:
         health = DailyHealth(user_id=user_id, day=day)
         session.add(health)
-    health.steps = _number(summary, "totalSteps", "steps")  # type: ignore[assignment]
-    health.resting_hr = _number(summary, "restingHeartRate", "restingHR")  # type: ignore[assignment]
-    health.stress_average = _number(summary, "averageStressLevel")  # type: ignore[assignment]
-    health.body_battery_high = _number(summary, "bodyBatteryHighestValue")  # type: ignore[assignment]
+    health.steps = _integer(summary, "totalSteps", "steps")
+    health.resting_hr = _integer(summary, "restingHeartRate", "restingHR")
+    health.stress_average = _integer(summary, "averageStressLevel")
+    health.body_battery_high = _integer(summary, "bodyBatteryHighestValue")
     return health
 
 

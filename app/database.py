@@ -1,6 +1,7 @@
+import sqlite3
 from collections.abc import Generator
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, cast
 
 from fastapi import Depends
 from sqlalchemy import Engine, create_engine, event
@@ -38,7 +39,7 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False
 def configure_sqlite(connection: object, _: object) -> None:
     if connection.__class__.__module__ != "sqlite3":
         return
-    cursor = connection.cursor()  # type: ignore[attr-defined]
+    cursor = cast(sqlite3.Connection, connection).cursor()
     cursor.execute("PRAGMA journal_mode=WAL")
     cursor.execute("PRAGMA foreign_keys=ON")
     cursor.execute("PRAGMA busy_timeout=5000")

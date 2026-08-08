@@ -50,7 +50,7 @@ def _create_model(workout: Workout) -> Any:
         condition_key = "time" if step.duration_type == "time" else "distance"
         condition_order = 2 if step.duration_type == "time" else 3
         target: dict[str, Any]
-        target_values: dict[str, float] = {}
+        target_values: dict[str, Any] = {}
         if step.target_type == "pace":
             if not step.target_min or not step.target_max:
                 raise WorkoutValidationError("Für das Pace-Ziel fehlen Grenzen.")

@@ -13,7 +13,7 @@ from app.services.garmin import sync as sync_module
 
 def _workout_data(
     name: str = "Lockerer Dauerlauf", scheduled_for: str = "2026-08-09"
-) -> dict[str, object]:
+) -> dict[str, str | list[str]]:
     return {
         "name": name,
         "sport": "running",

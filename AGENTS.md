@@ -4,7 +4,7 @@
 
 - Use Python 3.12 and `uv`; install the locked environment with `uv sync`.
 - Local startup requires this order: `uv run alembic upgrade head`, then `uv run uvicorn app.main:app --reload`.
-- Run the full checks with `uv run pytest`, `uv run ruff check .`, `uv run ruff format --check .`, and `uv run mypy app`.
+- Always use Ruff for code cleanup and linting, and `ty` for type checking. Run the full checks with `uv run pytest`, `uv run ruff check .`, `uv run ruff format --check .`, and `uv run ty check`.
 - Focus pytest with a node ID, for example `uv run pytest tests/test_routes.py::test_create_and_confirm_workout`.
 - For model or migration changes, run `uv run pytest tests/test_migrations.py`; it upgrades a fresh database, runs Alembic's schema check, and verifies adoption of the legacy pre-Alembic schema.
 
