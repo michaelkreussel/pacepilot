@@ -8,6 +8,7 @@ from app.database import Base
 from app.models.user import utcnow
 
 if TYPE_CHECKING:
+    from app.models.activity import Activity
     from app.models.user import User
 
 
@@ -29,6 +30,7 @@ class Workout(Base):
     steps: Mapped[list["WorkoutStep"]] = relationship(
         back_populates="workout", cascade="all, delete-orphan", order_by="WorkoutStep.position"
     )
+    completed_activities: Mapped[list["Activity"]] = relationship(back_populates="workout")
 
 
 class WorkoutStep(Base):

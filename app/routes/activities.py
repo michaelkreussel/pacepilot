@@ -38,7 +38,10 @@ def activity_detail(activity_id: int, request: Request, session: SessionDep) -> 
             active_page="activities",
             activity=activity,
             activity_data=load_activity_details(
-                activity.started_at, activity.garmin_activity_id, activity.activity_type
+                activity.started_at,
+                activity.garmin_activity_id,
+                activity.activity_type,
+                activity.user_id,
             ),
         ),
     )

@@ -16,7 +16,9 @@ class Settings(BaseSettings):
     garmin_email: str | None = None
     garmin_password: str | None = None
     sync_days: int = Field(default=14, ge=1, le=90)
+    health_sync_overlap_days: int = Field(default=7, ge=1, le=31)
     sync_interval_minutes: int = Field(default=60, ge=5)
+    garmin_call_delay_seconds: float = Field(default=0.75, ge=0, le=10)
     scheduler_enabled: bool = True
     llm_api_key: str | None = None
     llm_base_url: str = "https://openrouter.ai/api/v1"
