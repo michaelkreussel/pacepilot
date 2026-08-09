@@ -165,12 +165,16 @@ def test_profile_renders_real_metrics_gaps_charts_and_user_scoped_drilldown(
     assert "PacePilot Readiness" in response.text
     assert "Kein Garmin-Score" in response.text
     assert "Stand 30.06.2026 · PacePilot Readiness" in response.text
+    assert 'class="readiness-score-ring"' in response.text
+    assert 'style="--readiness-offset: ' in response.text
+    assert 'data-count-to="' in response.text
     assert "Historischer Zustand" in response.text
     assert "Ruhepuls" in response.text
     assert "HRV" in response.text
     assert "Schlaf" in response.text
     assert "VO2max" in response.text
     assert "Progressiver Dauerlauf" in response.text
+    assert "Volumen bleibt getrennt" not in response.text
     assert f'href="/activities/{run_id}"' in response.text
     assert "Geheime Einheit" not in response.text
     assert "secret/raw" not in response.text
@@ -224,8 +228,17 @@ def test_profile_preserves_one_sided_intensity_and_anaerobic_effect(client, sess
     payload = _chart_payload(response.text)
     intensity = next(chart for chart in payload["charts"] if chart["id"] == "intensity-chart")
     assert intensity["datasets"][0]["data"] == [None, 12]
+    assert intensity["datasets"][0]["colors"] == ["#1d5a48", "#6757a8"]
     effect = next(chart for chart in payload["charts"] if chart["id"] == "training-effect-chart")
     assert [item["label"] for item in effect["datasets"]] == ["Anaerob"]
+
+    day_response = client.get("/profile?period=day&end=2026-06-30")
+    assert day_response.status_code == 200
+    assert "30.06.2026 · Tagesaggregate" in day_response.text
+    assert "Persönliche Trends" not in day_response.text
+    day_chart_ids = {chart["id"] for chart in _chart_payload(day_response.text)["charts"]}
+    assert "intensity-chart" in day_chart_ids
+    assert "training-effect-chart" not in day_chart_ids
 
 
 def test_activity_range_drilldown_filters_results(client, session_factory):

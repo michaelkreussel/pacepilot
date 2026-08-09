@@ -1,4 +1,29 @@
 (() => {
+  const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const counters = [...document.querySelectorAll("[data-count-to]")]
+    .map((element) => ({
+      element,
+      target: Number(element.dataset.countTo),
+      delay: Number(element.dataset.countDelay || 100),
+    }))
+    .filter(({ target }) => Number.isFinite(target));
+
+  if (!reducedMotion && counters.length) {
+    const startedAt = performance.now();
+    counters.forEach(({ element }) => { element.textContent = "0"; });
+    const updateCounters = (now) => {
+      let complete = true;
+      counters.forEach(({ element, target, delay }) => {
+        const progress = Math.max(0, Math.min(1, (now - startedAt - delay) / 1000));
+        const eased = 1 - ((1 - progress) ** 3);
+        element.textContent = String(Math.round(target * eased));
+        if (progress < 1) complete = false;
+      });
+      if (!complete) requestAnimationFrame(updateCounters);
+    };
+    requestAnimationFrame(updateCounters);
+  }
+
   const source = document.getElementById("profile-data");
   if (!source || !window.Chart) return;
   const payload = JSON.parse(source.textContent);
@@ -12,6 +37,7 @@
     "#ff5c35": "--chart-accent",
   };
   const datasetColor = (color) => {
+    if (!color) return undefined;
     const token = colorTokens[color.toLowerCase()];
     return token ? cssValue(token) : color;
   };

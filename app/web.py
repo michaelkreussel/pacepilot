@@ -9,6 +9,16 @@ from app.onboarding import onboarding_state
 
 templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
 
+ACTIVITY_TYPE_LABELS = {
+    "running": "Laufen",
+    "trail_running": "Trailrunning",
+    "treadmill_running": "Laufband",
+    "cycling": "Radfahren",
+    "strength_training": "Krafttraining",
+    "walking": "Gehen",
+    "hiking": "Wandern",
+}
+
 
 def format_duration(seconds: float | int | None) -> str:
     if seconds is None:
@@ -40,6 +50,10 @@ def format_pace(seconds: float | int | None) -> str:
     return f"{minutes}:{remainder:02d} min/km"
 
 
+def format_activity_type(value: str) -> str:
+    return ACTIVITY_TYPE_LABELS.get(value, value.replace("_", " ").title())
+
+
 def format_date(value: date | datetime | None, include_time: bool = False) -> str:
     if value is None:
         return "–"
@@ -53,6 +67,7 @@ templates.env.filters.update(
     precise_duration=format_precise_duration,
     distance=format_distance,
     pace=format_pace,
+    activity_type=format_activity_type,
     date=format_date,
     datetime=lambda value: format_date(value, include_time=True),
 )

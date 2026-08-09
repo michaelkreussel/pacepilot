@@ -2,35 +2,24 @@
 {% block title %}Athletenprofil · PacePilot{% endblock %}
 {% block head %}
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js" defer></script>
-  <script src="{{ url_for('static', path='/js/profile.js') }}?v=20260809-1" defer></script>
+  <script src="{{ url_for('static', path='/js/profile.js') }}?v=20260809-4" defer></script>
 {% endblock %}
 {% block content %}
 <div class="space-y-8 text-sm">
-  <header class="space-y-4">
-    <div class="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-      <div class="space-y-1">
-        <p class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Athletenprofil</p>
-        <h1 class="font-display text-3xl font-semibold tracking-tight">{{ user.display_name }}, in Bewegung.</h1>
-        <p class="text-sm text-muted-foreground">Gesundheit, Erholung und Training in einem persönlichen Verlauf.</p>
-      </div>
-      <div class="flex flex-col gap-0.5 border-l-2 border-border pl-3 sm:items-end sm:text-right">
-        <span class="text-xs text-muted-foreground">{{ start|date }} – {{ end|date }}</span>
-        <strong class="text-sm font-semibold text-foreground">{{ period_label }}</strong>
-      </div>
-    </div>
-
-    <nav class="inline-flex max-w-full flex-wrap gap-1 rounded-xl border border-border bg-surface p-1" aria-label="Zeitraum">
-      {% for option in period_options %}
-        <a class="rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors {% if option.key == period %}bg-primary text-primary-foreground{% else %}text-muted-foreground hover:bg-surface-muted hover:text-foreground{% endif %}" href="/profile?period={{ option.key }}&end={{ end.isoformat() }}"{% if option.key == period %} aria-current="page"{% endif %}>{{ option.label }}</a>
-      {% endfor %}
-    </nav>
-  </header>
-
   <section class="{{ recovery.pacepilot_readiness_label or 'unavailable' }} grid grid-cols-1 gap-5 rounded-xl border border-border bg-surface p-5 sm:p-6 lg:grid-cols-[minmax(0,1.35fr)_minmax(16rem,0.65fr)] lg:items-center" aria-labelledby="readiness-title">
+    <header class="border-b border-border pb-5 lg:col-span-2">
+      <p class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Athletenprofil</p>
+      <h1 class="mt-1 font-display text-3xl font-semibold tracking-tight">{{ user.display_name }}</h1>
+      <p class="mt-1 text-sm text-muted-foreground">Gesundheit, Erholung und Training auf einen Blick.</p>
+    </header>
     {% if recovery.pacepilot_readiness_score is not none %}
       <div class="grid grid-cols-1 items-center gap-4 sm:grid-cols-[auto_minmax(0,1fr)]">
-        <div class="readiness-score size-24 before:bg-surface sm:size-28" style="--readiness: {{ recovery.pacepilot_readiness_score }}">
-          <div class="flex items-baseline gap-1 text-foreground"><strong class="font-display text-3xl font-semibold tracking-tight">{{ recovery.pacepilot_readiness_score|round|int }}</strong><span class="text-xs text-muted-foreground">/ 100</span></div>
+        <div class="readiness-score size-28 sm:size-32" style="--readiness-offset: {{ 100 - recovery.pacepilot_readiness_score }}" aria-label="Readiness-Score {{ recovery.pacepilot_readiness_score|round|int }} von 100">
+          <svg class="readiness-score-ring" viewBox="0 0 120 120" aria-hidden="true">
+            <circle class="readiness-score-track" cx="60" cy="60" r="52" pathLength="100"></circle>
+            <circle class="readiness-score-value" cx="60" cy="60" r="52" pathLength="100"></circle>
+          </svg>
+          <div class="readiness-score-number flex items-baseline gap-1 text-foreground"><strong class="font-display text-3xl font-semibold tracking-tight" data-count-to="{{ recovery.pacepilot_readiness_score|round|int }}">{{ recovery.pacepilot_readiness_score|round|int }}</strong><span class="text-xs text-muted-foreground">/ 100</span></div>
         </div>
         <div class="space-y-2">
           <p class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{% if is_today %}Heute{% else %}Stand {{ end|date }}{% endif %} · PacePilot Readiness</p>
@@ -44,9 +33,9 @@
       </div>
       <div class="space-y-3 rounded-xl bg-surface-muted p-4" aria-label="Readiness-Komponenten">
         {% for component in readiness_components %}
-          <div class="space-y-1.5">
-            <div class="flex items-center justify-between gap-3 text-xs"><span class="text-muted-foreground">{{ component.label }} · {{ component.weight }}%</span><strong class="font-semibold text-foreground">{{ component.score|round|int }}</strong></div>
-            <div class="h-1.5 overflow-hidden rounded-full bg-border"><span class="block h-full rounded-full bg-primary" style="width: {{ component.score }}%"></span></div>
+          <div class="readiness-component space-y-1.5" style="--stat-delay: {{ 240 + loop.index0 * 80 }}ms; --bar-delay: {{ 300 + loop.index0 * 90 }}ms">
+            <div class="flex items-center justify-between gap-3 text-xs"><span class="text-muted-foreground">{{ component.label }} · {{ component.weight }}%</span><strong class="font-semibold text-foreground" data-count-to="{{ component.score|round|int }}" data-count-delay="{{ 240 + loop.index0 * 90 }}">{{ component.score|round|int }}</strong></div>
+            <div class="h-1.5 overflow-hidden rounded-full bg-border"><span class="readiness-component-bar block h-full rounded-full bg-primary" style="width: {{ component.score }}%"></span></div>
           </div>
         {% endfor %}
       </div>
@@ -68,7 +57,7 @@
     </div>
     <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
       {% for card in metric_cards %}
-        <article class="profile-metric {{ card.tone }} flex min-h-32 flex-col rounded-xl border border-border bg-surface p-4">
+        <article class="profile-metric {{ card.tone }} flex min-h-32 flex-col rounded-xl border border-border bg-surface p-4" style="--stat-delay: {{ 240 + loop.index0 * 80 }}ms">
           <span class="text-xs font-medium text-muted-foreground">{{ card.label }}</span>
           <strong class="mt-2 font-display text-lg font-semibold tracking-tight text-foreground">{{ card.value }}</strong>
           {% if card.note %}<p class="mt-1 text-sm leading-5 text-muted-foreground">{{ card.note }}</p>{% endif %}
@@ -79,11 +68,21 @@
   </section>
   {% endif %}
 
-  <section class="space-y-4" id="gesundheit" aria-labelledby="health-title">
-    <div class="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
-      <div><p class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Persönliche Trends</p><h2 class="text-lg font-semibold" id="health-title">Gesundheit & Erholung</h2></div>
-      <span class="text-xs text-muted-foreground">Lücken bleiben Lücken, nie Nullwerte.</span>
+  <section class="flex flex-col gap-4 rounded-xl border border-border bg-surface p-4 sm:flex-row sm:items-center sm:justify-between" aria-labelledby="period-title">
+    <div>
+      <p class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Zeitbasierte Ansicht</p>
+      <h2 class="mt-1 text-lg font-semibold" id="period-title">{{ period_label }}</h2>
+      <p class="mt-0.5 text-xs text-muted-foreground">{% if period == 'day' %}{{ end|date }} · Tagesaggregate{% else %}{{ start|date }} – {{ end|date }}{% endif %}</p>
     </div>
+    <nav class="inline-flex max-w-full flex-wrap gap-1 rounded-xl bg-surface-muted p-1" aria-label="Zeitraum">
+      {% for option in period_options %}
+        <a class="rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors {% if option.key == period %}bg-primary text-primary-foreground{% else %}text-muted-foreground hover:bg-surface hover:text-foreground{% endif %}" href="/profile?period={{ option.key }}&end={{ end.isoformat() }}"{% if option.key == period %} aria-current="page"{% endif %}>{{ option.label }}</a>
+      {% endfor %}
+    </nav>
+  </section>
+
+  {% if period != 'day' %}<section class="space-y-4" id="gesundheit" aria-labelledby="health-title">
+    <div><p class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Persönliche Trends</p><h2 class="text-lg font-semibold" id="health-title">Gesundheit & Erholung</h2></div>
     {% if health_notices %}<div class="grid grid-cols-1 gap-2">{% for notice in health_notices %}<p class="rounded-lg border border-warning/25 bg-warning-subtle px-3 py-2 text-xs text-warning-emphasis">{{ notice }}</p>{% endfor %}</div>{% endif %}
     {% if health_charts %}
       <div class="grid grid-cols-1 gap-4 lg:grid-cols-2">
@@ -99,7 +98,7 @@
     {% else %}
       <div class="rounded-xl border border-border bg-surface p-5"><span class="text-sm font-semibold">Keine Gesundheitswerte im gewählten Zeitraum.</span><p class="mt-1 text-sm text-muted-foreground">Prüfe den Garmin-Sync oder wähle einen längeren Zeitraum.</p></div>
     {% endif %}
-  </section>
+  </section>{% endif %}
 
   <section class="space-y-4" id="training" aria-labelledby="training-title">
     <div class="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
@@ -109,8 +108,8 @@
     {% if not training_show_data %}
       <div class="rounded-xl border border-border bg-surface p-5"><span class="text-sm font-semibold">Trainingshistorie noch nicht belastbar</span><p class="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground">Die Synchronisierung ist nicht vollständig. Verfügbare Lücken werden deshalb nicht als null Workouts gewertet.</p><a class="mt-3 inline-flex items-center rounded-lg bg-primary px-3 py-2 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary-hover" href="/settings">Synchronisierung öffnen</a></div>
     {% else %}
-      <div class="grid grid-cols-1 gap-px overflow-hidden rounded-xl border border-border bg-border sm:grid-cols-2 lg:grid-cols-4">
-        {% for label, value in training_stats %}<div class="flex items-center justify-between gap-3 bg-surface-muted p-4 sm:block"><span class="text-xs text-muted-foreground">{{ label }}</span><strong class="font-display text-lg font-semibold tracking-tight text-foreground sm:mt-1 sm:block">{{ value }}</strong></div>{% endfor %}
+      <div class="grid grid-cols-[repeat(auto-fit,minmax(min(100%,11rem),1fr))] gap-3">
+        {% for label, value in training_stats %}<article class="profile-stat min-h-28 rounded-xl border border-border bg-surface p-4" style="--stat-delay: {{ 240 + loop.index0 * 80 }}ms"><div class="flex items-center gap-2"><span class="size-1.5 shrink-0 rounded-full bg-primary" aria-hidden="true"></span><span class="text-xs font-medium text-muted-foreground">{{ label }}</span></div><strong class="mt-4 block font-display text-2xl font-semibold tracking-tight text-foreground">{{ value }}</strong></article>{% endfor %}
       </div>
       {% if training_charts %}
         <div class="grid grid-cols-1 gap-4 lg:grid-cols-2">
@@ -129,10 +128,17 @@
 
       {% if sport_volumes %}
         <article class="rounded-xl border border-border bg-surface p-4 sm:p-5">
-          <div><p class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Sportarten</p><h3 class="text-lg font-semibold">Volumen bleibt getrennt</h3></div>
-          <div class="mt-4 divide-y divide-border rounded-xl bg-surface-muted px-4">
+          <h3 class="text-lg font-semibold">Sportarten</h3>
+          <div class="mt-4 grid grid-cols-[repeat(auto-fit,minmax(min(100%,16rem),1fr))] gap-3">
             {% for sport in sport_volumes %}
-              <div class="grid grid-cols-2 gap-x-4 gap-y-1 py-3 text-xs sm:grid-cols-3 lg:grid-cols-5"><strong class="text-sm font-semibold text-foreground">{{ sport.sport }}</strong><span class="text-muted-foreground">{{ sport.workouts }} Workouts</span><span class="text-muted-foreground">{{ sport.duration }}</span>{% if sport.distance %}<span class="text-muted-foreground">{{ sport.distance }}</span>{% endif %}{% if sport.elevation %}<span class="text-muted-foreground">{{ sport.elevation }}</span>{% endif %}</div>
+              <section class="rounded-xl border border-border bg-surface-muted p-4" aria-label="{{ sport.sport }}">
+                <div class="flex items-center justify-between gap-3"><strong class="text-base font-semibold text-foreground">{{ sport.sport }}</strong><span class="rounded-full bg-surface px-2.5 py-1 text-xs font-semibold text-muted-foreground">{{ sport.workouts }} Workouts</span></div>
+                <dl class="mt-4 flex flex-wrap gap-x-6 gap-y-3 text-xs">
+                  <div><dt class="text-muted-foreground">Dauer</dt><dd class="mt-1 font-semibold text-foreground">{{ sport.duration }}</dd></div>
+                  {% if sport.distance %}<div><dt class="text-muted-foreground">Distanz</dt><dd class="mt-1 font-semibold text-foreground">{{ sport.distance }}</dd></div>{% endif %}
+                  {% if sport.elevation %}<div><dt class="text-muted-foreground">Höhenmeter</dt><dd class="mt-1 font-semibold text-foreground">{{ sport.elevation }}</dd></div>{% endif %}
+                </dl>
+              </section>
             {% endfor %}
           </div>
         </article>

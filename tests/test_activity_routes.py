@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -154,3 +154,64 @@ def test_strength_activity_hides_distance(
     assert "Kalorien" in response.text
     assert "Distanz" not in response.text
     assert "Detailed Stats" not in response.text
+
+
+def test_activity_list_filters_and_paginates(
+    client: TestClient, session_factory: sessionmaker[Session]
+) -> None:
+    client.get("/")
+    with session_factory() as session:
+        user = session.scalar(select(User))
+        assert user is not None
+        start = datetime(2026, 6, 1, 8)
+        session.add_all(
+            [
+                Activity(
+                    user_id=user.id,
+                    garmin_activity_id=f"run-{index}",
+                    name=f"Lauf {index:02d}",
+                    activity_type="running",
+                    started_at=start + timedelta(days=index),
+                )
+                for index in range(26)
+            ]
+            + [
+                Activity(
+                    user_id=user.id,
+                    garmin_activity_id=f"ride-{index}",
+                    name=f"Radtour {index}",
+                    activity_type="cycling",
+                    started_at=start + timedelta(days=index),
+                )
+                for index in range(3)
+            ]
+            + [
+                Activity(
+                    user_id=user.id,
+                    garmin_activity_id="run-outside",
+                    name="Lauf außerhalb",
+                    activity_type="running",
+                    started_at=datetime(2026, 5, 1, 8),
+                )
+            ]
+        )
+        session.commit()
+
+    response = client.get("/activities?from=2026-06-01&to=2026-06-30&sport=running&page=2")
+
+    assert response.status_code == 200
+    assert "26 Aktivitäten in der aktuellen Auswahl" in response.text
+    assert "Lauf 00" in response.text
+    assert "Lauf 25" not in response.text
+    assert "Radtour" not in response.text
+    assert '<option value="running" selected>Laufen</option>' in response.text
+    assert "1–25 von 26" not in response.text
+    assert "26–26 von 26" in response.text
+    assert "sport=running" in response.text
+    assert "page=1" in response.text
+    category_only = client.get("/activities?from=&to=&sport=cycling")
+    assert category_only.status_code == 200
+    assert "Radtour 0" in category_only.text
+    assert "Lauf 00" not in category_only.text
+    assert client.get("/activities?page=0").status_code == 422
+    assert client.get("/activities?page=3").status_code == 404
