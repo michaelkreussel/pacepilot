@@ -12,7 +12,7 @@ from app.repositories.users import get_or_create_garmin_account
 from app.services.analytics import AthleteDataService
 from app.services.analytics.health_trends import MetricTrend
 from app.services.analytics.training_trends import RecentWorkout, TrainingTimelinePoint
-from app.web import context, format_distance, format_duration, templates
+from app.web import context, format_activity_type, format_distance, format_duration, templates
 
 router = APIRouter(prefix="/profile", dependencies=[Depends(require_data_access)])
 
@@ -24,16 +24,6 @@ PERIODS: tuple[tuple[Period, str, int], ...] = (
     ("3m", "12 Wochen", 84),
     ("year", "Jahr", 365),
 )
-
-SPORT_LABELS = {
-    "running": "Laufen",
-    "trail_running": "Trailrunning",
-    "treadmill_running": "Laufband",
-    "cycling": "Radfahren",
-    "strength_training": "Krafttraining",
-    "walking": "Gehen",
-    "hiking": "Wandern",
-}
 
 READINESS_LABELS = {"low": "Niedrig", "fair": "Solide", "good": "Gut", "high": "Hoch"}
 GARMIN_STATUS_LABELS = {
@@ -72,7 +62,7 @@ def _display_number(value: float, decimals: int = 0) -> str:
 
 
 def _sport_label(sport: str) -> str:
-    return SPORT_LABELS.get(sport, sport.replace("_", " ").title())
+    return format_activity_type(sport)
 
 
 def _fresh(source_day: date | None, as_of: date, max_age_days: int) -> bool:
@@ -799,7 +789,7 @@ def profile(
                             training.moderate_intensity_minutes,
                             training.vigorous_intensity_minutes,
                         ],
-                        "colors": ["#1d5a48", "#ff5c35"],
+                        "colors": ["#1d5a48", "#6757a8"],
                     }
                 ],
             }
@@ -828,6 +818,11 @@ def profile(
         chart for chart in all_health_charts if chart["id"] != "garmin-training-load-chart"
     ]
     training_charts.extend(garmin_load_charts)
+    if period == "day":
+        health_charts = []
+        training_charts = [
+            chart for chart in training_charts if chart["id"] in {"intensity-chart", "zone-chart"}
+        ]
     _decorate_charts(health_charts)
     _decorate_charts(training_charts)
     chart_data = {"charts": health_charts + training_charts}

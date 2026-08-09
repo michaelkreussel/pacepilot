@@ -3,6 +3,9 @@
   if (!dataElement) return;
 
   const data = JSON.parse(dataElement.textContent);
+  const cssValue = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  const themedCharts = [];
+  if (window.Chart) Chart.defaults.color = cssValue("--muted-foreground");
   const formatElapsed = (seconds) => {
     const total = Math.max(0, Math.round(seconds));
     const hours = Math.floor(total / 3600);
@@ -23,13 +26,13 @@
     const canvas = document.getElementById(id);
     if (!canvas || !window.Chart || !values.length) return;
     const paceAxis = config.unit === "min/km";
-    new Chart(canvas, {
+    const chart = new Chart(canvas, {
       type: "line",
       data: {
         datasets: [{
           data: values.map(([x, y]) => ({ x, y })),
-          borderColor: config.color,
-          backgroundColor: config.fill,
+          borderColor: cssValue(config.colorToken),
+          backgroundColor: cssValue(config.fillToken),
           borderWidth: 2,
           fill: true,
           pointRadius: 0,
@@ -62,33 +65,34 @@
           y: {
             reverse: paceAxis,
             border: { display: false },
-            grid: { color: "rgba(19, 36, 31, .08)" },
+            grid: { color: cssValue("--chart-grid") },
             ticks: { callback: paceAxis ? formatPace : undefined, maxTicksLimit: 6 },
             title: { display: true, text: config.unit },
           },
         },
       },
     });
+    themedCharts.push({ chart, ...config });
   };
 
   createChart("heart-rate-chart", data.series.heart_rate, {
-    color: "#e24b3b",
-    fill: "rgba(226, 75, 59, .10)",
+    colorToken: "--chart-heart-rate",
+    fillToken: "--chart-heart-rate-fill",
     unit: "bpm",
   });
   createChart("pace-chart", data.series.pace, {
-    color: "#1d5a48",
-    fill: "rgba(29, 90, 72, .10)",
+    colorToken: "--chart-pace",
+    fillToken: "--chart-pace-fill",
     unit: "min/km",
   });
   createChart("speed-chart", data.series.speed, {
-    color: "#1d5a48",
-    fill: "rgba(29, 90, 72, .10)",
+    colorToken: "--chart-pace",
+    fillToken: "--chart-pace-fill",
     unit: "km/h",
   });
   createChart("cadence-chart", data.series.cadence, {
-    color: "#7a5ad8",
-    fill: "rgba(122, 90, 216, .09)",
+    colorToken: "--chart-cadence",
+    fillToken: "--chart-cadence-fill",
     unit: data.is_running ? "spm" : "rpm",
   });
 
@@ -100,26 +104,48 @@
       maxZoom: 19,
     }).addTo(map);
     const route = L.polyline(data.route, {
-      color: "#ff5c35",
+      color: cssValue("--map-route"),
       lineCap: "round",
       lineJoin: "round",
       opacity: .95,
       weight: 5,
     }).addTo(map);
-    L.circleMarker(data.route[0], {
-      color: "#fffefa",
-      fillColor: "#1d5a48",
+    const startMarker = L.circleMarker(data.route[0], {
+      color: cssValue("--map-marker-border"),
+      fillColor: cssValue("--map-start"),
       fillOpacity: 1,
       radius: 7,
       weight: 3,
     }).addTo(map).bindTooltip("Start");
-    L.circleMarker(data.route[data.route.length - 1], {
-      color: "#fffefa",
-      fillColor: "#ff5c35",
+    const finishMarker = L.circleMarker(data.route[data.route.length - 1], {
+      color: cssValue("--map-marker-border"),
+      fillColor: cssValue("--map-finish"),
       fillOpacity: 1,
       radius: 7,
       weight: 3,
     }).addTo(map).bindTooltip("Ziel");
     map.fitBounds(route.getBounds(), { padding: [28, 28] });
+
+    document.addEventListener("pacepilot:themechange", () => {
+      route.setStyle({ color: cssValue("--map-route") });
+      startMarker.setStyle({
+        color: cssValue("--map-marker-border"),
+        fillColor: cssValue("--map-start"),
+      });
+      finishMarker.setStyle({
+        color: cssValue("--map-marker-border"),
+        fillColor: cssValue("--map-finish"),
+      });
+    });
   }
+
+  document.addEventListener("pacepilot:themechange", () => {
+    if (window.Chart) Chart.defaults.color = cssValue("--muted-foreground");
+    themedCharts.forEach(({ chart, colorToken, fillToken }) => {
+      chart.data.datasets[0].borderColor = cssValue(colorToken);
+      chart.data.datasets[0].backgroundColor = cssValue(fillToken);
+      chart.options.scales.y.grid.color = cssValue("--chart-grid");
+      chart.update("none");
+    });
+  });
 })();

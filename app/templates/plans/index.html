@@ -25,48 +25,59 @@
 </script>
 {% endblock %}
 {% block content %}
-<div class="page-heading">
+<header class="mb-5 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
   <div>
-    <p class="eyebrow">{{ 'Monatsübersicht' if view == 'month' else 'Wochenrhythmus' }}</p>
-    <h1>Trainingsplan</h1>
-    {% if view == 'month' %}<p>{{ month_name }} {{ month_start.year }}</p>
-    {% else %}<p>{{ monday|date }} bis {{ sunday|date }}</p>{% endif %}
+    <p class="text-xs font-semibold uppercase tracking-widest text-muted-foreground">{{ 'Monatsübersicht' if view == 'month' else 'Wochenrhythmus' }}</p>
+    <h1 class="mt-1 font-display text-3xl font-semibold tracking-tight">Trainingsplan</h1>
+    {% if view == 'month' %}<p class="mt-1 text-sm text-muted-foreground">{{ month_name }} {{ month_start.year }}</p>
+    {% else %}<p class="mt-1 text-sm text-muted-foreground">{{ monday|date }} bis {{ sunday|date }}</p>{% endif %}
   </div>
-  <a class="button" href="/workouts/new">+ Workout</a>
+  <a class="inline-flex w-fit items-center justify-center rounded-lg border border-transparent bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background" href="/workouts/new">+ Workout</a>
+</header>
+
+<div class="mb-4 flex flex-col gap-2 rounded-xl border border-border bg-surface p-2 sm:flex-row sm:items-center sm:justify-between">
+  <nav class="flex w-fit rounded-lg bg-surface-muted p-1" aria-label="Kalenderansicht">
+    <a class="rounded-md px-3 py-1.5 text-sm font-semibold transition-colors {{ 'bg-primary text-primary-foreground' if view == 'week' else 'text-muted-foreground hover:bg-secondary hover:text-foreground' }}" href="/plans?view=week"{% if view == 'week' %} aria-current="page"{% endif %}>Woche</a>
+    <a class="rounded-md px-3 py-1.5 text-sm font-semibold transition-colors {{ 'bg-primary text-primary-foreground' if view == 'month' else 'text-muted-foreground hover:bg-secondary hover:text-foreground' }}" href="/plans?view=month"{% if view == 'month' %} aria-current="page"{% endif %}>Monat</a>
+  </nav>
+  {% if view == 'month' %}
+  <div class="flex max-w-full gap-1 overflow-x-auto whitespace-nowrap text-sm font-semibold"><a class="rounded-lg px-3 py-2 text-muted-foreground hover:bg-secondary hover:text-foreground" href="/plans?view=month&amp;month={{ month - 1 }}">← Vorheriger Monat</a><a class="rounded-lg px-3 py-2 text-foreground hover:bg-secondary" href="/plans?view=month">Dieser Monat</a><a class="rounded-lg px-3 py-2 text-muted-foreground hover:bg-secondary hover:text-foreground" href="/plans?view=month&amp;month={{ month + 1 }}">Nächster Monat →</a></div>
+  {% else %}
+  <div class="flex max-w-full gap-1 overflow-x-auto whitespace-nowrap text-sm font-semibold"><a class="rounded-lg px-3 py-2 text-muted-foreground hover:bg-secondary hover:text-foreground" href="/plans?view=week&amp;week={{ week - 1 }}">← Vorherige Woche</a><a class="rounded-lg px-3 py-2 text-foreground hover:bg-secondary" href="/plans?view=week">Diese Woche</a><a class="rounded-lg px-3 py-2 text-muted-foreground hover:bg-secondary hover:text-foreground" href="/plans?view=week&amp;week={{ week + 1 }}">Nächste Woche →</a></div>
+  {% endif %}
 </div>
-<nav class="plan-view-switcher" aria-label="Kalenderansicht">
-  <a class="{{ 'active' if view == 'week' else '' }}" href="/plans?view=week">Woche</a>
-  <a class="{{ 'active' if view == 'month' else '' }}" href="/plans?view=month">Monat</a>
-</nav>
+
 {% if view == 'month' %}
-<div class="week-switcher"><a href="/plans?view=month&amp;month={{ month - 1 }}">← Vorheriger Monat</a><a href="/plans?view=month">Dieser Monat</a><a href="/plans?view=month&amp;month={{ month + 1 }}">Nächster Monat →</a></div>
-<section class="month-calendar" aria-label="Monatskalender {{ month_name }} {{ month_start.year }}">
+<section class="overflow-x-auto pb-2" aria-label="Monatskalender {{ month_name }} {{ month_start.year }}">
   {% set day_names = ['Montag', 'Dienstag', 'Mittwoch', 'Donnerstag', 'Freitag', 'Samstag', 'Sonntag'] %}
-  <div class="month-grid">
-    <div class="month-corner">KW</div>
-    {% for day_name in day_names %}<div class="month-weekday">{{ day_name }}</div>{% endfor %}
+  <div class="grid min-w-[64rem] grid-cols-[3.25rem_repeat(7,minmax(8rem,1fr))] gap-px overflow-hidden rounded-xl border border-border bg-border">
+    <div class="grid min-h-10 place-items-center bg-surface-muted text-[0.625rem] font-semibold uppercase tracking-wider text-muted-foreground">KW</div>
+    {% for day_name in day_names %}<div class="grid min-h-10 place-items-center bg-surface-muted text-[0.625rem] font-semibold uppercase tracking-wider text-muted-foreground">{{ day_name }}</div>{% endfor %}
     {% for week_number, days in month_weeks %}
-      <div class="month-week-number" aria-label="Kalenderwoche {{ week_number }}"><span>KW</span><strong>{{ week_number }}</strong></div>
+      <div class="flex min-h-36 flex-col items-center gap-0.5 bg-surface-muted pt-3 text-muted-foreground" aria-label="Kalenderwoche {{ week_number }}"><span class="text-[0.625rem] font-semibold uppercase tracking-wider">KW</span><strong class="font-display text-base font-semibold text-primary">{{ week_number }}</strong></div>
       {% for day, workouts in days.items() %}
-        <article class="month-day {{ 'outside-month' if day.month != month_start.month or day.year != month_start.year else '' }} {{ 'today' if day == today else '' }}">
-          <div class="month-day-heading"><span>{{ day_names[loop.index0] }}</span><strong>{{ day.strftime('%d') }}</strong></div>
-          {% for workout in workouts %}<a class="calendar-workout {{ workout.sport }}" href="/workouts/{{ workout.id }}"><small>{{ workout.status }}</small><strong>{{ workout.name }}</strong><span>{{ workout.step_count }} Schritte</span></a>{% endfor %}
+        <article class="min-h-36 min-w-0 p-2.5 {{ 'outside-month bg-surface-muted opacity-60' if day.month != month_start.month or day.year != month_start.year else 'bg-surface' }} {{ 'today ring-2 ring-inset ring-primary' if day == today else '' }}">
+          <div class="mb-2 flex items-center justify-end"><span class="sr-only">{{ day_names[loop.index0] }}</span><strong class="grid size-7 place-items-center rounded-full font-display text-xs font-semibold {{ 'bg-primary text-primary-foreground' if day == today else 'text-foreground' }}">{{ day.strftime('%d') }}</strong></div>
+          <div class="grid gap-1.5">
+            {% for workout in workouts %}<a class="calendar-workout {{ workout.sport }} block min-w-0 rounded-lg p-2.5 transition-opacity hover:opacity-80" href="/workouts/{{ workout.id }}"><small class="block text-[0.625rem] font-semibold uppercase tracking-wide opacity-75">{{ workout.status }}</small><strong class="mt-0.5 block truncate text-xs font-semibold">{{ workout.name }}</strong><span class="mt-1 block text-[0.625rem] opacity-75">{{ workout.step_count }} Schritte</span></a>{% endfor %}
+          </div>
         </article>
       {% endfor %}
     {% endfor %}
   </div>
 </section>
 {% else %}
-<div class="week-switcher"><a href="/plans?view=week&amp;week={{ week - 1 }}">← Vorherige Woche</a><a href="/plans?view=week">Diese Woche</a><a href="/plans?view=week&amp;week={{ week + 1 }}">Nächste Woche →</a></div>
-<section class="week-grid">
-{% set day_names = ['Montag', 'Dienstag', 'Mittwoch', 'Donnerstag', 'Freitag', 'Samstag', 'Sonntag'] %}
-{% for day, workouts in by_day.items() %}
-  <article class="day-card {{ 'today' if day == today else '' }}">
-    <div class="day-heading"><span>{{ day_names[loop.index0] }}</span><strong>{{ day.strftime('%d') }}</strong></div>
-    {% if workouts %}{% for workout in workouts %}<a class="calendar-workout {{ workout.sport }}" href="/workouts/{{ workout.id }}"><small>{{ workout.status }}</small><strong>{{ workout.name }}</strong><span>{{ workout.step_count }} Schritte</span></a>{% endfor %}
-    {% else %}<div class="rest-day">Freier Tag</div>{% endif %}
-  </article>
-{% endfor %}
-</section>
+<div class="overflow-x-auto pb-2">
+  <section class="grid min-w-[64rem] grid-cols-7 gap-3 xl:min-w-0">
+  {% set day_names = ['Montag', 'Dienstag', 'Mittwoch', 'Donnerstag', 'Freitag', 'Samstag', 'Sonntag'] %}
+  {% for day, workouts in by_day.items() %}
+    <article class="min-h-48 rounded-xl border bg-surface p-3 {{ 'today border-primary' if day == today else 'border-border' }}">
+      <div class="mb-3 flex items-center justify-between border-b border-border pb-2"><span class="text-[0.625rem] font-semibold uppercase tracking-wider text-muted-foreground">{{ day_names[loop.index0] }}</span><strong class="grid size-7 place-items-center rounded-full font-display text-xs font-semibold {{ 'bg-primary text-primary-foreground' if day == today else 'bg-surface-muted text-foreground' }}">{{ day.strftime('%d') }}</strong></div>
+      {% if workouts %}<div class="grid gap-2">{% for workout in workouts %}<a class="calendar-workout {{ workout.sport }} block min-w-0 rounded-lg p-2.5 transition-opacity hover:opacity-80" href="/workouts/{{ workout.id }}"><small class="block text-[0.625rem] font-semibold uppercase tracking-wide opacity-75">{{ workout.status }}</small><strong class="mt-0.5 block truncate text-sm font-semibold">{{ workout.name }}</strong><span class="mt-1 block text-xs opacity-75">{{ workout.step_count }} Schritte</span></a>{% endfor %}</div>
+      {% else %}<div class="grid min-h-28 place-items-center rounded-lg border border-dashed border-border bg-surface-muted text-xs text-muted-foreground">Freier Tag</div>{% endif %}
+    </article>
+  {% endfor %}
+  </section>
+</div>
 {% endif %}
 {% endblock %}

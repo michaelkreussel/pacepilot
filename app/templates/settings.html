@@ -1,43 +1,90 @@
 {% extends "base.html" %}
 {% block title %}Einstellungen · PacePilot{% endblock %}
 {% block content %}
-<div class="page-heading"><div><p class="eyebrow">System</p><h1>Einstellungen</h1><p>Verbindungen und Synchronisierung verwalten.</p></div>{% if not onboarding.complete %}<span class="setup-progress">{{ onboarding.step_number }} / 2</span>{% endif %}</div>
-{% if error %}<div class="alert error" role="alert">{{ error }}</div>{% endif %}
-{% if notice %}<div class="alert success-note" role="status">{{ notice }}</div>{% endif %}
+<header class="mb-6 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+  <div>
+    <p class="text-xs font-semibold uppercase tracking-widest text-muted-foreground">System</p>
+    <h1 class="mt-1 font-display text-3xl font-semibold tracking-tight">Einstellungen</h1>
+    <p class="mt-1 text-sm text-muted-foreground">Verbindungen und Synchronisierung verwalten.</p>
+  </div>
+  {% if not onboarding.complete %}<span class="w-fit rounded-full border border-border bg-surface-muted px-3 py-1 text-xs font-semibold text-muted-foreground">{{ onboarding.step_number }} / 2</span>{% endif %}
+</header>
+
+{% if error %}<div class="mb-4 rounded-lg border border-danger/25 bg-danger-subtle px-4 py-3 text-sm text-danger-emphasis" role="alert">{{ error }}</div>{% endif %}
+{% if notice %}<div class="mb-4 rounded-lg border border-success/25 bg-success-subtle px-4 py-3 text-sm text-success-emphasis" role="status">{{ notice }}</div>{% endif %}
+
 {% if not onboarding.complete %}
-<section class="card setup-checklist" aria-label="Einrichtungsfortschritt">
-  <div><p class="eyebrow">Ersteinrichtung</p><h2>{{ 'Noch ein Schritt.' if onboarding.connected else 'Zwei klare Schritte.' }}</h2><p>Planung wird nach der Verbindung verfügbar. Profil, Aktivitäten und Coach folgen nach dem ersten erfolgreichen Sync.</p></div>
-  <ol>
-    <li class="{{ 'complete' if onboarding.connected else 'current' }}"><span>1</span><div><strong>Garmin verbinden</strong><small>{{ 'Verbindung hergestellt' if onboarding.connected else 'Zugang sicher bestätigen' }}</small></div></li>
-    <li class="{{ 'current' if onboarding.connected else '' }}"><span>2</span><div><strong>Ersten Sync abschließen</strong><small>Aktivitäten und Gesundheitsdaten importieren</small></div></li>
+<section class="mb-5 grid gap-5 rounded-xl border border-border bg-surface p-4 sm:p-5 lg:grid-cols-[minmax(0,1fr)_minmax(20rem,0.8fr)]" aria-label="Einrichtungsfortschritt">
+  <div>
+    <p class="text-xs font-semibold uppercase tracking-widest text-muted-foreground">Ersteinrichtung</p>
+    <h2 class="mt-1 text-lg font-semibold">{{ 'Noch ein Schritt.' if onboarding.connected else 'Zwei klare Schritte.' }}</h2>
+    <p class="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">Planung wird nach der Verbindung verfügbar. Profil, Aktivitäten und Coach folgen nach dem ersten erfolgreichen Sync.</p>
+  </div>
+  <ol class="grid list-none gap-2 p-0">
+    <li class="flex items-center gap-3 rounded-lg border p-3 {{ 'border-success bg-success-subtle' if onboarding.connected else 'border-primary bg-primary-subtle' }}">
+      <span class="grid size-8 shrink-0 place-items-center rounded-full text-sm font-semibold {{ 'bg-success text-success-foreground' if onboarding.connected else 'bg-primary text-primary-foreground' }}">1</span>
+      <div class="grid"><strong class="text-sm font-semibold">Garmin verbinden</strong><small class="mt-0.5 text-xs text-muted-foreground">{{ 'Verbindung hergestellt' if onboarding.connected else 'Zugang sicher bestätigen' }}</small></div>
+    </li>
+    <li class="flex items-center gap-3 rounded-lg border p-3 {{ 'border-primary bg-primary-subtle' if onboarding.connected else 'border-border bg-surface' }}">
+      <span class="grid size-8 shrink-0 place-items-center rounded-full text-sm font-semibold {{ 'bg-primary text-primary-foreground' if onboarding.connected else 'bg-muted text-muted-foreground' }}">2</span>
+      <div class="grid"><strong class="text-sm font-semibold">Ersten Sync abschließen</strong><small class="mt-0.5 text-xs text-muted-foreground">Aktivitäten und Gesundheitsdaten importieren</small></div>
+    </li>
   </ol>
 </section>
 {% elif not account.connected_at %}
-<div class="alert warning" role="status"><strong>Garmin ist nicht verbunden.</strong><br>Deine Einführung bleibt abgeschlossen. Verbinde das Konto erneut, um neue Daten zu laden und Workouts zu übertragen.</div>
+<div class="mb-5 rounded-lg border border-warning/25 bg-warning-subtle px-4 py-3 text-sm text-warning-emphasis" role="status"><strong>Garmin ist nicht verbunden.</strong><br>Deine Einführung bleibt abgeschlossen. Verbinde das Konto erneut, um neue Daten zu laden und Workouts zu übertragen.</div>
 {% endif %}
-<section class="settings-grid">
-  <article class="card connection-card garmin-connection-card">
-    <div class="integration-mark">G</div>
-    <div class="connection-copy"><p class="eyebrow">Integration</p><h2>Garmin Connect</h2><p>PacePilot speichert dein Passwort nicht. Nach der Anmeldung werden lokale Zugriffstokens verwendet. Abmelden entfernt diese Tokens; importierte Daten bleiben erhalten.</p></div>
-    <div class="garmin-connection-controls">
-      <div class="connection-status {{ account.sync_status }}"><span class="status-dot"></span>{{ {'not_connected':'Nicht verbunden','connected':'Verbunden','mfa_required':'Bestätigung nötig','queued':'Wartet','running':'Synchronisiert','ok':'Aktuell','error':'Fehler','rate_limited':'Pausiert'}.get(account.sync_status, account.sync_status|replace('_', ' ')) }}</div>
-      <div class="garmin-account-actions">
-        <form method="post" action="/settings/garmin/disconnect" onsubmit="return confirm('Garmin wirklich abmelden? Importierte Daten bleiben erhalten.')">
-          <button class="button secondary" type="submit" {% if not account.connected_at and not mfa_required %}disabled{% endif %}>Abmelden</button>
-        </form>
-        <form method="post" action="/settings/garmin/data/delete" onsubmit="return confirm('Alle aus Garmin importierten Daten und lokalen Rohdateien löschen? Die Garmin-Verbindung bleibt aktiv und lokale Workouts bleiben erhalten.')">
-          <input type="hidden" name="confirmation" value="delete">
-          <button class="button danger" type="submit">Importierte Daten löschen</button>
-        </form>
-      </div>
+
+<section class="rounded-xl border border-border bg-surface p-4 sm:p-5" id="garmin-connection">
+  <div class="grid gap-4 sm:grid-cols-[2.75rem_minmax(0,1fr)] lg:grid-cols-[2.75rem_minmax(0,1fr)_auto] lg:items-start">
+    <div class="grid size-11 place-items-center rounded-lg bg-primary text-lg font-semibold text-primary-foreground">G</div>
+    <div>
+      <p class="text-xs font-semibold uppercase tracking-widest text-muted-foreground">Integration</p>
+      <h2 class="mt-1 text-lg font-semibold">Garmin Connect</h2>
+      <p class="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground">PacePilot speichert dein Passwort nicht. Nach der Anmeldung werden lokale Zugriffstokens verwendet. Abmelden entfernt diese Tokens; importierte Daten bleiben erhalten.</p>
     </div>
-  </article>
+    <div class="flex flex-col items-start gap-2 sm:col-start-2 lg:col-start-auto lg:items-end">
+      <div class="connection-status {{ account.sync_status }} inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-semibold"><span class="status-dot size-2 rounded-full"></span>{{ {'not_connected':'Nicht verbunden','connected':'Verbunden','mfa_required':'Bestätigung nötig','queued':'Wartet','running':'Synchronisiert','ok':'Aktuell','error':'Fehler','rate_limited':'Pausiert'}.get(account.sync_status, account.sync_status|replace('_', ' ')) }}</div>
+      <form method="post" action="/settings/garmin/disconnect" onsubmit="return confirm('Garmin wirklich abmelden? Importierte Daten bleiben erhalten.')">
+        <button class="inline-flex items-center justify-center rounded-lg border border-border bg-surface px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:cursor-not-allowed disabled:opacity-50" type="submit" {% if not account.connected_at and not mfa_required %}disabled{% endif %}>Abmelden</button>
+      </form>
+    </div>
+  </div>
+
   {% if account.connected_at %}
-  <article class="card settings-panel"><h2>Verbunden</h2><div class="metric-list"><div><span>Konto</span><strong>{{ account.email or 'Token-Anmeldung' }}</strong></div><div><span>Verbunden seit</span><strong>{{ account.connected_at|date }}</strong></div><div><span>Letzter Sync</span><strong>{% if account.last_sync_at %}<time data-local-datetime datetime="{{ account.last_sync_at.isoformat() }}Z">{{ account.last_sync_at|datetime }}</time>{% else %}–{% endif %}</strong></div></div>{% include "partials/sync_status.html" %}</article>
+  <div class="mt-5 border-t border-border pt-5">
+    <h2 class="text-lg font-semibold">Verbunden</h2>
+    <dl class="mt-3 grid gap-px overflow-hidden rounded-lg border border-border bg-border sm:grid-cols-3">
+      <div class="bg-surface-muted p-3"><dt class="text-xs text-muted-foreground">Konto</dt><dd class="mt-1 break-words text-sm font-semibold">{{ account.email or 'Token-Anmeldung' }}</dd></div>
+      <div class="bg-surface-muted p-3"><dt class="text-xs text-muted-foreground">Verbunden seit</dt><dd class="mt-1 text-sm font-semibold">{{ account.connected_at|date }}</dd></div>
+      <div class="bg-surface-muted p-3"><dt class="text-xs text-muted-foreground">Letzter Sync</dt><dd class="mt-1 text-sm font-semibold">{% if account.last_sync_at %}<time data-local-datetime datetime="{{ account.last_sync_at.isoformat() }}Z">{{ account.last_sync_at|datetime }}</time>{% else %}–{% endif %}</dd></div>
+    </dl>
+    {% include "partials/sync_status.html" %}
+  </div>
   {% elif mfa_required %}
-  <form class="card settings-panel" method="post" action="/settings/garmin/mfa"><h2>Anmeldung bestätigen</h2><p class="muted">Garmin hat einen Bestätigungscode angefordert. Gib den Code aus deiner Authenticator-App, E-Mail oder SMS ein.</p><label>Bestätigungscode<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" autofocus required></label><button class="button" type="submit">Code bestätigen</button><button class="button secondary" type="submit" formaction="/settings/garmin/mfa/cancel" formnovalidate>Andere Zugangsdaten verwenden</button></form>
+  <form class="mt-5 grid max-w-xl gap-4 border-t border-border pt-5" method="post" action="/settings/garmin/mfa">
+    <div><h2 class="text-lg font-semibold">Anmeldung bestätigen</h2><p class="mt-1 text-sm leading-6 text-muted-foreground">Garmin hat einen Bestätigungscode angefordert. Gib den Code aus deiner Authenticator-App, E-Mail oder SMS ein.</p></div>
+    <label class="grid gap-1.5 text-sm font-semibold">Bestätigungscode<input class="w-full rounded-lg border border-input bg-surface px-3 py-2 text-sm text-foreground focus:border-ring focus:outline-none focus:ring-2 focus:ring-ring/20" type="text" name="code" inputmode="numeric" autocomplete="one-time-code" autofocus required></label>
+    <div class="flex flex-col gap-2 sm:flex-row">
+      <button class="inline-flex items-center justify-center rounded-lg border border-transparent bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:cursor-not-allowed disabled:opacity-50" type="submit">Code bestätigen</button>
+      <button class="inline-flex items-center justify-center rounded-lg border border-border bg-surface px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:cursor-not-allowed disabled:opacity-50" type="submit" formaction="/settings/garmin/mfa/cancel" formnovalidate>Andere Zugangsdaten verwenden</button>
+    </div>
+  </form>
   {% else %}
-  <form class="card settings-panel" method="post" action="/settings/garmin/connect"><h2>Garmin verbinden</h2><p class="muted">Melde dich über Garmin Connect an. Wenn dein Konto MFA verwendet, fragt PacePilot anschließend nach dem Bestätigungscode.</p><label>E-Mail<input type="email" name="email" autocomplete="username" required></label><label>Passwort<input type="password" name="password" autocomplete="current-password" required></label><button class="button" type="submit">Sicher anmelden</button><p class="form-hint">Die Integration nutzt die inoffizielle Garmin-Connect-Schnittstelle und kann sich durch Änderungen bei Garmin vorübergehend anders verhalten.</p></form>
+  <form class="mt-5 grid max-w-xl gap-4 border-t border-border pt-5" method="post" action="/settings/garmin/connect">
+    <div><h2 class="text-lg font-semibold">Garmin verbinden</h2><p class="mt-1 text-sm leading-6 text-muted-foreground">Melde dich über Garmin Connect an. Wenn dein Konto MFA verwendet, fragt PacePilot anschließend nach dem Bestätigungscode.</p></div>
+    <label class="grid gap-1.5 text-sm font-semibold">E-Mail<input class="w-full rounded-lg border border-input bg-surface px-3 py-2 text-sm text-foreground focus:border-ring focus:outline-none focus:ring-2 focus:ring-ring/20" type="email" name="email" autocomplete="username" required></label>
+    <label class="grid gap-1.5 text-sm font-semibold">Passwort<input class="w-full rounded-lg border border-input bg-surface px-3 py-2 text-sm text-foreground focus:border-ring focus:outline-none focus:ring-2 focus:ring-ring/20" type="password" name="password" autocomplete="current-password" required></label>
+    <button class="inline-flex w-fit items-center justify-center rounded-lg border border-transparent bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:cursor-not-allowed disabled:opacity-50" type="submit">Sicher anmelden</button>
+    <p class="text-xs leading-5 text-muted-foreground">Die Integration nutzt die inoffizielle Garmin-Connect-Schnittstelle und kann sich durch Änderungen bei Garmin vorübergehend anders verhalten.</p>
+  </form>
   {% endif %}
+
+  <div class="mt-5 flex justify-end border-t border-danger/25 pt-5">
+    <form method="post" action="/settings/garmin/data/delete" onsubmit="return confirm('Alle aus Garmin importierten Daten und lokalen Rohdateien löschen? Die Garmin-Verbindung bleibt aktiv und lokale Workouts bleiben erhalten.')">
+      <input type="hidden" name="confirmation" value="delete">
+      <button class="inline-flex w-full items-center justify-center rounded-lg border border-danger bg-danger px-4 py-2 text-sm font-semibold text-danger-foreground transition-colors hover:bg-danger/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger focus-visible:ring-offset-2 focus-visible:ring-offset-background sm:w-auto" type="submit">Importierte Daten löschen</button>
+    </form>
+  </div>
 </section>
 {% endblock %}

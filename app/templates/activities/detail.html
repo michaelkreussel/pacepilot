@@ -2,66 +2,67 @@
 {% block title %}{{ activity.name }} · PacePilot{% endblock %}
 {% block head %}
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
-<link rel="stylesheet" href="{{ url_for('static', path='/css/activity-detail.css') }}">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js" defer></script>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin="" defer></script>
-<script src="{{ url_for('static', path='/js/activity-detail.js') }}" defer></script>
+<script src="{{ url_for('static', path='/js/activity-detail.js') }}?v=20260809-1" defer></script>
 {% endblock %}
 {% block content %}
-<a class="back-link" href="/activities">← Alle Aktivitäten</a>
-<div class="page-heading activity-heading"><div><p class="eyebrow">{{ activity.activity_type|replace('_', ' ') }}</p><h1>{{ activity.name }}</h1><p>{{ activity.started_at|datetime }}</p></div></div>
+<a class="inline-flex text-sm font-semibold text-primary transition hover:text-primary-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" href="/activities">← Alle Aktivitäten</a>
+<div class="mb-8 mt-6"><div><p class="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">{{ activity.activity_type|replace('_', ' ') }}</p><h1 class="mt-2 font-display text-3xl font-semibold tracking-tight">{{ activity.name }}</h1><p class="mt-2 text-xs text-muted-foreground">{{ activity.started_at|datetime }}</p></div></div>
 
 {% set summary = activity_data.summary %}
-<section class="detail-metrics">
-  {% if activity.distance_m and not activity_data.is_strength %}<article><span>Distanz</span><strong>{{ activity.distance_m|distance }}</strong></article>{% endif %}
+<section class="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-4">
+  {% if activity.distance_m and not activity_data.is_strength %}<article class="rounded-xl border border-border bg-surface p-4 sm:p-5"><span class="text-xs text-muted-foreground">Distanz</span><strong class="mt-3 block font-display text-xl font-semibold tracking-tight">{{ activity.distance_m|distance }}</strong></article>{% endif %}
   {% if activity_data.is_running and summary.moving_time is not none %}
-    <article><span>Bewegungszeit</span><strong>{{ summary.moving_time|precise_duration }}</strong></article>
-    {% if summary.elapsed_time is not none %}<article><span>Gesamtzeit</span><strong>{{ summary.elapsed_time|precise_duration }}</strong></article>{% endif %}
+    <article class="rounded-xl border border-border bg-surface p-4 sm:p-5"><span class="text-xs text-muted-foreground">Bewegungszeit</span><strong class="mt-3 block font-display text-xl font-semibold tracking-tight">{{ summary.moving_time|precise_duration }}</strong></article>
+    {% if summary.elapsed_time is not none %}<article class="rounded-xl border border-border bg-surface p-4 sm:p-5"><span class="text-xs text-muted-foreground">Gesamtzeit</span><strong class="mt-3 block font-display text-xl font-semibold tracking-tight">{{ summary.elapsed_time|precise_duration }}</strong></article>{% endif %}
   {% elif activity.duration_s is not none %}
-    <article><span>Dauer</span><strong>{{ activity.duration_s|duration }}</strong></article>
+    <article class="rounded-xl border border-border bg-surface p-4 sm:p-5"><span class="text-xs text-muted-foreground">Dauer</span><strong class="mt-3 block font-display text-xl font-semibold tracking-tight">{{ activity.duration_s|duration }}</strong></article>
   {% endif %}
-  {% if activity_data.is_running and summary.average_pace is not none %}<article><span>Ø Pace in Bewegung</span><strong>{{ summary.average_pace|pace }}</strong></article>{% endif %}
-  {% if activity.average_hr %}<article><span>Ø Herzfrequenz</span><strong>{{ activity.average_hr }} bpm</strong></article>{% endif %}
-  {% if activity.max_hr %}<article><span>Max. Herzfrequenz</span><strong>{{ activity.max_hr }} bpm</strong></article>{% endif %}
-  {% if activity.calories %}<article><span>Kalorien</span><strong>{{ activity.calories }} kcal</strong></article>{% endif %}
-  {% if activity.elevation_gain_m and not activity_data.is_strength %}<article><span>Höhenmeter</span><strong>{{ activity.elevation_gain_m|round|int }} m</strong></article>{% endif %}
+  {% if activity_data.is_running and summary.average_pace is not none %}<article class="rounded-xl border border-border bg-surface p-4 sm:p-5"><span class="text-xs text-muted-foreground">Ø Pace in Bewegung</span><strong class="mt-3 block font-display text-xl font-semibold tracking-tight">{{ summary.average_pace|pace }}</strong></article>{% endif %}
+  {% if activity.average_hr %}<article class="rounded-xl border border-border bg-surface p-4 sm:p-5"><span class="text-xs text-muted-foreground">Ø Herzfrequenz</span><strong class="mt-3 block font-display text-xl font-semibold tracking-tight">{{ activity.average_hr }} bpm</strong></article>{% endif %}
+  {% if activity.max_hr %}<article class="rounded-xl border border-border bg-surface p-4 sm:p-5"><span class="text-xs text-muted-foreground">Max. Herzfrequenz</span><strong class="mt-3 block font-display text-xl font-semibold tracking-tight">{{ activity.max_hr }} bpm</strong></article>{% endif %}
+  {% if activity.calories %}<article class="rounded-xl border border-border bg-surface p-4 sm:p-5"><span class="text-xs text-muted-foreground">Kalorien</span><strong class="mt-3 block font-display text-xl font-semibold tracking-tight">{{ activity.calories }} kcal</strong></article>{% endif %}
+  {% if activity.elevation_gain_m and not activity_data.is_strength %}<article class="rounded-xl border border-border bg-surface p-4 sm:p-5"><span class="text-xs text-muted-foreground">Höhenmeter</span><strong class="mt-3 block font-display text-xl font-semibold tracking-tight">{{ activity.elevation_gain_m|round|int }} m</strong></article>{% endif %}
 </section>
 
 {% set has_detailed_stats = (activity_data.is_running and summary.timer_time is not none) or summary.average_cadence is not none or summary.average_power is not none or (activity_data.is_running and (summary.stride_length_cm is not none or summary.ground_contact_ms is not none or summary.vertical_oscillation_cm is not none or summary.vertical_ratio is not none)) %}
 {% if has_detailed_stats %}
-<details class="card detailed-stats">
-  <summary><div><span class="eyebrow">Garmin-Metriken</span><strong>Detailed Stats</strong></div><span class="details-toggle">Details anzeigen</span></summary>
-  <section class="detail-metrics detail-metrics-secondary">
-    {% if activity_data.is_running and summary.timer_time is not none %}<article><span>Timerzeit</span><strong>{{ summary.timer_time|precise_duration }}</strong></article>{% endif %}
-    {% if summary.average_cadence is not none %}<article><span>{% if activity_data.is_running %}Ø Schrittfrequenz{% else %}Ø Trittfrequenz{% endif %}</span><strong>{{ summary.average_cadence|round|int }} {% if activity_data.is_running %}spm{% else %}rpm{% endif %}</strong></article>{% endif %}
-    {% if summary.average_power is not none %}<article><span>Ø Leistung</span><strong>{{ summary.average_power|round|int }} W</strong></article>{% endif %}
-    {% if activity_data.is_running and summary.stride_length_cm is not none %}<article><span>Ø Schrittlänge</span><strong>{{ (summary.stride_length_cm / 100)|round(2) }} m</strong></article>{% endif %}
-    {% if activity_data.is_running and summary.ground_contact_ms is not none %}<article><span>Ø Bodenkontaktzeit</span><strong>{{ summary.ground_contact_ms|round|int }} ms</strong></article>{% endif %}
-    {% if activity_data.is_running and summary.vertical_oscillation_cm is not none %}<article><span>Ø Vertikale Bewegung</span><strong>{{ summary.vertical_oscillation_cm|round(1) }} cm</strong></article>{% endif %}
-    {% if activity_data.is_running and summary.vertical_ratio is not none %}<article><span>Ø Vertikales Verhältnis</span><strong>{{ summary.vertical_ratio|round(1) }} %</strong></article>{% endif %}
+<details class="group mt-4 overflow-hidden rounded-xl border border-border bg-surface">
+  <summary class="flex cursor-pointer list-none items-center justify-between gap-4 p-4 marker:hidden sm:p-5 [&::-webkit-details-marker]:hidden"><div><span class="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">Garmin-Metriken</span><strong class="mt-1 block text-lg font-semibold">Detailed Stats</strong></div><span class="shrink-0 text-xs font-semibold text-primary after:content-['_+'] group-open:after:content-['_−']">Details anzeigen</span></summary>
+  <section class="grid grid-cols-2 gap-3 border-t border-border bg-surface-muted p-4 sm:grid-cols-3 sm:p-5 lg:grid-cols-4">
+    {% if activity_data.is_running and summary.timer_time is not none %}<article><span class="text-xs text-muted-foreground">Timerzeit</span><strong class="mt-2 block text-sm font-semibold">{{ summary.timer_time|precise_duration }}</strong></article>{% endif %}
+    {% if summary.average_cadence is not none %}<article><span class="text-xs text-muted-foreground">{% if activity_data.is_running %}Ø Schrittfrequenz{% else %}Ø Trittfrequenz{% endif %}</span><strong class="mt-2 block text-sm font-semibold">{{ summary.average_cadence|round|int }} {% if activity_data.is_running %}spm{% else %}rpm{% endif %}</strong></article>{% endif %}
+    {% if summary.average_power is not none %}<article><span class="text-xs text-muted-foreground">Ø Leistung</span><strong class="mt-2 block text-sm font-semibold">{{ summary.average_power|round|int }} W</strong></article>{% endif %}
+    {% if activity_data.is_running and summary.stride_length_cm is not none %}<article><span class="text-xs text-muted-foreground">Ø Schrittlänge</span><strong class="mt-2 block text-sm font-semibold">{{ (summary.stride_length_cm / 100)|round(2) }} m</strong></article>{% endif %}
+    {% if activity_data.is_running and summary.ground_contact_ms is not none %}<article><span class="text-xs text-muted-foreground">Ø Bodenkontaktzeit</span><strong class="mt-2 block text-sm font-semibold">{{ summary.ground_contact_ms|round|int }} ms</strong></article>{% endif %}
+    {% if activity_data.is_running and summary.vertical_oscillation_cm is not none %}<article><span class="text-xs text-muted-foreground">Ø Vertikale Bewegung</span><strong class="mt-2 block text-sm font-semibold">{{ summary.vertical_oscillation_cm|round(1) }} cm</strong></article>{% endif %}
+    {% if activity_data.is_running and summary.vertical_ratio is not none %}<article><span class="text-xs text-muted-foreground">Ø Vertikales Verhältnis</span><strong class="mt-2 block text-sm font-semibold">{{ summary.vertical_ratio|round(1) }} %</strong></article>{% endif %}
   </section>
 </details>
 {% endif %}
 
 {% set has_charts = activity_data.series.heart_rate or activity_data.series.speed or activity_data.series.cadence %}
 {% if activity_data.route %}
-<section class="activity-map-card card">
-  <div class="activity-section-heading"><div><p class="eyebrow">Strecke</p><h2>Deine Route</h2></div><span>{{ activity_data.route|length }} GPS-Punkte</span></div>
-  <div id="activity-map" aria-label="Karte der Trainingsstrecke"></div>
+<section class="mt-6 overflow-hidden rounded-xl border border-border bg-surface p-4 sm:p-5">
+  <div class="mb-5 flex flex-col items-start justify-between gap-2 sm:flex-row sm:items-end"><div><p class="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">Strecke</p><h2 class="mt-1 text-lg font-semibold">Deine Route</h2></div><span class="text-xs text-muted-foreground">{{ activity_data.route|length }} GPS-Punkte</span></div>
+  <div class="h-[340px] overflow-hidden rounded-lg bg-surface-muted sm:h-[420px] lg:h-[520px]" id="activity-map" aria-label="Karte der Trainingsstrecke"></div>
 </section>
 {% endif %}
 
 {% if has_charts %}
-<section class="activity-analysis">
-  <div class="activity-section-heading"><div><p class="eyebrow">Zeitverlauf</p><h2>Leistung im Training</h2></div><span>Bewege den Mauszeiger über die Kurven</span></div>
-  <div class="activity-chart-grid">
-    {% if activity_data.series.heart_rate %}<article class="activity-chart-card card"><span class="chart-kicker heart-rate">Herzfrequenz</span><h3>Belastung</h3><div class="chart-frame"><canvas id="heart-rate-chart"></canvas></div></article>{% endif %}
-    {% if activity_data.is_running and activity_data.series.pace %}<article class="activity-chart-card card"><span class="chart-kicker pace">Tempo</span><h3>Pace</h3><div class="chart-frame"><canvas id="pace-chart"></canvas></div></article>{% elif activity_data.series.speed %}<article class="activity-chart-card card"><span class="chart-kicker speed">Geschwindigkeit</span><h3>Tempo</h3><div class="chart-frame"><canvas id="speed-chart"></canvas></div></article>{% endif %}
-    {% if activity_data.series.cadence %}<article class="activity-chart-card card"><span class="chart-kicker cadence">{% if activity_data.is_running %}Schrittfrequenz{% else %}Trittfrequenz{% endif %}</span><h3>Rhythmus</h3><div class="chart-frame"><canvas id="cadence-chart"></canvas></div></article>{% endif %}
+{% set has_tempo_chart = (activity_data.is_running and activity_data.series.pace) or activity_data.series.speed %}
+{% set cadence_full_width = (activity_data.series.heart_rate and has_tempo_chart) or (not activity_data.series.heart_rate and not has_tempo_chart) %}
+<section class="mt-10">
+  <div class="mb-5 flex flex-col items-start justify-between gap-2 sm:flex-row sm:items-end"><div><p class="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">Zeitverlauf</p><h2 class="mt-1 text-lg font-semibold">Leistung im Training</h2></div><span class="text-xs text-muted-foreground">Bewege den Mauszeiger über die Kurven</span></div>
+  <div class="grid gap-4 md:grid-cols-2">
+    {% if activity_data.series.heart_rate %}<article class="min-w-0 rounded-xl border border-border bg-surface p-4 sm:p-5"><span class="text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">Herzfrequenz</span><h3 class="mb-5 mt-2 text-lg font-semibold">Belastung</h3><div class="relative h-[250px]"><canvas id="heart-rate-chart"></canvas></div></article>{% endif %}
+    {% if activity_data.is_running and activity_data.series.pace %}<article class="min-w-0 rounded-xl border border-border bg-surface p-4 sm:p-5"><span class="text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">Tempo</span><h3 class="mb-5 mt-2 text-lg font-semibold">Pace</h3><div class="relative h-[250px]"><canvas id="pace-chart"></canvas></div></article>{% elif activity_data.series.speed %}<article class="min-w-0 rounded-xl border border-border bg-surface p-4 sm:p-5"><span class="text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">Geschwindigkeit</span><h3 class="mb-5 mt-2 text-lg font-semibold">Tempo</h3><div class="relative h-[250px]"><canvas id="speed-chart"></canvas></div></article>{% endif %}
+    {% if activity_data.series.cadence %}<article class="min-w-0 rounded-xl border border-border bg-surface p-4 sm:p-5{{ ' md:col-span-2' if cadence_full_width else '' }}"><span class="text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">{% if activity_data.is_running %}Schrittfrequenz{% else %}Trittfrequenz{% endif %}</span><h3 class="mb-5 mt-2 text-lg font-semibold">Rhythmus</h3><div class="relative h-[250px]"><canvas id="cadence-chart"></canvas></div></article>{% endif %}
   </div>
 </section>
 {% else %}
-<section class="card activity-data-empty"><p class="eyebrow">Zeitverlauf</p><h2>Noch keine Detaildaten</h2><p>Beim nächsten Garmin-Sync werden verfügbare Sensor- und GPS-Daten für diese Aktivität ergänzt.</p></section>
+<section class="mt-7 rounded-xl border border-border bg-surface p-4 sm:p-5"><p class="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">Zeitverlauf</p><h2 class="mt-2 text-lg font-semibold">Noch keine Detaildaten</h2><p class="mt-2 text-sm leading-6 text-muted-foreground">Beim nächsten Garmin-Sync werden verfügbare Sensor- und GPS-Daten für diese Aktivität ergänzt.</p></section>
 {% endif %}
 
 <script id="activity-detail-data" type="application/json">{{ activity_data|tojson }}</script>

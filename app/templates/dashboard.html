@@ -2,89 +2,96 @@
 {% block title %}Übersicht · PacePilot{% endblock %}
 {% block head %}<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>{% endblock %}
 {% block content %}
-<div class="page-heading dashboard-heading">
+<div class="mb-8 flex flex-col justify-between gap-4 sm:flex-row sm:items-start">
   <div>
-    <p class="eyebrow">Trainingszentrale</p>
-    <h1>Hallo, {{ user.display_name }}.</h1>
-    <p>Ein ruhiger Blick auf das, was heute zählt.</p>
+    <p class="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">Trainingszentrale</p>
+    <h1 class="mt-2 font-display text-3xl font-semibold tracking-tight">Hallo, {{ user.display_name }}.</h1>
+    <p class="mt-2 text-sm text-muted-foreground">Ein ruhiger Blick auf das, was heute zählt.</p>
   </div>
-  <div class="sync-state {{ account.sync_status }}">
-    <span class="status-dot"></span>
+  <div class="sync-state {{ account.sync_status }} inline-flex w-fit items-center gap-2 rounded-full border border-border bg-surface px-3 py-1.5 text-xs text-muted-foreground">
+    <span class="status-dot size-2 rounded-full bg-muted-foreground"></span>
     {% if account.last_sync_at %}Sync <time data-local-datetime datetime="{{ account.last_sync_at.isoformat() }}Z">{{ account.last_sync_at|datetime }}</time>{% else %}Noch nicht synchronisiert{% endif %}
   </div>
 </div>
 
-<section class="hero-grid">
-  <article class="next-workout-card">
-    <div class="card-topline">
-      <span class="eyebrow light">Nächste Einheit</span>
-      {% if upcoming %}<span class="pill light">{{ upcoming.scheduled_for|date }}</span>{% endif %}
+<section class="grid gap-4 lg:grid-cols-[minmax(0,1.6fr)_minmax(280px,0.8fr)]">
+  <article class="rounded-xl border border-border bg-surface p-4 sm:p-5">
+    <div class="flex items-center justify-between gap-4">
+      <span class="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">Nächste Einheit</span>
+      {% if upcoming %}<span class="rounded-full bg-surface-muted px-3 py-1 text-xs font-medium text-muted-foreground">{{ upcoming.scheduled_for|date }}</span>{% endif %}
     </div>
     {% if upcoming %}
-      <h2>{{ upcoming.name }}</h2>
-      <p>{{ upcoming.description or 'Bereit für deine nächste Einheit.' }}</p>
-      <div class="workout-facts">
+      <h2 class="mt-8 font-display text-2xl font-semibold tracking-tight">{{ upcoming.name }}</h2>
+      <p class="mt-2 text-sm leading-6 text-muted-foreground">{{ upcoming.description or 'Bereit für deine nächste Einheit.' }}</p>
+      <div class="my-5 flex flex-wrap gap-x-5 gap-y-2 text-xs text-muted-foreground">
         <span>{{ upcoming.sport|capitalize }}</span>
         <span>{{ upcoming.step_count }} Schritte</span>
         <span>{{ upcoming.status|capitalize }}</span>
       </div>
-      <a class="button button-light" href="/workouts/{{ upcoming.id }}">Einheit ansehen</a>
+      <a class="inline-flex items-center justify-center rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition hover:bg-primary-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" href="/workouts/{{ upcoming.id }}">Einheit ansehen</a>
     {% else %}
-      <h2>Der Kalender ist frei.</h2>
-      <p>Plane eine konkrete Einheit, wenn du bereit bist.</p>
-      <a class="button button-light" href="/workouts/new">Workout planen</a>
+      <h2 class="mt-8 font-display text-2xl font-semibold tracking-tight">Der Kalender ist frei.</h2>
+      <p class="mt-2 text-sm leading-6 text-muted-foreground">Plane eine konkrete Einheit, wenn du bereit bist.</p>
+      <a class="mt-5 inline-flex items-center justify-center rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition hover:bg-primary-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" href="/workouts/new">Workout planen</a>
     {% endif %}
   </article>
-  <article class="load-card">
-    <p class="eyebrow">Letzte 7 Tage</p>
-    <div class="load-number">{{ weekly_load.distance_km }}<small> km</small></div>
-    <div class="load-meta">
+  <article class="rounded-xl border border-border bg-surface p-4 sm:p-5">
+    <p class="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">Letzte 7 Tage</p>
+    <div class="mt-7 font-display text-4xl font-semibold tracking-tight">{{ weekly_load.distance_km }}<small class="text-sm font-medium text-muted-foreground"> km</small></div>
+    <div class="mt-4 flex justify-between gap-4 text-xs text-muted-foreground">
       <span>{{ weekly_load.activity_count }} Einheiten</span>
       <span>{{ weekly_load.duration_hours }} Stunden</span>
     </div>
-    <div class="progress-track"><span style="width: {{ [weekly_load.distance_km * 2, 100]|min }}%"></span></div>
+    <div class="mt-5 h-1.5 overflow-hidden rounded-full bg-secondary"><span class="block h-full rounded-full bg-primary" style="width: {{ [weekly_load.distance_km * 2, 100]|min }}%"></span></div>
   </article>
 </section>
 
-<div id="health-cards">
-  {% include "partials/health_cards.html" %}
-</div>
+{% include "partials/health_cards.html" %}
 
-<section class="dashboard-lower">
-  <article class="card chart-card">
-    <div class="card-heading">
-      <div><p class="eyebrow">Erholung</p><h2>14-Tage-Trend</h2></div>
-      <button class="text-button" hx-post="/health" hx-target="#health-cards" hx-swap="outerHTML" hx-disabled-elt="this">Aktualisieren</button>
+<section class="mt-6 grid gap-4 lg:grid-cols-[minmax(0,1.5fr)_minmax(280px,0.7fr)]">
+  <article class="rounded-xl border border-border bg-surface p-4 sm:p-5">
+    <div class="mb-5 flex items-start justify-between gap-4">
+      <div><p class="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">Erholung</p><h2 class="mt-1 text-lg font-semibold">14-Tage-Trend</h2></div>
+      <button class="text-sm font-semibold text-primary transition hover:text-primary-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-50" hx-post="/health" hx-target="#health-cards" hx-swap="outerHTML" hx-disabled-elt="this">Aktualisieren</button>
     </div>
-    {% if health %}<canvas id="healthChart" height="120"></canvas>{% else %}<div class="empty-inline">Nach dem ersten Garmin-Sync erscheint hier dein Verlauf.</div>{% endif %}
+    {% if health %}<canvas id="healthChart" height="120"></canvas>{% else %}<div class="rounded-lg bg-surface-muted p-4 text-sm text-muted-foreground">Nach dem ersten Garmin-Sync erscheint hier dein Verlauf.</div>{% endif %}
   </article>
-  <article class="card latest-card">
-    <p class="eyebrow">Letzte Aktivität</p>
+  <article class="rounded-xl border border-border bg-surface p-4 sm:p-5">
+    <p class="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">Letzte Aktivität</p>
     {% if latest_activity %}
-      <h2>{{ latest_activity.name }}</h2>
-      <p class="muted">{{ latest_activity.started_at|datetime }}</p>
-      <div class="metric-list">
-        <div><span>Distanz</span><strong>{{ latest_activity.distance_m|distance }}</strong></div>
-        <div><span>Dauer</span><strong>{{ latest_activity.duration_s|duration }}</strong></div>
-        <div><span>Ø Herzfrequenz</span><strong>{{ latest_activity.average_hr or '–' }}</strong></div>
+      <h2 class="mt-2 text-lg font-semibold">{{ latest_activity.name }}</h2>
+      <p class="mt-1 text-xs text-muted-foreground">{{ latest_activity.started_at|datetime }}</p>
+      <div class="my-5 divide-y divide-border border-y border-border">
+        <div class="flex items-center justify-between py-3"><span class="text-xs text-muted-foreground">Distanz</span><strong class="text-sm font-semibold">{{ latest_activity.distance_m|distance }}</strong></div>
+        <div class="flex items-center justify-between py-3"><span class="text-xs text-muted-foreground">Dauer</span><strong class="text-sm font-semibold">{{ latest_activity.duration_s|duration }}</strong></div>
+        <div class="flex items-center justify-between py-3"><span class="text-xs text-muted-foreground">Ø Herzfrequenz</span><strong class="text-sm font-semibold">{{ latest_activity.average_hr or '–' }}</strong></div>
       </div>
-      <a class="text-link" href="/activities/{{ latest_activity.id }}">Details ansehen →</a>
+      <a class="text-sm font-semibold text-primary transition hover:text-primary-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" href="/activities/{{ latest_activity.id }}">Details ansehen →</a>
     {% else %}
-      <h2>Noch keine Aktivität</h2><p class="muted">Verbinde Garmin und starte die erste Synchronisierung.</p>
+      <h2 class="mt-2 text-lg font-semibold">Noch keine Aktivität</h2><p class="mt-2 text-sm leading-6 text-muted-foreground">Verbinde Garmin und starte die erste Synchronisierung.</p>
     {% endif %}
   </article>
 </section>
 {% if health %}
 <script>
 document.addEventListener('DOMContentLoaded', () => {
+  const cssValue = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  Chart.defaults.color = cssValue('--muted-foreground');
   const values = {{ health|map(attribute='hrv_average')|list|tojson }};
-  new Chart(document.getElementById('healthChart'), {
+  const chart = new Chart(document.getElementById('healthChart'), {
     type: 'line',
     data: {
       labels: {{ health|map(attribute='day')|map('date')|list|tojson }},
-      datasets: [{ label: 'HRV', data: values, borderColor: '#ff5c35', backgroundColor: 'rgba(255,92,53,.09)', tension: .35, fill: true, spanGaps: true }]
+      datasets: [{ label: 'HRV', data: values, borderColor: cssValue('--chart-hrv'), backgroundColor: cssValue('--chart-hrv-fill'), tension: .35, fill: true, spanGaps: true }]
     },
-    options: { plugins: { legend: { display: false } }, scales: { x: { grid: { display: false } }, y: { border: { display: false } } } }
+    options: { plugins: { legend: { display: false } }, scales: { x: { grid: { display: false } }, y: { border: { display: false }, grid: { color: cssValue('--chart-grid') } } } }
+  });
+  document.addEventListener('pacepilot:themechange', () => {
+    Chart.defaults.color = cssValue('--muted-foreground');
+    chart.data.datasets[0].borderColor = cssValue('--chart-hrv');
+    chart.data.datasets[0].backgroundColor = cssValue('--chart-hrv-fill');
+    chart.options.scales.y.grid.color = cssValue('--chart-grid');
+    chart.update('none');
   });
 });
 </script>

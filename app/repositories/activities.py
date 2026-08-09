@@ -1,6 +1,6 @@
 from datetime import date, datetime, time, timedelta
 
-from sqlalchemy import Select, select
+from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.models import Activity, ActivityExerciseSet, ActivitySplit, ActivityZone
@@ -34,7 +34,42 @@ def list_activities_filtered(
     end: date | None = None,
     sport: str | None = None,
     limit: int = 100,
+    offset: int = 0,
 ) -> list[Activity]:
+    query = _filtered_activity_query(user_id, start=start, end=end, sport=sport)
+    return list(session.scalars(query.offset(offset).limit(limit)))
+
+
+def count_activities_filtered(
+    session: Session,
+    user_id: int,
+    *,
+    start: date | None = None,
+    end: date | None = None,
+    sport: str | None = None,
+) -> int:
+    query = _filtered_activity_query(user_id, start=start, end=end, sport=sport)
+    return session.scalar(select(func.count()).select_from(query.order_by(None).subquery())) or 0
+
+
+def list_activity_types(session: Session, user_id: int) -> list[str]:
+    return list(
+        session.scalars(
+            select(Activity.activity_type)
+            .where(Activity.user_id == user_id)
+            .distinct()
+            .order_by(Activity.activity_type)
+        )
+    )
+
+
+def _filtered_activity_query(
+    user_id: int,
+    *,
+    start: date | None = None,
+    end: date | None = None,
+    sport: str | None = None,
+) -> Select[tuple[Activity]]:
     query = activity_query(user_id)
     if start is not None:
         query = query.where(Activity.started_at >= datetime.combine(start, time.min))
@@ -44,7 +79,7 @@ def list_activities_filtered(
         )
     if sport is not None:
         query = query.where(Activity.activity_type == sport)
-    return list(session.scalars(query.limit(limit)))
+    return query
 
 
 def find_activity(session: Session, user_id: int, activity_id: int) -> Activity | None:
