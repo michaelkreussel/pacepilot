@@ -1,16 +1,19 @@
+import json
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import date
 from typing import Annotated
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from app.auth import CurrentUser
 from app.database import SessionDep
-from app.models import User, Workout, WorkoutStep
+from app.models import User, Workout
 from app.repositories.users import get_or_create_garmin_account
 from app.repositories.workouts import find_workout
 from app.services.garmin.client import (
@@ -26,11 +29,11 @@ from app.services.garmin.workout_export import (
     update_published_workout,
     upload_workout,
 )
-from app.services.planning.validator import (
-    StepInput,
-    WorkoutInput,
-    WorkoutValidationError,
-    validate_workout,
+from app.services.planning.validator import WorkoutInput, WorkoutValidationError, validate_workout
+from app.services.planning.workout_definition import (
+    default_definition,
+    definition_to_json,
+    parse_definition,
 )
 from app.web import context, templates
 
@@ -46,106 +49,55 @@ def _parse_optional_date(value: str) -> date | None:
         raise WorkoutValidationError("Das Trainingsdatum ist ungültig.") from exc
 
 
-def _parse_optional_pace(value: str) -> float | None:
-    value = value.strip()
-    if not value:
-        return None
-    try:
-        minutes, seconds = (int(part) for part in value.split(":"))
-    except (ValueError, TypeError) as exc:
-        raise WorkoutValidationError("Pace bitte als MM:SS angeben.") from exc
-    if minutes < 0 or not 0 <= seconds <= 59 or minutes + seconds == 0:
-        raise WorkoutValidationError("Pace bitte als MM:SS angeben.")
-    return float(minutes * 60 + seconds)
+@dataclass(frozen=True)
+class WorkoutFormError:
+    message: str
+    form_data: dict[str, str]
+    definition: dict[str, object]
 
 
-def _format_pace_input(value: float | None) -> str:
-    if value is None:
-        return ""
-    minutes, seconds = divmod(round(value), 60)
-    return f"{minutes}:{seconds:02d}"
+def _form_data(workout: Workout | None = None) -> dict[str, str]:
+    return {
+        "name": workout.name if workout else "",
+        "sport": workout.sport if workout else "running",
+        "scheduled_for": (
+            workout.scheduled_for.isoformat() if workout and workout.scheduled_for else ""
+        ),
+        "description": workout.description or "" if workout else "",
+    }
 
 
-def _form_steps(workout: Workout | None) -> list[dict[str, object]]:
-    if workout is None:
-        return []
-    return [
-        {
-            "id": step.id,
-            "type": step.step_type,
-            "duration": step.duration_type,
-            "value": (
-                (step.duration_value or 0) / 60
-                if step.duration_type == "time"
-                else step.duration_value
-            ),
-            "repeats": step.repeat_count or 1,
-            "target": step.target_type,
-            "targetMin": _format_pace_input(step.target_min),
-            "targetMax": _format_pace_input(step.target_max),
-        }
-        for step in workout.steps
-    ]
-
-
-async def _parse_workout(request: Request) -> WorkoutInput:
+async def _parse_workout_result(request: Request) -> WorkoutInput | WorkoutFormError:
     form = await request.form()
-    step_types = form.getlist("step_type")
-    duration_types = form.getlist("duration_type")
-    values = form.getlist("duration_value")
-    repeats = form.getlist("repeat_count")
-    target_types = form.getlist("target_type")
-    target_mins = form.getlist("target_min")
-    target_maxes = form.getlist("target_max")
-    steps: list[StepInput] = []
-    for index, step_type in enumerate(step_types):
-        duration_type = str(duration_types[index]) if index < len(duration_types) else "time"
-        raw_value = str(values[index]) if index < len(values) else ""
-        raw_repeat = str(repeats[index]) if index < len(repeats) else "1"
-        target_type = str(target_types[index]) if index < len(target_types) else "no_target"
-        target_min = _parse_optional_pace(
-            str(target_mins[index]) if index < len(target_mins) else ""
-        )
-        target_max = _parse_optional_pace(
-            str(target_maxes[index]) if index < len(target_maxes) else ""
-        )
-        try:
-            value = float(raw_value) if raw_value else None
-            repeat_count = int(raw_repeat or 1)
-        except ValueError as exc:
-            raise WorkoutValidationError("Dauer und Wiederholungen müssen Zahlen sein.") from exc
-        if duration_type == "time" and value is not None:
-            value *= 60
-        steps.append(
-            StepInput(
-                str(step_type),
-                duration_type,
-                value,
-                repeat_count,
-                target_type,
-                target_min,
-                target_max,
-            )
-        )
-    workout = WorkoutInput(
-        name=str(form.get("name", "")).strip(),
-        sport=str(form.get("sport", "running")),
-        scheduled_for=_parse_optional_date(str(form.get("scheduled_for", ""))),
-        description=str(form.get("description", "")).strip(),
-        steps=steps,
-    )
-    validate_workout(workout)
-    return workout
-
-
-async def _parse_workout_result(request: Request) -> WorkoutInput | WorkoutValidationError:
+    form_data = {
+        "name": str(form.get("name", "")).strip(),
+        "sport": str(form.get("sport", "running")),
+        "scheduled_for": str(form.get("scheduled_for", "")),
+        "description": str(form.get("description", "")).strip(),
+    }
+    fallback = definition_to_json(default_definition())
     try:
-        return await _parse_workout(request)
+        raw_definition = json.loads(str(form.get("definition", "")))
+        definition = parse_definition(raw_definition)
+        workout = WorkoutInput(
+            name=form_data["name"],
+            sport=form_data["sport"],
+            scheduled_for=_parse_optional_date(form_data["scheduled_for"]),
+            description=form_data["description"],
+            definition=definition,
+        )
+        validate_workout(workout)
+        return workout
+    except json.JSONDecodeError:
+        return WorkoutFormError("Die Workout-Struktur ist ungültig.", form_data, fallback)
+    except ValidationError:
+        return WorkoutFormError("Die Workout-Struktur ist unvollständig.", form_data, fallback)
     except WorkoutValidationError as exc:
-        return exc
+        definition_data = definition_to_json(definition) if "definition" in locals() else fallback
+        return WorkoutFormError(str(exc), form_data, definition_data)
 
 
-WorkoutFormDep = Annotated[WorkoutInput | WorkoutValidationError, Depends(_parse_workout_result)]
+WorkoutFormDep = Annotated[WorkoutInput | WorkoutFormError, Depends(_parse_workout_result)]
 
 
 @router.get("/new", response_class=HTMLResponse)
@@ -158,7 +110,8 @@ def new_workout(request: Request, _: CurrentUser) -> HTMLResponse:
             active_page="workout-new",
             today=date.today(),
             workout=None,
-            initial_steps=[],
+            form_data=_form_data(),
+            initial_definition=definition_to_json(default_definition()),
             error=None,
         ),
     )
@@ -168,7 +121,7 @@ def new_workout(request: Request, _: CurrentUser) -> HTMLResponse:
 def create_workout(
     request: Request, data: WorkoutFormDep, session: SessionDep, user: CurrentUser
 ) -> Response:
-    if isinstance(data, WorkoutValidationError):
+    if isinstance(data, WorkoutFormError):
         return templates.TemplateResponse(
             request,
             "workouts/form.html",
@@ -177,8 +130,9 @@ def create_workout(
                 active_page="workout-new",
                 today=date.today(),
                 workout=None,
-                initial_steps=[],
-                error=str(data),
+                form_data=data.form_data,
+                initial_definition=data.definition,
+                error=data.message,
             ),
             status_code=422,
         )
@@ -189,8 +143,9 @@ def create_workout(
         scheduled_for=data.scheduled_for,
         description=data.description or None,
         status="draft",
+        definition_version=1,
+        definition=definition_to_json(data.definition),
     )
-    _replace_workout_steps(workout, data)
     session.add(workout)
     session.commit()
     return RedirectResponse(f"/workouts/{workout.id}", status_code=303)
@@ -201,6 +156,18 @@ def _get_workout(session: Session, user_id: int, workout_id: int) -> Workout:
     if workout is None:
         raise HTTPException(status_code=404, detail="Workout nicht gefunden")
     return workout
+
+
+def _validate_persisted_workout(workout: Workout) -> None:
+    validate_workout(
+        WorkoutInput(
+            name=workout.name,
+            sport=workout.sport,
+            scheduled_for=workout.scheduled_for,
+            description=workout.description or "",
+            definition=workout.definition_model,
+        )
+    )
 
 
 @contextmanager
@@ -215,27 +182,6 @@ def _garmin_client(session: Session, user: User) -> Iterator[object]:
         raise GarminUnavailableError(
             "Für dieses Garmin-Konto läuft gerade eine andere Operation."
         ) from exc
-
-
-def _replace_workout_steps(
-    workout: Workout, data: WorkoutInput, session: Session | None = None
-) -> None:
-    workout.steps.clear()
-    if session is not None and workout.id is not None:
-        session.flush()
-    for position, step in enumerate(data.steps, 1):
-        workout.steps.append(
-            WorkoutStep(
-                position=position,
-                step_type=step.step_type,
-                duration_type=step.duration_type,
-                duration_value=step.duration_value,
-                target_type=step.target_type,
-                target_min=step.target_min,
-                target_max=step.target_max,
-                repeat_count=step.repeat_count,
-            )
-        )
 
 
 @router.get("/{workout_id}", response_class=HTMLResponse)
@@ -271,7 +217,8 @@ def edit_workout(
             active_page="plans",
             today=date.today(),
             workout=workout,
-            initial_steps=_form_steps(workout),
+            form_data=_form_data(workout),
+            initial_definition=workout.definition,
             error=None,
         ),
     )
@@ -286,7 +233,7 @@ def update_workout(
     user: CurrentUser,
 ) -> Response:
     workout = _get_workout(session, user.id, workout_id)
-    if isinstance(data, WorkoutValidationError):
+    if isinstance(data, WorkoutFormError):
         return templates.TemplateResponse(
             request,
             "workouts/form.html",
@@ -295,8 +242,9 @@ def update_workout(
                 active_page="plans",
                 today=date.today(),
                 workout=workout,
-                initial_steps=_form_steps(workout),
-                error=str(data),
+                form_data=data.form_data,
+                initial_definition=data.definition,
+                error=data.message,
             ),
             status_code=422,
         )
@@ -306,7 +254,8 @@ def update_workout(
     workout.sport = data.sport
     workout.scheduled_for = data.scheduled_for
     workout.description = data.description or None
-    _replace_workout_steps(workout, data, session)
+    workout.definition_version = 1
+    workout.definition = definition_to_json(data.definition)
     try:
         if workout.garmin_workout_id:
             with _garmin_client(session, user) as client:
@@ -340,8 +289,13 @@ def delete_workout(workout_id: int, session: SessionDep, user: CurrentUser) -> R
 def confirm_workout(workout_id: int, session: SessionDep, user: CurrentUser) -> RedirectResponse:
     workout = _get_workout(session, user.id, workout_id)
     if workout.status == "draft":
-        workout.status = "confirmed"
-        session.commit()
+        try:
+            _validate_persisted_workout(workout)
+            workout.status = "confirmed"
+            session.commit()
+        except WorkoutValidationError as exc:
+            query = urlencode({"error": str(exc)})
+            return RedirectResponse(f"/workouts/{workout.id}?{query}", status_code=303)
     return RedirectResponse(f"/workouts/{workout.id}", status_code=303)
 
 

@@ -1,39 +1,91 @@
 {% extends "base.html" %}
 {% block title %}Workout {{ 'bearbeiten' if workout else 'erstellen' }} · PacePilot{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ url_for('static', path='/css/workout-builder.css') }}?v=20260809-1"><script src="{{ url_for('static', path='/js/workout-builder.js') }}?v=20260809-1"></script>{% endblock %}
 {% block content %}
-<div class="page-heading"><div><p class="eyebrow">Workout-Editor</p><h1>{{ 'Einheit bearbeiten.' if workout else 'Eine klare Einheit bauen.' }}</h1><p>{{ 'Gespeicherte Änderungen werden direkt mit Garmin und deiner Uhr synchronisiert.' if workout and workout.garmin_workout_id else 'Einfach planen, prüfen und erst danach zu Garmin senden.' }}</p></div></div>
+<div class="page-heading builder-heading"><div><p class="eyebrow">Workout-Editor</p><h1>{{ 'Einheit bearbeiten.' if workout else 'Eine klare Einheit bauen.' }}</h1><p>{{ 'Gespeicherte Änderungen werden direkt mit Garmin und deiner Uhr synchronisiert.' if workout and workout.garmin_workout_id else 'Bausteine ordnen, Wiederholungen bündeln und erst danach zu Garmin senden.' }}</p></div></div>
 {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
-<form method="post" action="{{ '/workouts/' ~ workout.id if workout else '/workouts' }}" class="editor-layout" x-data='workoutEditor({{ initial_steps|tojson }})'>
-  <section class="card form-card">
-    <p class="section-number">01</p><h2>Grundlagen</h2>
-    <label>Name<input name="name" required placeholder="z. B. 6 × 800 m kontrolliert" value="{{ workout.name if workout else '' }}"></label>
-    <div class="form-row"><label>Sportart<select name="sport"><option value="running" {{ 'selected' if not workout or workout.sport == 'running' else '' }}>Laufen</option><option value="cycling" {{ 'selected' if workout and workout.sport == 'cycling' else '' }}>Radfahren</option><option value="walking" {{ 'selected' if workout and workout.sport == 'walking' else '' }}>Gehen</option><option value="hiking" {{ 'selected' if workout and workout.sport == 'hiking' else '' }}>Wandern</option></select></label><label>Datum<input type="date" name="scheduled_for" {% if not workout %}min="{{ today.isoformat() }}"{% endif %} value="{{ workout.scheduled_for.isoformat() if workout and workout.scheduled_for else '' }}"></label></div>
-    <label>Beschreibung<textarea name="description" rows="3" placeholder="Ziel und Hinweise für die Einheit">{{ workout.description if workout and workout.description else '' }}</textarea></label>
+<form method="post" action="{{ '/workouts/' ~ workout.id if workout else '/workouts' }}" class="workout-builder" x-data='workoutBuilder({{ initial_definition|tojson }}, {{ form_data.sport|tojson }})'>
+  <input type="hidden" name="definition" :value="serializedDefinition()">
+  <section class="card builder-basics">
+    <div class="builder-section-heading"><span class="section-number">01</span><div><h2>Grundlagen</h2><p>Rahmen und Termin der Einheit.</p></div></div>
+    <label>Name<input name="name" required maxlength="200" placeholder="z. B. 8 × 400 m kontrolliert" value="{{ form_data.name }}"></label>
+    <div class="form-row"><label>Sportart<select name="sport" x-model="sport"><option value="running">Laufen</option><option value="cycling">Radfahren</option><option value="walking">Gehen</option><option value="hiking">Wandern</option></select></label><label>Datum<input type="date" name="scheduled_for" {% if not workout %}min="{{ today.isoformat() }}"{% endif %} value="{{ form_data.scheduled_for }}"></label></div>
+    <label>Beschreibung<textarea name="description" rows="3" placeholder="Ziel und Hinweise für die Einheit">{{ form_data.description }}</textarea></label>
   </section>
-  <section class="card form-card steps-card">
-    <div class="card-heading"><div><p class="section-number">02</p><h2>Schritte</h2></div><button type="button" class="button secondary" @click="addStep()">+ Schritt</button></div>
-    <div class="steps-list">
-      <template x-for="(step, index) in steps" :key="step.id">
-        {% include "workouts/_step_form.html" %}
-      </template>
-    </div>
-    <p class="form-hint">Gleiche Wiederholungszahl bei einer Belastung und der direkt folgenden Erholung erzeugt einen abwechselnden Garmin-Intervallblock.</p>
-  </section>
+
+  <div class="builder-workspace">
+    <aside class="card builder-palette" aria-label="Bausteine">
+      <div class="builder-section-heading"><span class="section-number">02</span><div><h2>Bausteine</h2><p>Am Ende des Ablaufs einfügen.</p></div></div>
+      <div class="block-palette">
+        {% for value, label, icon in [('warmup','Aufwärmen','sunrise'),('interval','Belastung','bolt'),('recovery','Erholung','pause'),('cooldown','Auslaufen','flag')] %}
+        <button type="button" class="palette-button" @click="addStep('{{ value }}')"><svg aria-hidden="true"><use href="/static/icons/workout.svg#{{ icon }}"></use></svg><span>{{ label }}</span><small>Schritt</small></button>
+        {% endfor %}
+        <button type="button" class="palette-button repeat" @click="addRepeat()"><svg aria-hidden="true"><use href="/static/icons/workout.svg#repeat"></use></svg><span>Wiederholung</span><small>Container</small></button>
+      </div>
+      <div class="builder-legend"><p><svg aria-hidden="true"><use href="/static/icons/workout.svg#grip"></use></svg>Ziehen am Griff</p><p>Auf Mobilgeräten die Pfeilaktionen verwenden.</p></div>
+    </aside>
+
+    <section class="card builder-flow" aria-labelledby="flow-heading">
+      <div class="builder-section-heading flow-heading"><span class="section-number">03</span><div><h2 id="flow-heading">Ablauf</h2><p><span x-text="leafCount()"></span> Schritte · <span x-text="repeatCount()"></span> Wiederholungsblöcke</p></div></div>
+      <div class="builder-live" aria-live="polite" x-text="announcement"></div>
+      <div class="flow-list">
+        <template x-for="(block, index) in definition.blocks" :key="block.id">
+          <div>
+            <button type="button" class="drop-zone" :class="isDragging && 'active'" @dragover.prevent @drop.prevent="dropAt(null, index)"><span>Hier einfügen</span></button>
+            <article class="flow-block" :class="block.kind === 'repeat' ? 'repeat-block' : `step-block ${block.step_type}`">
+              <header class="block-header">
+                <button type="button" class="drag-handle" draggable="true" @dragstart.stop="startDrag(null, index, $event)" @dragend="endDrag()" aria-label="Block ziehen"><svg aria-hidden="true"><use href="/static/icons/workout.svg#grip"></use></svg></button>
+                <span class="block-icon"><svg aria-hidden="true"><use :href="`/static/icons/workout.svg#${blockIcon(block)}`"></use></svg></span>
+                <button type="button" class="block-summary" @click="toggle(block.id)" :aria-expanded="isExpanded(block.id)"><span><strong x-text="blockTitle(block)"></strong><small x-text="blockSummary(block)"></small></span><svg aria-hidden="true" :class="isExpanded(block.id) && 'rotated'"><use href="/static/icons/workout.svg#chevron"></use></svg></button>
+                <div class="block-actions">
+                  <button type="button" @click="move(null, index, -1)" :disabled="index === 0" aria-label="Nach oben"><svg aria-hidden="true"><use href="/static/icons/workout.svg#up"></use></svg></button>
+                  <button type="button" @click="move(null, index, 1)" :disabled="index === definition.blocks.length - 1" aria-label="Nach unten"><svg aria-hidden="true"><use href="/static/icons/workout.svg#down"></use></svg></button>
+                  <button type="button" @click="duplicate(null, index)" aria-label="Duplizieren"><svg aria-hidden="true"><use href="/static/icons/workout.svg#copy"></use></svg></button>
+                  <button type="button" @click="remove(null, index)" aria-label="Entfernen"><svg aria-hidden="true"><use href="/static/icons/workout.svg#trash"></use></svg></button>
+                </div>
+              </header>
+              <template x-if="block.kind === 'step'">
+                <div>
+                  <div class="move-into-row" x-show="repeatBlocks().length"><label>In Wiederholung verschieben<select @change="moveIntoRepeat(index, $event.target.value); $event.target.value = ''"><option value="">Wiederholung wählen</option><template x-for="repeat in repeatBlocks()" :key="repeat.id"><option :value="repeat.id" x-text="blockTitle(repeat)"></option></template></select></label></div>
+                  <div class="block-editor" x-show="isExpanded(block.id)" x-data="{ step: block }">{% include "workouts/_step_fields.html" %}</div>
+                </div>
+              </template>
+              <template x-if="block.kind === 'repeat'">
+                <div class="repeat-content">
+                  <div class="repeat-settings"><label>Wiederholungen<input type="number" min="2" max="50" required x-model.number="block.iterations"></label><span class="repeat-badge"><svg aria-hidden="true"><use href="/static/icons/workout.svg#repeat"></use></svg><strong x-text="`${block.iterations}×`"></strong></span></div>
+                  <div class="repeat-children" :class="!block.children.length && 'empty'">
+                    <template x-for="(child, childIndex) in block.children" :key="child.id">
+                      <div>
+                        <button type="button" class="drop-zone child-drop" :class="isDragging && 'active'" @dragover.prevent @drop.prevent="dropAt(block.id, childIndex)"><span>In Wiederholung einfügen</span></button>
+                        <article class="flow-block child-block" :class="child.step_type">
+                          <header class="block-header">
+                            <button type="button" class="drag-handle" draggable="true" @dragstart.stop="startDrag(block.id, childIndex, $event)" @dragend="endDrag()" aria-label="Schritt ziehen"><svg aria-hidden="true"><use href="/static/icons/workout.svg#grip"></use></svg></button>
+                            <span class="block-icon"><svg aria-hidden="true"><use :href="`/static/icons/workout.svg#${blockIcon(child)}`"></use></svg></span>
+                            <button type="button" class="block-summary" @click="toggle(child.id)" :aria-expanded="isExpanded(child.id)"><span><strong x-text="blockTitle(child)"></strong><small x-text="blockSummary(child)"></small></span><svg aria-hidden="true" :class="isExpanded(child.id) && 'rotated'"><use href="/static/icons/workout.svg#chevron"></use></svg></button>
+                            <div class="block-actions">
+                              <button type="button" @click="move(block.id, childIndex, -1)" :disabled="childIndex === 0" aria-label="Nach oben"><svg aria-hidden="true"><use href="/static/icons/workout.svg#up"></use></svg></button>
+                              <button type="button" @click="move(block.id, childIndex, 1)" :disabled="childIndex === block.children.length - 1" aria-label="Nach unten"><svg aria-hidden="true"><use href="/static/icons/workout.svg#down"></use></svg></button>
+                              <button type="button" @click="moveOut(block.id, childIndex)" aria-label="Aus Wiederholung lösen"><svg aria-hidden="true"><use href="/static/icons/workout.svg#out"></use></svg></button>
+                              <button type="button" @click="duplicate(block.id, childIndex)" aria-label="Duplizieren"><svg aria-hidden="true"><use href="/static/icons/workout.svg#copy"></use></svg></button>
+                              <button type="button" @click="remove(block.id, childIndex)" aria-label="Entfernen"><svg aria-hidden="true"><use href="/static/icons/workout.svg#trash"></use></svg></button>
+                            </div>
+                          </header>
+                          <div class="block-editor" x-show="isExpanded(child.id)" x-data="{ step: child }">{% include "workouts/_step_fields.html" %}</div>
+                        </article>
+                      </div>
+                    </template>
+                    <button type="button" class="drop-zone child-drop final" :class="isDragging && 'active'" @dragover.prevent @drop.prevent="dropAt(block.id, block.children.length)"><span x-text="block.children.length ? 'Am Ende einfügen' : 'Schritt hier ablegen'"></span></button>
+                  </div>
+                  <div class="repeat-add"><button type="button" @click="addStep('interval', block.id)">+ Belastung</button><button type="button" @click="addStep('recovery', block.id)">+ Erholung</button></div>
+                </div>
+              </template>
+            </article>
+          </div>
+        </template>
+        <button type="button" class="drop-zone final" :class="isDragging && 'active'" @dragover.prevent @drop.prevent="dropAt(null, definition.blocks.length)"><span>Am Ende einfügen</span></button>
+      </div>
+    </section>
+  </div>
   <div class="editor-actions"><p>{% if workout and workout.garmin_workout_id %}Garmin Connect und deine Uhr werden direkt aktualisiert.{% elif workout %}Der aktuelle Freigabestatus bleibt erhalten.{% else %}Das Workout wird zunächst als Entwurf gespeichert.{% endif %}</p><button class="button large" type="submit">{% if workout and workout.garmin_workout_id %}Speichern und synchronisieren{% elif workout %}Änderungen speichern{% else %}Entwurf speichern{% endif %}</button></div>
 </form>
-<script>
-function workoutEditor(initialSteps) {
-  const defaults = [
-    { id: 1, type: 'warmup', duration: 'time', value: 10, repeats: 1, target: 'no_target', targetMin: '', targetMax: '' },
-    { id: 2, type: 'interval', duration: 'time', value: 20, repeats: 1, target: 'no_target', targetMin: '', targetMax: '' },
-    { id: 3, type: 'cooldown', duration: 'time', value: 10, repeats: 1, target: 'no_target', targetMin: '', targetMax: '' }
-  ];
-  return {
-    nextId: Math.max(0, ...initialSteps.map(step => step.id)) + 1,
-    steps: initialSteps.length ? initialSteps : defaults,
-    addStep() { this.steps.push({ id: this.nextId++, type: 'interval', duration: 'time', value: 5, repeats: 1, target: 'no_target', targetMin: '', targetMax: '' }); },
-    removeStep(index) { if (this.steps.length > 1) this.steps.splice(index, 1); }
-  };
-}
-</script>
 {% endblock %}

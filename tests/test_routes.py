@@ -1,3 +1,4 @@
+import json
 from collections.abc import Callable
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -20,7 +21,6 @@ from app.models import (
     SyncRun,
     User,
     Workout,
-    WorkoutStep,
 )
 from app.routes import plans as plans_module
 from app.routes import settings as settings_module
@@ -31,19 +31,43 @@ from app.services.garmin.locks import garmin_account_slot
 
 def _workout_data(
     name: str = "Lockerer Dauerlauf", scheduled_for: str = "2026-08-09"
-) -> dict[str, str | list[str]]:
+) -> dict[str, str]:
     return {
         "name": name,
         "sport": "running",
         "scheduled_for": scheduled_for,
         "description": "Ruhig bleiben",
-        "step_type": ["warmup", "interval", "cooldown"],
-        "duration_type": ["time", "time", "time"],
-        "duration_value": ["10", "30", "5"],
-        "repeat_count": ["1", "1", "1"],
-        "target_type": ["no_target", "pace", "no_target"],
-        "target_min": ["", "4:00", ""],
-        "target_max": ["", "4:20", ""],
+        "definition": json.dumps(
+            {
+                "blocks": [
+                    {
+                        "id": "warmup-1",
+                        "kind": "step",
+                        "step_type": "warmup",
+                        "end": {"type": "time", "seconds": 600},
+                        "target": {"type": "none"},
+                    },
+                    {
+                        "id": "interval-1",
+                        "kind": "step",
+                        "step_type": "interval",
+                        "end": {"type": "time", "seconds": 1800},
+                        "target": {
+                            "type": "pace_range",
+                            "fastest_seconds_per_km": 240,
+                            "slowest_seconds_per_km": 260,
+                        },
+                    },
+                    {
+                        "id": "cooldown-1",
+                        "kind": "step",
+                        "step_type": "cooldown",
+                        "end": {"type": "time", "seconds": 300},
+                        "target": {"type": "none"},
+                    },
+                ]
+            }
+        ),
     }
 
 
@@ -447,9 +471,9 @@ def test_delete_garmin_data_preserves_connection_user_and_local_workout(
         assert session.scalar(select(func.count()).select_from(GarminDevice)) == 0
         assert session.scalar(select(func.count()).select_from(SyncRun)) == 0
         assert session.scalar(select(func.count()).select_from(SyncEvent)) == 0
-        assert session.scalar(select(func.count()).select_from(WorkoutStep)) == 3
         workout = session.scalar(select(Workout))
         assert workout is not None
+        assert workout.step_count == 3
         assert workout.garmin_workout_id is None
         assert workout.status == "confirmed"
         account = session.scalar(select(GarminAccount))
@@ -550,10 +574,7 @@ def test_invalid_workout_is_rejected(client: TestClient) -> None:
         data={
             "name": "",
             "sport": "running",
-            "step_type": "interval",
-            "duration_type": "time",
-            "duration_value": "0",
-            "repeat_count": "1",
+            "definition": _workout_data()["definition"],
         },
     )
     assert response.status_code == 422
@@ -562,12 +583,60 @@ def test_invalid_workout_is_rejected(client: TestClient) -> None:
 
 def test_non_finite_workout_duration_is_rejected(client: TestClient) -> None:
     data = _workout_data()
-    data["duration_value"] = ["nan", "30", "5"]
+    definition = json.loads(data["definition"])
+    definition["blocks"][0]["end"]["seconds"] = float("nan")
+    data["definition"] = json.dumps(definition)
 
     response = client.post("/workouts", data=data)
 
     assert response.status_code == 422
     assert "größer als null" in response.text
+
+
+def test_workout_supports_many_steps(
+    client: TestClient, session_factory: sessionmaker[Session]
+) -> None:
+    data = _workout_data(name="Langer Ablauf")
+    definition = json.loads(data["definition"])
+    definition["blocks"] = [
+        {
+            "id": f"step-{index}",
+            "kind": "step",
+            "step_type": "interval",
+            "end": {"type": "time", "seconds": 60 + index},
+            "target": {"type": "none"},
+        }
+        for index in range(25)
+    ]
+    data["definition"] = json.dumps(definition)
+
+    response = client.post("/workouts", data=data, follow_redirects=False)
+
+    assert response.status_code == 303
+    with session_factory() as session:
+        workout = session.scalar(select(Workout))
+        assert workout is not None
+        assert workout.step_count == 25
+        assert [block.end.seconds for block in workout.definition_model.blocks] == [
+            60 + index for index in range(25)
+        ]
+
+
+def test_validation_error_preserves_submitted_builder(
+    client: TestClient,
+) -> None:
+    data = _workout_data(name="Mein fehlerhafter Ablauf")
+    definition = json.loads(data["definition"])
+    definition["blocks"][1]["target"]["fastest_seconds_per_km"] = 300
+    definition["blocks"][1]["target"]["slowest_seconds_per_km"] = 280
+    data["definition"] = json.dumps(definition)
+
+    response = client.post("/workouts", data=data)
+
+    assert response.status_code == 422
+    assert "Mein fehlerhafter Ablauf" in response.text
+    assert '"id": "interval-1"' in response.text
+    assert "schnelle Pace-Grenze" in response.text
 
 
 def test_edit_draft_workout(client: TestClient, session_factory: sessionmaker[Session]) -> None:
@@ -578,10 +647,10 @@ def test_edit_draft_workout(client: TestClient, session_factory: sessionmaker[Se
     assert form.status_code == 200
     assert "Einheit bearbeiten" in form.text
     assert 'value="Lockerer Dauerlauf"' in form.text
-    assert 'x-data=\'workoutEditor([{"duration": "time"' in form.text
-    assert '"targetMin": "4:00"' in form.text
-    assert 'class="workout-step-heading"' in form.text
-    assert 'class="workout-step-fields"' in form.text
+    assert "workoutBuilder" in form.text
+    assert '"fastest_seconds_per_km": 240.0' in form.text
+    assert 'class="builder-workspace"' in form.text
+    assert 'class="repeat-content"' in form.text
     assert "/static/css/app.css?v=20260807-4" in form.text
 
     updated = client.post(
@@ -598,8 +667,9 @@ def test_edit_draft_workout(client: TestClient, session_factory: sessionmaker[Se
         assert workout.name == "Tempolauf bearbeitet"
         assert workout.scheduled_for == date(2026, 8, 10)
         assert workout.status == "draft"
-        assert workout.steps[1].target_min == 240
-        assert workout.steps[1].target_max == 260
+        interval = workout.definition_model.blocks[1]
+        assert interval.target.fastest_seconds_per_km == 240
+        assert interval.target.slowest_seconds_per_km == 260
 
 
 def test_edit_pushed_workout_updates_garmin_and_device(

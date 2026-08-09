@@ -6,6 +6,7 @@ from app.repositories.activities import list_activities
 from app.repositories.health import recent_health
 from app.repositories.workouts import workouts_between
 from app.services.analytics.training_load import calculate_weekly_load
+from app.services.planning.workout_definition import workout_metrics
 from app.services.training_agent.backend import SnapshotRow, TrainingSnapshot
 
 
@@ -44,16 +45,9 @@ def build_training_snapshot(session: Session, user_id: int) -> TrainingSnapshot:
     ]
     workouts: list[SnapshotRow] = []
     for workout in workouts_between(session, user_id, today, today + timedelta(days=14)):
-        duration_seconds = sum(
-            (step.duration_value or 0) * (step.repeat_count or 1)
-            for step in workout.steps
-            if step.duration_type == "time"
-        )
-        distance_m = sum(
-            (step.duration_value or 0) * (step.repeat_count or 1)
-            for step in workout.steps
-            if step.duration_type == "distance"
-        )
+        metrics = workout_metrics(workout.definition_model)
+        duration_seconds = metrics.duration_seconds
+        distance_m = metrics.distance_meters
         workouts.append(
             {
                 "name": workout.name,

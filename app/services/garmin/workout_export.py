@@ -5,12 +5,23 @@ from typing import Any
 from app.models import Workout
 from app.services.garmin.client import GarminUnavailableError
 from app.services.planning.validator import WorkoutValidationError
+from app.services.planning.workout_definition import (
+    DefinitionValidationError,
+    HeartRateRangeTarget,
+    HeartRateZoneTarget,
+    PaceRangeTarget,
+    RepeatBlock,
+    StepBlock,
+    TimeEnd,
+    WorkoutBlock,
+    validate_definition,
+)
 
 SPORT_TYPES = {
     "running": {"sportTypeId": 1, "sportTypeKey": "running"},
     "cycling": {"sportTypeId": 2, "sportTypeKey": "cycling"},
-    "walking": {"sportTypeId": 4, "sportTypeKey": "walking"},
-    "hiking": {"sportTypeId": 17, "sportTypeKey": "hiking"},
+    "walking": {"sportTypeId": 17, "sportTypeKey": "walking"},
+    "hiking": {"sportTypeId": 18, "sportTypeKey": "hiking"},
 }
 
 
@@ -37,6 +48,11 @@ def _create_model(workout: Workout) -> Any:
     model_type = model_types.get(workout.sport)
     if model_type is None:
         raise WorkoutValidationError("Diese Sportart kann nicht an Garmin übertragen werden.")
+    definition = workout.definition_model
+    try:
+        validate_definition(definition, workout.sport)
+    except DefinitionValidationError as exc:
+        raise WorkoutValidationError(str(exc)) from exc
     step_types = {
         "warmup": (StepType.WARMUP, "warmup", 1),
         "cooldown": (StepType.COOLDOWN, "cooldown", 2),
@@ -44,27 +60,42 @@ def _create_model(workout: Workout) -> Any:
         "recovery": (StepType.RECOVERY, "recovery", 4),
     }
 
-    def create_step(step: Any, step_order: int) -> Any:
+    def create_step(step: StepBlock, step_order: int) -> Any:
         step_type_id, step_type_key, display_order = step_types[step.step_type]
-        condition_id = (
-            ConditionType.TIME if step.duration_type == "time" else ConditionType.DISTANCE
-        )
-        condition_key = "time" if step.duration_type == "time" else "distance"
-        condition_order = 2 if step.duration_type == "time" else 3
+        is_time = isinstance(step.end, TimeEnd)
+        condition_id = ConditionType.TIME if is_time else ConditionType.DISTANCE
+        condition_key = "time" if is_time else "distance"
+        condition_order = 2 if is_time else 3
+        end_value = step.end.seconds if is_time else step.end.meters
         target: dict[str, Any]
         target_values: dict[str, Any] = {}
-        if step.target_type == "pace":
-            if not step.target_min or not step.target_max:
-                raise WorkoutValidationError("Für das Pace-Ziel fehlen Grenzen.")
+        if isinstance(step.target, PaceRangeTarget):
             target = {
                 "workoutTargetTypeId": TargetType.PACE_ZONE,
                 "workoutTargetTypeKey": "pace.zone",
                 "displayOrder": 6,
             }
             target_values = {
-                "targetValueOne": 1000 / step.target_min,
-                "targetValueTwo": 1000 / step.target_max,
+                "targetValueOne": 1000 / step.target.fastest_seconds_per_km,
+                "targetValueTwo": 1000 / step.target.slowest_seconds_per_km,
             }
+        elif isinstance(step.target, HeartRateRangeTarget):
+            target = {
+                "workoutTargetTypeId": TargetType.HEART_RATE_ZONE,
+                "workoutTargetTypeKey": "heart.rate.zone",
+                "displayOrder": 4,
+            }
+            target_values = {
+                "targetValueOne": float(step.target.lower_bpm),
+                "targetValueTwo": float(step.target.upper_bpm),
+            }
+        elif isinstance(step.target, HeartRateZoneTarget):
+            target = {
+                "workoutTargetTypeId": TargetType.HEART_RATE_ZONE,
+                "workoutTargetTypeKey": "heart.rate.zone",
+                "displayOrder": 4,
+            }
+            target_values = {"zoneNumber": step.target.zone}
         else:
             target = {
                 "workoutTargetTypeId": TargetType.NO_TARGET,
@@ -84,56 +115,50 @@ def _create_model(workout: Workout) -> Any:
                 "displayOrder": condition_order,
                 "displayable": True,
             },
-            endConditionValue=float(step.duration_value or 0),
+            endConditionValue=float(end_value),
             targetType=target,
             **target_values,
         )
 
-    output_steps: list[Any] = []
-    order = 1
-    index = 0
-    while index < len(workout.steps):
-        step = workout.steps[index]
-        repetitions = step.repeat_count or 1
-        next_step = workout.steps[index + 1] if index + 1 < len(workout.steps) else None
-        if (
-            step.step_type == "interval"
-            and repetitions > 1
-            and next_step is not None
-            and next_step.step_type == "recovery"
-            and (next_step.repeat_count or 1) == repetitions
-        ):
-            output_steps.append(
-                create_repeat_group(
-                    repetitions,
-                    [create_step(step, 1), create_step(next_step, 2)],
-                    order,
+    def create_blocks(blocks: list[WorkoutBlock]) -> list[Any]:
+        output: list[Any] = []
+        for block in blocks:
+            if isinstance(block, StepBlock):
+                output.append(create_step(block, len(output) + 1))
+            elif len(block.children) == 1 and isinstance(block.children[0], StepBlock):
+                for _ in range(block.iterations):
+                    output.append(create_step(block.children[0], len(output) + 1))
+            else:
+                output.append(
+                    create_repeat_group(
+                        block.iterations,
+                        create_blocks(block.children),
+                        len(output) + 1,
+                    )
                 )
-            )
-            order += 1
-            index += 2
-            continue
-        for _ in range(repetitions):
-            output_steps.append(create_step(step, order))
-            order += 1
-        index += 1
+        return output
+
+    output_steps = create_blocks(definition.blocks)
 
     default_paces = {"running": 360.0, "walking": 720.0, "hiking": 900.0, "cycling": 150.0}
 
-    def estimate_step_seconds(step: Any) -> float:
-        value = float(step.duration_value or 0)
-        if step.duration_type == "time":
-            return value
-        pace = (
-            (step.target_min + step.target_max) / 2
-            if step.target_type == "pace" and step.target_min and step.target_max
-            else default_paces[workout.sport]
-        )
-        return value * pace / 1000
+    def estimate_blocks(blocks: list[WorkoutBlock]) -> float:
+        seconds = 0.0
+        for block in blocks:
+            if isinstance(block, RepeatBlock):
+                seconds += estimate_blocks(block.children) * block.iterations
+            elif isinstance(block.end, TimeEnd):
+                seconds += block.end.seconds
+            else:
+                pace = (
+                    (block.target.fastest_seconds_per_km + block.target.slowest_seconds_per_km) / 2
+                    if isinstance(block.target, PaceRangeTarget)
+                    else default_paces[workout.sport]
+                )
+                seconds += block.end.meters * pace / 1000
+        return seconds
 
-    estimated_seconds = int(
-        sum(estimate_step_seconds(step) * (step.repeat_count or 1) for step in workout.steps)
-    )
+    estimated_seconds = int(estimate_blocks(definition.blocks))
     sport_type = SPORT_TYPES[workout.sport]
     return model_type(
         workoutName=workout.name,

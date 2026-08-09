@@ -1,7 +1,17 @@
 from datetime import date, datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Date, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    JSON,
+    Date,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -23,6 +33,8 @@ class Workout(Base):
     description: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(30), default="draft", index=True)
     garmin_workout_id: Mapped[str | None] = mapped_column(String(100))
+    definition_version: Mapped[int] = mapped_column(Integer, default=1)
+    definition: Mapped[dict[str, object]] = mapped_column(JSON, default=lambda: {"blocks": []})
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
@@ -31,6 +43,18 @@ class Workout(Base):
         back_populates="workout", cascade="all, delete-orphan", order_by="WorkoutStep.position"
     )
     completed_activities: Mapped[list["Activity"]] = relationship(back_populates="workout")
+
+    @property
+    def definition_model(self):
+        from app.services.planning.workout_definition import parse_definition
+
+        return parse_definition(self.definition)
+
+    @property
+    def step_count(self) -> int:
+        from app.services.planning.workout_definition import workout_metrics
+
+        return workout_metrics(self.definition_model).step_count
 
 
 class WorkoutStep(Base):

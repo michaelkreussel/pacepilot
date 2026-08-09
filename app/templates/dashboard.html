@@ -25,7 +25,7 @@
       <p>{{ upcoming.description or 'Bereit für deine nächste Einheit.' }}</p>
       <div class="workout-facts">
         <span>{{ upcoming.sport|capitalize }}</span>
-        <span>{{ upcoming.steps|length }} Schritte</span>
+        <span>{{ upcoming.step_count }} Schritte</span>
         <span>{{ upcoming.status|capitalize }}</span>
       </div>
       <a class="button button-light" href="/workouts/{{ upcoming.id }}">Einheit ansehen</a>

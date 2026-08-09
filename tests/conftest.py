@@ -7,11 +7,13 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app import main as main_module
 from app.auth import get_current_user
 from app.config import get_settings
 from app.database import Base, get_db
-from app.main import app
 from app.models import User
+
+app = main_module.app
 
 
 @pytest.fixture
@@ -47,6 +49,7 @@ def client(
 
     previous_overrides = dict(app.dependency_overrides)
     monkeypatch.setattr(get_settings(), "scheduler_enabled", False)
+    monkeypatch.setattr(main_module, "upgrade_database", lambda: None)
     app.dependency_overrides[get_db] = override_database
     app.dependency_overrides[get_current_user] = override_current_user
     try:
@@ -67,6 +70,7 @@ def unauthenticated_client(
 
     previous_overrides = dict(app.dependency_overrides)
     monkeypatch.setattr(get_settings(), "scheduler_enabled", False)
+    monkeypatch.setattr(main_module, "upgrade_database", lambda: None)
     app.dependency_overrides[get_db] = override_database
     try:
         with TestClient(app) as test_client:

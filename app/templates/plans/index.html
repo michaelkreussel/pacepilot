@@ -50,7 +50,7 @@
       {% for day, workouts in days.items() %}
         <article class="month-day {{ 'outside-month' if day.month != month_start.month or day.year != month_start.year else '' }} {{ 'today' if day == today else '' }}">
           <div class="month-day-heading"><span>{{ day_names[loop.index0] }}</span><strong>{{ day.strftime('%d') }}</strong></div>
-          {% for workout in workouts %}<a class="calendar-workout {{ workout.sport }}" href="/workouts/{{ workout.id }}"><small>{{ workout.status }}</small><strong>{{ workout.name }}</strong><span>{{ workout.steps|length }} Schritte</span></a>{% endfor %}
+          {% for workout in workouts %}<a class="calendar-workout {{ workout.sport }}" href="/workouts/{{ workout.id }}"><small>{{ workout.status }}</small><strong>{{ workout.name }}</strong><span>{{ workout.step_count }} Schritte</span></a>{% endfor %}
         </article>
       {% endfor %}
     {% endfor %}
@@ -63,7 +63,7 @@
 {% for day, workouts in by_day.items() %}
   <article class="day-card {{ 'today' if day == today else '' }}">
     <div class="day-heading"><span>{{ day_names[loop.index0] }}</span><strong>{{ day.strftime('%d') }}</strong></div>
-    {% if workouts %}{% for workout in workouts %}<a class="calendar-workout {{ workout.sport }}" href="/workouts/{{ workout.id }}"><small>{{ workout.status }}</small><strong>{{ workout.name }}</strong><span>{{ workout.steps|length }} Schritte</span></a>{% endfor %}
+    {% if workouts %}{% for workout in workouts %}<a class="calendar-workout {{ workout.sport }}" href="/workouts/{{ workout.id }}"><small>{{ workout.status }}</small><strong>{{ workout.name }}</strong><span>{{ workout.step_count }} Schritte</span></a>{% endfor %}
     {% else %}<div class="rest-day">Freier Tag</div>{% endif %}
   </article>
 {% endfor %}

@@ -4,7 +4,6 @@ from datetime import date
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import select
-from sqlalchemy.orm import selectinload
 
 from app.auth import CurrentUser
 from app.database import SessionDep
@@ -36,7 +35,6 @@ def dashboard(request: Request, session: SessionDep, user: CurrentUser) -> HTMLR
     latest_health = _today_health(session, user.id)
     upcoming = session.scalar(
         select(Workout)
-        .options(selectinload(Workout.steps))
         .where(Workout.user_id == user.id, Workout.scheduled_for >= date.today())
         .order_by(Workout.scheduled_for)
         .limit(1)

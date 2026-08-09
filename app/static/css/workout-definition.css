@@ -1,0 +1,13 @@
+.definition-timeline { display: grid; gap: 10px; margin: 22px 0 0; padding: 0; list-style: none; }
+.definition-step { display: grid; grid-template-columns: 36px 1fr; align-items: center; gap: 12px; padding: 13px 14px; border: 1px solid var(--line); border-left: 3px solid #9ca8a2; border-radius: 11px; background: #fff; }
+.definition-step.warmup { border-left-color: #e6aa35; }
+.definition-step.interval { border-left-color: var(--orange); }
+.definition-step.recovery { border-left-color: #659286; }
+.definition-step.cooldown { border-left-color: #466b88; }
+.definition-step > span { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 9px; background: #eef1ed; color: var(--green); font-size: 11px; font-weight: 800; }
+.definition-step strong, .definition-repeat-heading strong { font: 800 14px "Manrope", sans-serif; }
+.definition-step p, .definition-repeat-heading p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
+.definition-repeat { padding: 14px; border: 1px solid #b8c9c1; border-left: 4px solid var(--green); border-radius: 13px; background: #f4f8f5; }
+.definition-repeat-heading { display: flex; align-items: center; gap: 11px; }
+.definition-repeat-heading svg { width: 22px; height: 22px; fill: none; stroke: var(--green); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.definition-repeat > .definition-timeline { margin-top: 13px; padding-left: 18px; border-left: 2px solid #b9cdc3; }

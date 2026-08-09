@@ -3,7 +3,7 @@
 ## Commands
 
 - Use Python 3.12 and `uv`; install the locked environment with `uv sync`.
-- Local startup requires this order: `uv run alembic upgrade head`, then `uv run uvicorn app.main:app --reload`.
+- Start locally with `uv run uvicorn app.main:app --reload`; app lifespan applies pending Alembic migrations before serving requests.
 - Always use Ruff for code cleanup and linting, and `ty` for type checking. Run the full checks with `uv run pytest`, `uv run ruff check .`, `uv run ruff format --check .`, and `uv run ty check`.
 - Focus pytest with a node ID, for example `uv run pytest tests/test_routes.py::test_create_and_confirm_workout`.
 - For model or migration changes, run `uv run pytest tests/test_migrations.py`; it upgrades a fresh database and runs Alembic's schema check.
@@ -11,7 +11,7 @@
 ## Runtime Wiring
 
 - `app.main:app` is one process containing FastAPI, server-rendered Jinja pages, SQLite access, Garmin synchronization, and APScheduler. There is no separate frontend build or worker service.
-- App lifespan creates data/token directories and starts the scheduler, but does not migrate the database. Apply Alembic migrations before startup; the Docker command already does this.
+- App lifespan creates data/token directories, applies Alembic migrations, and then starts the scheduler. Migration failure aborts startup before background jobs or requests can run.
 - Keep deployment at one Uvicorn worker. Garmin sync exclusion uses in-process per-account `threading.Lock` instances, and every worker would start its own scheduler. SQLite must remain on a local filesystem, not SMB/NFS.
 - `app.config.get_settings()` is cached, and `app.database` creates its engine at import time. Set database/environment overrides before importing the app; route tests override `get_db` instead of replacing the global engine.
 - The app intentionally uses the first database user as a lazily-created local default user. It has no HTTP authentication, multi-user isolation, or CSRF protection.

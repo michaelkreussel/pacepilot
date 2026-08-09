@@ -6,6 +6,32 @@ from typing import Any
 from app.jobs import scheduler as scheduler_module
 
 
+def test_scheduler_does_not_sync_immediately_on_startup(monkeypatch: Any) -> None:
+    class FakeScheduler:
+        running = False
+        job_kwargs: dict[str, object] = {}
+
+        def add_job(self, *_args: object, **kwargs: object) -> None:
+            self.job_kwargs = kwargs
+
+        def start(self) -> None:
+            self.running = True
+
+    fake_scheduler = FakeScheduler()
+    monkeypatch.setattr(scheduler_module, "scheduler", fake_scheduler)
+    monkeypatch.setattr(
+        scheduler_module,
+        "get_settings",
+        lambda: SimpleNamespace(scheduler_enabled=True, sync_interval_minutes=60),
+    )
+
+    scheduler_module.start_scheduler()
+
+    assert fake_scheduler.running
+    assert fake_scheduler.job_kwargs["minutes"] == 60
+    assert "next_run_time" not in fake_scheduler.job_kwargs
+
+
 def test_account_queue_runs_different_accounts_concurrently(monkeypatch: Any) -> None:
     started: set[int] = set()
     started_lock = threading.Lock()

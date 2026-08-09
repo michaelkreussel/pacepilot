@@ -29,7 +29,6 @@ Benötigt werden `uv` und Python 3.12 oder neuer. `uv` kann die passende Python-
 
 ```bash
 uv sync
-uv run alembic upgrade head
 uv run uvicorn app.main:app --reload
 ```
 
@@ -75,7 +74,7 @@ Synchronisierungen laufen als kontobezogene Hintergrundjobs. Verschiedene Konten
 docker compose up --build -d
 ```
 
-Der Container führt beim Start `alembic upgrade head` aus und startet genau einen Uvicorn-Worker. Datenbank, Tokens und Rohdaten liegen im Volume `pacepilot-data` unter `/data`.
+PacePilot führt ausstehende Alembic-Migrationen bei jedem Programmstart vor dem Scheduler automatisch aus. Der Container startet genau einen Uvicorn-Worker. Datenbank, Tokens und Rohdaten liegen im Volume `pacepilot-data` unter `/data`.
 
 ## Konfiguration
 
