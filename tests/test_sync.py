@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from garminconnect.exceptions import GarminConnectTooManyRequestsError
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -14,10 +15,13 @@ from app.models import (
     GarminDevice,
     GarminSyncState,
     SyncEvent,
+    SyncRun,
     User,
 )
 from app.services.garmin import sync as sync_module
 from app.services.garmin.activity_details import load_activity_details
+from app.services.garmin.client import GarminUnavailableError
+from app.services.garmin.sync import rate_limit_cooldown_remaining
 
 
 class FakeGarmin:
@@ -133,6 +137,11 @@ class FakeGarmin:
         return [{"deviceId": 77, "displayName": "Forerunner", "productType": "FR"}]
 
 
+class RateLimitedGarmin(FakeGarmin):
+    def count_activities(self) -> int:
+        raise GarminConnectTooManyRequestsError("slow down")
+
+
 def test_sync_normalizes_and_stores_data(
     session_factory: sessionmaker[Session], monkeypatch: Any, tmp_path: Path
 ) -> None:
@@ -140,6 +149,7 @@ def test_sync_normalizes_and_stores_data(
     monkeypatch.setattr(settings, "data_dir", tmp_path)
     monkeypatch.setattr(settings, "health_sync_overlap_days", 2)
     monkeypatch.setattr(settings, "garmin_call_delay_seconds", 0)
+    monkeypatch.setattr(settings, "garmin_activity_initial_enrichment", 1)
     monkeypatch.setattr(
         sync_module, "connect_garmin_account", lambda _session, _account: FakeGarmin()
     )
@@ -229,6 +239,59 @@ def test_sync_releases_lock_when_initial_commit_fails(
             sync_module.sync_garmin(session, account)
 
     assert not sync_module.account_sync_active(account.id)
+
+
+def test_sync_records_rate_limit_cooldown(
+    session_factory: sessionmaker[Session], monkeypatch: Any
+) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "garmin_call_delay_seconds", 0)
+    monkeypatch.setattr(settings, "garmin_rate_limit_cooldown_seconds", 300)
+    monkeypatch.setattr(
+        sync_module, "connect_garmin_account", lambda _session, _account: RateLimitedGarmin()
+    )
+    sync_module.GarminPacer._global_cooldown_until = 0
+
+    with session_factory() as session:
+        user = User(display_name="Limited")
+        session.add(user)
+        session.flush()
+        account = GarminAccount(
+            user_id=user.id,
+            connected_at=datetime.now(UTC).replace(tzinfo=None),
+            sync_status="connected",
+        )
+        session.add(account)
+        session.commit()
+
+        run = sync_module.sync_garmin(session, account)
+        session.expire_all()
+        stored_account = session.get(GarminAccount, account.id)
+        stored_run = session.get(SyncRun, run.id)
+
+        assert stored_account is not None and stored_account.sync_status == "rate_limited"
+        assert stored_account.rate_limit_until is not None
+        assert stored_run is not None and stored_run.status == "rate_limited"
+        assert stored_run.stage == "cooldown"
+        assert rate_limit_cooldown_remaining(session, stored_account) > 0
+
+
+def test_wrapped_rate_limit_and_retry_after_are_detected() -> None:
+    class Response:
+        status_code = 429
+        headers = {"Retry-After": "900"}
+
+    class RateLimitError(RuntimeError):
+        def __init__(self) -> None:
+            super().__init__("API Error 429")
+            self.response = Response()
+
+    source = RateLimitError()
+    wrapped = GarminUnavailableError("Garmin Connect ist derzeit nicht erreichbar.")
+    wrapped.__cause__ = source
+
+    assert sync_module._is_rate_limited(wrapped)
+    assert sync_module._rate_limit_cooldown_seconds(wrapped, 300) == 900
 
 
 def test_sync_slots_are_isolated_per_account() -> None:

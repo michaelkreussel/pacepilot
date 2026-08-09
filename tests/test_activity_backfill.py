@@ -180,7 +180,14 @@ def test_activity_backfill_imports_details_and_skips_unchanged(
     client = FakeActivityGarmin()
     with session_factory() as session:
         user = _user(session)
-        first = sync_activity_history(session, client, user.id, delay=0, page_size=2)
+        first = sync_activity_history(
+            session,
+            client,
+            user.id,
+            delay=0,
+            page_size=2,
+            initial_enrichment_limit=1000,
+        )
 
         assert first.remote_count == 3
         assert first.inserted == 3
@@ -247,7 +254,14 @@ def test_activity_backfill_resumes_failed_page_and_handles_sparse_old_activity(
     with session_factory() as session:
         user = _user(session)
         with pytest.raises(RuntimeError, match="detail request failed"):
-            sync_activity_history(session, client, user.id, delay=0, page_size=3)
+            sync_activity_history(
+                session,
+                client,
+                user.id,
+                delay=0,
+                page_size=3,
+                initial_enrichment_limit=1000,
+            )
 
         state = session.scalar(
             select(GarminSyncState).where(
@@ -261,7 +275,14 @@ def test_activity_backfill_resumes_failed_page_and_handles_sparse_old_activity(
         assert session.scalar(select(func.count()).select_from(Activity)) == 1
         recent_detail_calls = client.calls.count(("details", "3"))
 
-        resumed = sync_activity_history(session, client, user.id, delay=0, page_size=3)
+        resumed = sync_activity_history(
+            session,
+            client,
+            user.id,
+            delay=0,
+            page_size=3,
+            initial_enrichment_limit=1000,
+        )
         assert resumed.backfill_complete is True
         assert resumed.skipped == 1
         assert client.calls.count(("details", "3")) == recent_detail_calls
@@ -271,6 +292,77 @@ def test_activity_backfill_resumes_failed_page_and_handles_sparse_old_activity(
         assert oldest.details_complete is True
         assert oldest.details_file is None
         assert len(oldest.exercise_sets) == 1
+
+
+def test_initial_activity_sync_stores_summaries_then_enriches_with_a_budget(
+    session_factory: sessionmaker[Session], monkeypatch: Any, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(get_settings(), "data_dir", tmp_path)
+    client = FakeActivityGarmin()
+
+    with session_factory() as session:
+        user = _user(session)
+        initial = sync_activity_history(session, client, user.id, delay=0, page_size=100)
+
+        assert initial.inserted == 3
+        assert initial.api_calls == 2
+        assert initial.activities_enriched == 0
+        assert initial.enrichment_deferred == 3
+        assert not any(call[0] == "details" for call in client.calls)
+        assert all(not activity.details_complete for activity in session.scalars(select(Activity)))
+
+        client.calls.clear()
+        follow_up = sync_activity_history(
+            session,
+            client,
+            user.id,
+            delay=0,
+            page_size=100,
+            incremental_enrichment_limit=1,
+        )
+
+        assert follow_up.activities_enriched == 1
+        assert follow_up.enrichment_deferred == 2
+        assert [call for call in client.calls if call[0] == "details"] == [("details", "3")]
+        enriched = session.scalar(select(Activity).where(Activity.garmin_activity_id == "3"))
+        assert enriched is not None and enriched.details_complete is True
+
+
+def test_changed_summary_invalidates_details_when_enrichment_is_deferred(
+    session_factory: sessionmaker[Session], monkeypatch: Any, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(get_settings(), "data_dir", tmp_path)
+    client = FakeActivityGarmin()
+
+    with session_factory() as session:
+        user = _user(session)
+        sync_activity_history(
+            session,
+            client,
+            user.id,
+            delay=0,
+            initial_enrichment_limit=1000,
+        )
+        client.activities[0]["activityName"] = "Edited Run"
+
+        result = sync_activity_history(
+            session,
+            client,
+            user.id,
+            delay=0,
+            incremental_enrichment_limit=0,
+        )
+        session.expire_all()
+        changed = session.scalar(select(Activity).where(Activity.garmin_activity_id == "3"))
+
+        assert result.updated == 1
+        assert result.enrichment_deferred == 1
+        assert changed is not None
+        assert changed.details_complete is False
+        assert changed.splits_complete is False
+        assert changed.details_file is None
+        assert changed.splits == []
+        assert changed.zones == []
 
 
 def test_activity_ids_and_raw_files_are_scoped_per_user(

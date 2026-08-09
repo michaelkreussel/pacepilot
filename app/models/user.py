@@ -66,6 +66,7 @@ class GarminAccount(Base):
     email: Mapped[str | None] = mapped_column(String(320))
     connected_at: Mapped[datetime | None] = mapped_column(DateTime)
     last_sync_at: Mapped[datetime | None] = mapped_column(DateTime)
+    rate_limit_until: Mapped[datetime | None] = mapped_column(DateTime)
     sync_status: Mapped[str] = mapped_column(String(30), default="not_connected")
     sync_error: Mapped[str | None] = mapped_column(String(1000))
 

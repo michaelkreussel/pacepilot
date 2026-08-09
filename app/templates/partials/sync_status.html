@@ -42,6 +42,8 @@
     {% endif %}
   {% elif sync_run and sync_run.status == 'ok' %}
     <div class="sync-result success-note"><strong>Letzter Lauf abgeschlossen</strong><span>{{ sync_run.activities_synced }} Aktivitäten und {{ sync_run.days_completed }} Health-Tage in {{ duration_seconds }} s</span></div>
+  {% elif account.sync_status == 'rate_limited' %}
+    <div class="alert warning compact"><strong>Garmin-Synchronisierung pausiert</strong><br>Garmin begrenzt derzeit die Anfragen. Der nächste Lauf setzt die Synchronisierung automatisch fort{% if cooldown_seconds %} (in etwa {{ cooldown_seconds }} Sekunden){% endif %}.</div>
   {% elif account.sync_error or (sync_run and sync_run.status == 'error') %}
     <div class="alert error compact"><strong>Synchronisierung fehlgeschlagen</strong><br>{{ account.sync_error or sync_run.error }}</div>
   {% endif %}

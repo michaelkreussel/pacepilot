@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     sync_interval_minutes: int = Field(default=60, ge=5)
     garmin_sync_workers: int = Field(default=2, ge=1, le=8)
     garmin_call_delay_seconds: float = Field(default=0.75, ge=0, le=10)
+    garmin_activity_initial_enrichment: int = Field(default=0, ge=0, le=1000)
+    garmin_activity_enrichment_per_sync: int = Field(default=5, ge=0, le=1000)
+    garmin_rate_limit_cooldown_seconds: int = Field(default=300, ge=60, le=3600)
     scheduler_enabled: bool = True
     session_secret: str | None = Field(default=None, min_length=32)
     session_https_only: bool = False

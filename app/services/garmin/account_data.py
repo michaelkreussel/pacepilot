@@ -61,6 +61,7 @@ def _reset_connection(account: GarminAccount) -> None:
     account.email = None
     account.connected_at = None
     account.last_sync_at = None
+    account.rate_limit_until = None
     account.sync_status = "not_connected"
     account.sync_error = None
 
@@ -115,6 +116,7 @@ def delete_garmin_data(session: Session, account: GarminAccount) -> GarminDataDe
             if workout.status in {"published", "pushed"}:
                 workout.status = "confirmed"
         account.last_sync_at = None
+        account.rate_limit_until = None
         account.sync_error = None
         if account.connected_at is not None:
             account.sync_status = "connected"

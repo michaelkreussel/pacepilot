@@ -7,7 +7,7 @@ from fastapi.responses import HTMLResponse
 from app.auth import CurrentUser
 from app.database import SessionDep
 from app.repositories.activities import find_activity, list_activities_filtered
-from app.services.garmin.activity_details import load_activity_details
+from app.services.garmin.activity_details import empty_activity_details, load_activity_details
 from app.web import context, templates
 
 router = APIRouter(prefix="/activities")
@@ -59,11 +59,15 @@ def activity_detail(
             request,
             active_page="activities",
             activity=activity,
-            activity_data=load_activity_details(
-                activity.started_at,
-                activity.garmin_activity_id,
-                activity.activity_type,
-                activity.user_id,
+            activity_data=(
+                load_activity_details(
+                    activity.started_at,
+                    activity.garmin_activity_id,
+                    activity.activity_type,
+                    activity.user_id,
+                )
+                if activity.details_complete and activity.details_file
+                else empty_activity_details(activity.activity_type)
             ),
         ),
     )

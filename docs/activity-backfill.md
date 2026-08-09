@@ -3,16 +3,19 @@
 ## Behavior
 
 `app.services.garmin.activity_backfill.sync_activity_history()` imports the complete Garmin activity
-list for each connected user. The initial import uses offset pages and stores its next page in the
-user's `garmin_sync_states` row. Each completed activity is committed independently, so a failed page
-can be retried without downloading detail for activities already completed on that page.
+list for each connected user. The initial import uses offset pages, stores summaries immediately, and
+stores its next page in the user's `garmin_sync_states` row. Expensive detail endpoints are not part
+of the default first pass. Later normal runs enrich up to `GARMIN_ACTIVITY_ENRICHMENT_PER_SYNC`
+incomplete activities, newest first. Each completed activity is committed independently, so a failed
+page can be retried without downloading detail for activities already completed on that page.
 
-The normal Garmin sync checks the most recent page. A SHA-256 fingerprint contains only stable,
-coaching-relevant Garmin summary fields. If the fingerprint is unchanged, detail and split data are
-complete, and the raw files still exist, the activity is skipped. New or edited activities are
-upserted and their detail children are replaced.
+The normal Garmin sync checks recent pages and continues deeper only while deferred enrichment is
+available. A SHA-256 fingerprint contains only stable, coaching-relevant Garmin summary fields.
+Unchanged summaries are skipped independently from their enrichment state. New or edited activities
+are upserted, and an available enrichment budget replaces their detail children.
 
-The command-line entry point processes every connected account unless one is selected:
+The command-line entry point remains an explicit full-detail backfill and processes every connected
+account unless one is selected:
 
 ```powershell
 uv run python scripts/backfill_garmin_activities.py
@@ -54,7 +57,8 @@ The live backfill completed without authentication or rate-limit failures.
 | Local activity range | 2026-03-30 to 2026-08-06 |
 | Inserted | 56 |
 | Existing activities upgraded | 6 |
-| Initial API calls | 373 |
+| Previous full-detail initial API calls | 373 |
+| Summary-first initial API calls | 2 |
 | Complete raw summary files | 62 |
 | Complete sampled detail files | 62 |
 | Normalized splits | 828 |
@@ -69,8 +73,9 @@ The oldest strength activity still has sampled detail, one lap, five HR zones, f
 and Training Effect. The recent run has sampled detail, 54 lap/typed-split rows, HR and power zones,
 power, VO2max, perceived effort, and running dynamics.
 
-An immediate rerun made two API calls (`count_activities` and the recent activity page), reported all
-62 activities unchanged, wrote no detail files, and left all database counts unchanged.
+After all deferred details are complete, an ordinary rerun makes two API calls (`count_activities`
+and the recent activity page), reports the page unchanged, writes no detail files, and leaves all
+database counts unchanged.
 
 The account history covers only one watch era and about four months. Differences between the oldest
 strength activity and recent run are primarily sport/device metric availability, not demonstrated

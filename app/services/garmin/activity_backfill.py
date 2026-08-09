@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from garminconnect.exceptions import GarminConnectNotFoundError
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -106,6 +106,8 @@ class ActivitySyncResult:
     updated: int = 0
     skipped: int = 0
     details_stored: int = 0
+    activities_enriched: int = 0
+    enrichment_deferred: int = 0
     oldest: date | None = None
     newest: date | None = None
     backfill_complete: bool = False
@@ -407,7 +409,9 @@ def _process_activity(
     item: dict[str, Any],
     pacer: GarminPacer,
     result: ActivitySyncResult,
-) -> str:
+    *,
+    enrich: bool,
+) -> tuple[str, bool]:
     activity_id = str(item.get("activityId") or "")
     started_at = _parse_datetime(item.get("startTimeLocal") or item.get("startTimeGMT"))
     if not activity_id or started_at is None:
@@ -419,17 +423,27 @@ def _process_activity(
                 "has_valid_start_time": started_at is not None,
             },
         )
-        return "skipped"
+        return "skipped", False
     fingerprint = activity_fingerprint(item)
     existing = find_activity_by_garmin_id(session, user_id, activity_id)
-    if (
+    summary_unchanged = (
         existing is not None
         and existing.source_fingerprint == fingerprint
+        and existing.raw_file is not None
+        and Path(existing.raw_file).is_file()
+    )
+    enrichment_complete = (
+        existing is not None
         and existing.details_complete
         and existing.splits_complete
         and _files_complete(existing)
-    ):
-        return "skipped"
+    )
+    if summary_unchanged:
+        if enrichment_complete:
+            return "skipped", False
+        if not enrich:
+            result.enrichment_deferred += 1
+            return "skipped", False
 
     outcome = "inserted" if existing is None else "updated"
     activity = get_or_create_activity(
@@ -440,9 +454,23 @@ def _process_activity(
         activity_type=_activity_type(item),
         started_at=started_at,
     )
-    activity.started_at = started_at
-    _map_activity_summary(activity, item)
-    activity.raw_file = _write_raw_activity(user_id, started_at, activity_id, item)
+    if not summary_unchanged:
+        activity.started_at = started_at
+        _map_activity_summary(activity, item)
+        activity.raw_file = _write_raw_activity(user_id, started_at, activity_id, item)
+
+    activity.source_fingerprint = fingerprint
+    activity.synced_at = utcnow()
+    if not enrich:
+        if existing is not None and not summary_unchanged:
+            activity.details_file = None
+            activity.details_complete = False
+            activity.splits_complete = False
+            replace_activity_splits(session, activity, [])
+            replace_activity_zones(session, activity, [])
+            replace_activity_exercise_sets(session, activity, [])
+        result.enrichment_deferred += 1
+        return outcome, False
 
     summary_payload = _optional_call(
         pacer,
@@ -466,6 +494,7 @@ def _process_activity(
         activity.details_file = str(details_path)
         result.details_stored += 1
     else:
+        details_path.unlink(missing_ok=True)
         activity.details_file = None
     activity.details_complete = True
 
@@ -523,12 +552,11 @@ def _process_activity(
         )
     replace_activity_exercise_sets(session, activity, _exercise_rows(exercise_payload))
 
-    activity.source_fingerprint = fingerprint
     activity.details_synced_at = utcnow()
     activity.details_complete = True
     activity.splits_complete = True
-    activity.synced_at = utcnow()
-    return outcome
+    result.activities_enriched += 1
+    return outcome, True
 
 
 def _activity_items(payload: Any) -> list[dict[str, Any]]:
@@ -546,24 +574,46 @@ def sync_activity_history(
     *,
     delay: float = 0.75,
     page_size: int = DEFAULT_PAGE_SIZE,
+    initial_enrichment_limit: int = 0,
+    incremental_enrichment_limit: int = 5,
+    pacer: GarminPacer | None = None,
     progress: ProgressCallback | None = None,
     completion: CompletionCallback | None = None,
     log_context: Mapping[str, Any] | None = None,
 ) -> ActivitySyncResult:
     if not 1 <= page_size <= 1000:
         raise ValueError("page_size must be between 1 and 1000")
+    if initial_enrichment_limit < 0 or incremental_enrichment_limit < 0:
+        raise ValueError("activity enrichment limits cannot be negative")
     result = ActivitySyncResult()
-    pacer = GarminPacer(delay, log_context)
+    request_pacer = pacer or GarminPacer(delay, log_context)
     state = get_or_create_sync_state(session, user_id, ACTIVITY_RESOURCE)
     initial = not state.backfill_complete
     mark_sync_attempt(state)
     session.commit()
     try:
-        result.remote_count = int(pacer.call("activity count", client.count_activities))
+        result.remote_count = int(request_pacer.call("activity count", client.count_activities))
         result.api_calls += 1
         offset = int(state.cursor or 0) if initial else 0
+        enrichment_remaining = initial_enrichment_limit if initial else incremental_enrichment_limit
+        search_deferred = (
+            not initial
+            and enrichment_remaining > 0
+            and session.scalar(
+                select(Activity.id)
+                .where(
+                    Activity.user_id == user_id,
+                    or_(
+                        Activity.details_complete.is_(False),
+                        Activity.splits_complete.is_(False),
+                    ),
+                )
+                .limit(1)
+            )
+            is not None
+        )
         while offset < result.remote_count or (not initial and offset == 0):
-            payload = pacer.call(
+            payload = request_pacer.call(
                 f"activities {offset} to {offset + page_size - 1}",
                 partial(client.get_activities, offset, page_size),
             )
@@ -577,7 +627,16 @@ def sync_activity_history(
                 if progress is not None:
                     progress(activity_id, result.activities_seen + 1, result.remote_count)
                 operation_started = time.perf_counter()
-                outcome = _process_activity(session, client, user_id, item, pacer, result)
+                outcome, enriched = _process_activity(
+                    session,
+                    client,
+                    user_id,
+                    item,
+                    request_pacer,
+                    result,
+                    enrich=enrichment_remaining > 0,
+                )
+                enrichment_remaining -= int(enriched)
                 result.activities_seen += 1
                 if outcome == "inserted":
                     result.inserted += 1
@@ -613,7 +672,11 @@ def sync_activity_history(
             session.commit()
             if len(items) < page_size:
                 break
-            if not initial and changed_on_page < len(items):
+            if (
+                not initial
+                and changed_on_page < len(items)
+                and (not search_deferred or enrichment_remaining <= 0)
+            ):
                 break
 
         mark_sync_success(

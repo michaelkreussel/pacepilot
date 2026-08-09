@@ -1,4 +1,5 @@
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
+from email.utils import format_datetime
 from pathlib import Path
 from typing import Any
 
@@ -10,10 +11,13 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.config import get_settings
 from app.models import DailyDataStatus, DailyFitness, DailyHealth, GarminSyncState, SleepStage, User
 from app.services.garmin import client as client_module
+from app.services.garmin import health_backfill as health_backfill_module
 from app.services.garmin.health_backfill import (
+    GarminPacer,
     HealthProgressEvent,
     HealthSyncResult,
     ResourceSyncStats,
+    retry_after_seconds,
     sync_health_history,
 )
 
@@ -207,6 +211,7 @@ def test_health_backfill_is_idempotent_and_updates_recent_overlap(
         assert first.resources["sleep"].earliest == date(2026, 1, 6)
         assert first.resources["vo2max"].earliest == date(2026, 1, 8)
         assert first.resources["spo2"].populated_days == 0
+        assert any((end - start).days > 0 for start, end in client.body_battery_ranges)
         assert health_count == 6
         assert stage_count == 20
         sample = session.scalar(select(DailyHealth).where(DailyHealth.day == today))
@@ -361,7 +366,7 @@ def test_unsupported_metric_is_recorded_without_blocking_backfill(
         assert result.resources["training_status"].complete is True
 
 
-def test_health_progress_is_planned_first_and_runs_day_major(
+def test_health_progress_reports_planning_and_prioritizes_recent_days(
     session_factory: sessionmaker[Session],
 ) -> None:
     client = FakeHealthGarmin()
@@ -380,9 +385,10 @@ def test_health_progress_is_planned_first_and_runs_day_major(
             progress=events.append,
         )
 
-    assert events[0].phase == "plan"
-    assert events[0].planned is not None
-    assert tuple(events[0].planned) == (
+    assert events[0].phase == "resource_planning_start"
+    plan = next(event for event in events if event.phase == "plan")
+    assert plan.planned is not None
+    assert tuple(plan.planned) == (
         "daily_summary",
         "body_battery",
         "sleep",
@@ -392,10 +398,10 @@ def test_health_progress_is_planned_first_and_runs_day_major(
         "training_readiness",
         "training_status",
     )
-    assert events[0].planned["daily_summary"] == (today - timedelta(days=1), today)
+    assert plan.planned["daily_summary"] == (today - timedelta(days=1), today)
 
     day_events = [event for event in events if event.day is not None]
-    for day in (today - timedelta(days=1), today):
+    for day in (today, today - timedelta(days=1)):
         current = [event for event in day_events if event.day == day]
         assert current[0].phase == "day_start"
         assert current[-1].phase == "day_complete"
@@ -410,19 +416,124 @@ def test_health_progress_is_planned_first_and_runs_day_major(
     first_day_start = next(
         index for index, event in enumerate(events) if event.phase == "day_start"
     )
-    assert all(event.phase in {"plan", "resource_skipped"} for event in events[:first_day_start])
+    assert all(
+        event.phase
+        in {
+            "resource_planning_start",
+            "resource_planning_complete",
+            "plan",
+            "resource_skipped",
+        }
+        for event in events[:first_day_start]
+    )
 
     first_day_complete = next(
         index
         for index, event in enumerate(events)
-        if event.phase == "day_complete" and event.day == today - timedelta(days=1)
+        if event.phase == "day_complete" and event.day == today
     )
     second_day_start = next(
         index
         for index, event in enumerate(events)
-        if event.phase == "day_start" and event.day == today
+        if event.phase == "day_start" and event.day == today - timedelta(days=1)
     )
     assert first_day_complete < second_day_start
+
+
+def test_garmin_pacer_uses_strict_start_spacing_across_instances(monkeypatch: Any) -> None:
+    clock = [100.0]
+    starts: list[float] = []
+
+    monkeypatch.setattr(health_backfill_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        health_backfill_module.time,
+        "sleep",
+        lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+    )
+    monkeypatch.setattr(health_backfill_module.random, "uniform", lambda _low, _high: 1.0)
+    GarminPacer._global_next_call_at = 0
+    GarminPacer._global_cooldown_until = 0
+
+    first = GarminPacer(1)
+    second = GarminPacer(1)
+    first.call("first", lambda: starts.append(clock[0]))
+    second.call("second", lambda: starts.append(clock[0]))
+
+    assert starts == [100.0, 101.0]
+
+
+def test_garmin_pacer_rechecks_cooldown_after_reserving_a_slot(monkeypatch: Any) -> None:
+    clock = [100.0]
+    starts: list[float] = []
+    deferred = [False]
+
+    monkeypatch.setattr(health_backfill_module.time, "monotonic", lambda: clock[0])
+
+    def sleep(seconds: float) -> None:
+        clock[0] += seconds
+        if not deferred[0]:
+            deferred[0] = True
+            GarminPacer.defer_all(10)
+
+    monkeypatch.setattr(health_backfill_module.time, "sleep", sleep)
+    monkeypatch.setattr(health_backfill_module.random, "uniform", lambda _low, _high: 1.0)
+    GarminPacer._global_next_call_at = 0
+    GarminPacer._global_cooldown_until = 0
+
+    pacer = GarminPacer(1)
+    pacer.call("initial", lambda: starts.append(clock[0]))
+    pacer.call("after cooldown", lambda: starts.append(clock[0]))
+
+    assert starts == [100.0, 111.0]
+
+
+def test_retry_after_http_date_is_honored() -> None:
+    retry_at = datetime.now(UTC) + timedelta(minutes=15)
+
+    assert retry_after_seconds(format_datetime(retry_at), 300) > 850
+
+
+def test_reprobed_dense_resource_uses_historical_summary_anchor(
+    session_factory: sessionmaker[Session],
+) -> None:
+    client = FakeHealthGarmin()
+    today = date(2026, 1, 10)
+
+    with session_factory() as session:
+        user = _user(session)
+        sync_health_history(
+            session,
+            client,
+            user.id,
+            today=today,
+            minimum=date(2026, 1, 1),
+            delay=0,
+        )
+        sleep_state = session.scalar(
+            select(GarminSyncState).where(
+                GarminSyncState.user_id == user.id,
+                GarminSyncState.resource == "sleep",
+            )
+        )
+        assert sleep_state is not None
+        sleep_state.oldest_synced_date = None
+        sleep_state.newest_synced_date = None
+        sleep_state.backfill_cursor_date = None
+        sleep_state.backfill_complete = True
+        sleep_state.status = "empty"
+        sleep_state.last_attempt_at = datetime(2025, 1, 1)
+        session.commit()
+
+        result = sync_health_history(
+            session,
+            client,
+            user.id,
+            today=today,
+            minimum=date(2026, 1, 1),
+            delay=0,
+        )
+
+        assert result.resources["sleep"].earliest == date(2026, 1, 6)
 
 
 def test_unique_days_processed_uses_exact_completed_dates() -> None:

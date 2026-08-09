@@ -66,7 +66,9 @@ Unter `Einstellungen` erfolgt die erste Anmeldung. Bei aktivierter MFA fragt Pac
 
 Garmin Connect ist keine offizielle öffentliche API. MFA, Rate-Limits oder Änderungen auf Garmin-Seite können eine neue Anmeldung erforderlich machen. Garmin-Tokens liegen kontobezogen unter `GARMIN_TOKEN_DIR/account-<account id>/`. Ohne gültigen Token startet PacePilot weiterhin; nur Sync und Workout-Übertragung sind dann nicht verfügbar.
 
-Synchronisierungen laufen als kontobezogene Hintergrundjobs. Verschiedene Konten können bis zum konfigurierten `GARMIN_SYNC_WORKERS`-Limit parallel arbeiten; ein zweiter Lauf für dasselbe Konto wird ausgeschlossen, damit Sitzung, Token und Datenbank-Cursor nicht konkurrierend verändert werden.
+Synchronisierungen laufen als kontobezogene Hintergrundjobs. Verschiedene Konten können bis zum konfigurierten `GARMIN_SYNC_WORKERS`-Limit parallel arbeiten; ein zweiter Lauf für dasselbe Konto wird ausgeschlossen, damit Sitzung, Token und Datenbank-Cursor nicht konkurrierend verändert werden. Garmin-Abfragen aller Jobs teilen sich zusätzlich einen prozessweiten Mindestabstand. Bei einem HTTP-429 pausiert PacePilot weitere Läufe standardmäßig fünf Minuten und setzt danach über die gespeicherten Cursor fort.
+
+Beim ersten Lauf werden Aktivitätsübersichten mit wenigen paginierten Anfragen gespeichert. Diagramme, Runden, Zonen und Kraftsätze werden anschließend in begrenzten Paketen ergänzt. Aktuelle Health-Tage werden vor dem älteren Verlauf geladen, sodass Dashboard und Trends früh nutzbar werden, während der historische Import im Hintergrund weiterläuft.
 
 ## Docker
 
@@ -88,6 +90,9 @@ PacePilot führt ausstehende Alembic-Migrationen bei jedem Programmstart vor dem
 | `SYNC_INTERVAL_MINUTES` | `60` | APScheduler-Intervall |
 | `GARMIN_SYNC_WORKERS` | `2` | Maximale Anzahl gleichzeitig synchronisierter Garmin-Konten |
 | `GARMIN_CALL_DELAY_SECONDS` | `0.75` | Mindestabstand historischer Garmin-Abfragen |
+| `GARMIN_ACTIVITY_INITIAL_ENRICHMENT` | `0` | Detailaktivitäten, die schon im ersten Lauf vollständig geladen werden |
+| `GARMIN_ACTIVITY_ENRICHMENT_PER_SYNC` | `5` | Maximal vollständig ergänzte Altaktivitäten je Folgelauf |
+| `GARMIN_RATE_LIMIT_COOLDOWN_SECONDS` | `300` | Pause nach einem Garmin-HTTP-429 |
 | `SCHEDULER_ENABLED` | `true` | Hintergrundjobs aktivieren |
 | `SESSION_SECRET` | Development-Fallback ohne Login | Signatur der Session-Cookies; mit aktiviertem Login zwingend setzen |
 | `SESSION_HTTPS_ONLY` | `false` | Session-Cookie ausschließlich über HTTPS senden |

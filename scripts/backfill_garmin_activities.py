@@ -54,6 +54,8 @@ def main(argv: list[str] | None = None) -> int:
                 account.user_id,
                 delay=args.delay,
                 page_size=args.page_size,
+                initial_enrichment_limit=sys.maxsize,
+                incremental_enrichment_limit=sys.maxsize,
             )
             print(
                 f"Account {account.id}: Garmin has {result.remote_count} activities; "

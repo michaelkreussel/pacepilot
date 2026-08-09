@@ -25,7 +25,7 @@ from app.services.garmin.client import (
     start_garmin_login,
 )
 from app.services.garmin.locks import GarminAccountBusyError
-from app.services.garmin.sync import METRIC_LABELS
+from app.services.garmin.sync import METRIC_LABELS, rate_limit_cooldown_remaining
 from app.web import context, templates
 
 router = APIRouter(prefix="/settings")
@@ -101,6 +101,7 @@ def _sync_view(
         "sync_events": sync_events,
         "current_metrics": current_metrics,
         "metric_labels": METRIC_LABELS,
+        "cooldown_seconds": rate_limit_cooldown_remaining(session, account),
     }
 
 
@@ -260,6 +261,7 @@ def connect_account(
     account.connected_at = datetime.now(UTC).replace(tzinfo=None)
     account.sync_status = "connected"
     account.sync_error = None
+    account.rate_limit_until = None
     session.commit()
     return RedirectResponse("/settings", status_code=303)
 
@@ -301,6 +303,7 @@ def verify_garmin_mfa(
     account.connected_at = datetime.now(UTC).replace(tzinfo=None)
     account.sync_status = "connected"
     account.sync_error = None
+    account.rate_limit_until = None
     session.commit()
     return RedirectResponse("/settings", status_code=303)
 
@@ -332,6 +335,17 @@ def start_sync(
     account = get_or_create_garmin_account(session, user)
     if account.connected_at is None:
         query = urlencode({"error": "Garmin ist noch nicht verbunden."})
+        return RedirectResponse(f"/settings?{query}", status_code=303)
+    cooldown = rate_limit_cooldown_remaining(session, account)
+    if cooldown:
+        query = urlencode(
+            {
+                "error": (
+                    "Garmin begrenzt derzeit die Anfragen. "
+                    f"Bitte warte noch etwa {cooldown} Sekunden."
+                )
+            }
+        )
         return RedirectResponse(f"/settings?{query}", status_code=303)
 
     def mark_queued() -> None:

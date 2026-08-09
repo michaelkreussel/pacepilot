@@ -6,6 +6,11 @@
 an independent user-scoped cursor. The first sync progressively discovers that resource's earliest
 populated date, imports forward, and commits after each day or safe Body Battery range chunk.
 
+Planning is reported per resource. Daily summary establishes a history anchor reused by dense
+Body Battery, sleep, and HRV discovery; Body Battery discovery also uses its 31-day range endpoint.
+After planning, the configured overlap window is imported newest-first before older history. Cursor
+advancement remains tied to the contiguous historical range, so a failed run is still resumable.
+
 Subsequent syncs fetch only dates after the newest covered date plus a configurable recent overlap.
 The default `HEALTH_SYNC_OVERLAP_DAYS=7` allows Garmin to revise recent sleep, HRV, Body Battery, and
 fitness values without repeating the historical import.
@@ -26,6 +31,10 @@ Successful no-data responses remain null and receive an `empty` completeness sta
 endpoints, authentication failures, rate limiting, and other API failures are recorded separately.
 An empty or unsupported resource is re-probed after 28 days so a new watch or changed sensor setting
 can add it later without creating hourly empty requests.
+
+All activity, health, and device calls in a normal synchronization share a strict start-to-start
+limiter. Jitter can only increase the configured delay. A 429 stops the run, records a cooldown, and
+leaves committed resource cursors ready for the next scheduled or manual continuation.
 
 ## Multi-account Isolation
 

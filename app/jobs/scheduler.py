@@ -10,7 +10,7 @@ from app.config import get_settings
 from app.database import SessionLocal
 from app.models import GarminAccount
 from app.services.garmin.locks import GarminAccountBusyError, garmin_account_slot
-from app.services.garmin.sync import sync_garmin
+from app.services.garmin.sync import rate_limit_cooldown_remaining, sync_garmin
 
 logger = logging.getLogger(__name__)
 scheduler = BackgroundScheduler(timezone="UTC")
@@ -27,6 +27,8 @@ def synchronize_account(account_id: int, *, wait_for_slot: bool = False) -> None
                 if account is not None and account.sync_status == "queued":
                     account.sync_status = "not_connected"
                     session.commit()
+                return
+            if rate_limit_cooldown_remaining(session, account):
                 return
             sync_garmin(session, account, slot_acquired=True)
     except GarminAccountBusyError:
@@ -47,6 +49,7 @@ def synchronize_accounts() -> None:
                     account is not None
                     and account.connected_at is not None
                     and account.sync_status not in {"queued", "running"}
+                    and not rate_limit_cooldown_remaining(session, account)
                 ):
                     account.sync_status = "queued"
                     session.commit()
