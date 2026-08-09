@@ -1,43 +1,82 @@
 {% extends "base.html" %}
 {% block title %}KI-Coach · PacePilot{% endblock %}
+{% block head %}<script src="{{ url_for('static', path='/js/coach.js') }}?v=20260809-3" defer></script>{% endblock %}
 {% block content %}
-<div class="mb-6 flex items-start justify-between gap-4">
-  <div><p class="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">Planungsassistenz</p><h1 class="mt-2 font-display text-3xl font-semibold tracking-tight">KI-Coach</h1><p class="mt-2 text-sm text-muted-foreground">Vorschläge statt Autopilot.</p></div>
-  <span class="rounded-full bg-surface-muted px-3 py-1 text-xs font-medium text-muted-foreground">Experimentell</span>
-</div>
-<div class="mb-6 rounded-lg border border-warning/25 bg-warning-subtle p-4 text-sm leading-6 text-warning-emphasis" role="status"><strong>Diese Funktion befindet sich noch in Entwicklung.</strong><br>Empfehlungen können unvollständig oder unpassend sein. Prüfe jeden Vorschlag, bevor du ihn in dein Training übernimmst.</div>
-<section class="grid gap-3 md:grid-cols-3">
-  <article class="rounded-xl border border-border bg-surface p-4 sm:p-5"><span class="text-xs font-semibold text-muted-foreground">01</span><h2 class="mt-5 text-lg font-semibold">Das Modell entwirft.</h2><p class="mt-2 text-sm leading-6 text-muted-foreground">Aktuelle Trainings-, Erholungs- und Kalenderdaten fließen als begrenzter Snapshot ein.</p></article>
-  <article class="rounded-xl border border-border bg-surface p-4 sm:p-5"><span class="text-xs font-semibold text-muted-foreground">02</span><h2 class="mt-5 text-lg font-semibold">Die App bleibt Herrin der Daten.</h2><p class="mt-2 text-sm leading-6 text-muted-foreground">Der Agent kann weder Workouts speichern noch Garmin-Aktionen ausführen.</p></article>
-  <article class="rounded-xl border border-border bg-surface p-4 sm:p-5"><span class="text-xs font-semibold text-muted-foreground">03</span><h2 class="mt-5 text-lg font-semibold">Du entscheidest.</h2><p class="mt-2 text-sm leading-6 text-muted-foreground">Empfehlungen bleiben Text, bis du sie im Workout-Editor selbst übernimmst.</p></article>
-</section>
+<section class="mx-auto flex min-h-[calc(100dvh-8rem)] max-w-5xl flex-col overflow-hidden rounded-2xl border border-border bg-surface shadow-sm" id="coach-chat" data-configured="{{ 'true' if configured else 'false' }}">
+  <header class="flex flex-col gap-3 border-b border-border bg-surface-muted px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-6">
+    <div class="flex items-center gap-3">
+      <span class="grid size-10 shrink-0 place-items-center rounded-xl bg-primary font-display text-base font-bold text-primary-foreground">P</span>
+      <div><div class="flex items-center gap-2"><h1 class="font-display text-lg font-semibold">PacePilot Coach</h1><span class="rounded-full bg-primary-subtle px-2 py-0.5 text-[0.625rem] font-semibold uppercase tracking-wide text-primary-emphasis">Read-only Beta</span></div><p class="mt-0.5 text-xs text-muted-foreground">Analysiert deine Daten, ändert aber nichts.</p></div>
+    </div>
+    <div class="flex items-center gap-2 text-xs text-muted-foreground">
+      <span class="size-2 rounded-full {{ 'bg-success' if configured else 'bg-muted-foreground' }}"></span>
+      <span>{{ model if configured else 'Nicht konfiguriert' }}</span>
+    </div>
+  </header>
 
-<section class="mt-6 grid items-start gap-4 lg:grid-cols-[minmax(0,1.5fr)_minmax(300px,1fr)]">
-  <form class="rounded-xl border border-border bg-surface p-4 sm:p-5" method="post" action="/coach">
-    <div class="flex flex-col items-start justify-between gap-3 sm:flex-row">
-      <div><p class="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">Neue Anfrage</p><h2 class="mt-2 text-lg font-semibold">Was möchtest du planen?</h2></div>
-      {% if configured %}<span class="max-w-full truncate rounded-full bg-success-subtle px-3 py-1 text-xs font-semibold text-success-emphasis">{{ model }}</span>{% else %}<span class="max-w-full truncate rounded-full bg-surface-muted px-3 py-1 text-xs font-semibold text-muted-foreground">Nicht konfiguriert</span>{% endif %}
+  <div class="flex-1 space-y-6 overflow-y-auto bg-background/40 px-4 py-6 sm:px-6" id="coach-conversation" aria-live="polite">
+    <article class="flex gap-3" id="coach-welcome">
+      <span class="grid size-8 shrink-0 place-items-center rounded-lg bg-primary-subtle font-display text-xs font-bold text-primary-emphasis">P</span>
+      <div class="max-w-2xl rounded-2xl rounded-tl-sm border border-border bg-surface px-4 py-3 shadow-sm">
+        <p class="text-sm leading-7 text-foreground">Frag mich nach deiner Erholung, Belastung oder einem möglichen Zusammenhang zwischen Training und heutigen Werten. Ich zeige währenddessen live, welche Daten ich prüfe, für welchen Zeitraum und warum der nächste Schritt noch Zeit benötigt.</p>
+        <div class="mt-4 flex flex-wrap gap-2" aria-label="Beispielfragen">
+          <button class="rounded-full border border-border bg-surface-muted px-3 py-1.5 text-xs text-muted-foreground transition hover:border-primary/40 hover:text-foreground" type="button" data-coach-question="Wie hat meine Erholung diese Woche ausgesehen?">Erholung diese Woche</button>
+          <button class="rounded-full border border-border bg-surface-muted px-3 py-1.5 text-xs text-muted-foreground transition hover:border-primary/40 hover:text-foreground" type="button" data-coach-question="War meine Trainingsbelastung zuletzt ungewöhnlich hoch?">Belastung einordnen</button>
+          <button class="rounded-full border border-border bg-surface-muted px-3 py-1.5 text-xs text-muted-foreground transition hover:border-primary/40 hover:text-foreground" type="button" data-coach-question="Könnte die gestrige Einheit meine heutigen Erholungswerte erklären?">Training & Erholung</button>
+        </div>
+        <p class="mt-4 border-t border-border pt-3 text-xs leading-5 text-muted-foreground"><strong>Diese Funktion befindet sich noch in Entwicklung.</strong> Interpretationen sind keine medizinische Diagnose.</p>
+      </div>
+    </article>
+
+    {% if message %}
+    <article class="flex justify-end"><div class="max-w-2xl rounded-2xl rounded-tr-sm bg-primary px-4 py-3 text-sm leading-7 text-primary-foreground">{{ message }}</div></article>
+    {% endif %}
+    {% if answer or error %}
+    <article class="flex gap-3">
+      <span class="grid size-8 shrink-0 place-items-center rounded-lg bg-primary-subtle font-display text-xs font-bold text-primary-emphasis">P</span>
+      <div class="max-w-3xl rounded-2xl rounded-tl-sm border {{ 'border-danger/30' if error else 'border-border' }} bg-surface px-4 py-3 shadow-sm"><p class="mb-2 text-xs font-semibold uppercase tracking-wide {{ 'text-danger-emphasis' if error else 'text-primary-emphasis' }}">{{ 'Fehler' if error else 'Einordnung' }}</p><div class="whitespace-pre-wrap text-sm leading-7">{{ error or answer }}</div></div>
+    </article>
+    {% endif %}
+  </div>
+
+  <form class="border-t border-border bg-surface p-3 sm:p-4" method="post" action="/coach" id="coach-form">
+    <div class="flex items-end gap-2 rounded-2xl border border-input bg-surface px-3 py-2 shadow-sm transition focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/20">
+      <label class="sr-only" for="coach-message">Frage an den Coach</label>
+      <textarea class="max-h-40 min-h-11 flex-1 resize-none bg-transparent px-1 py-2 text-sm leading-6 text-foreground outline-none placeholder:text-muted-foreground" name="message" id="coach-message" rows="1" maxlength="4000" placeholder="Frag etwas über dein Training oder deine Erholung ..." required>{{ '' if answer or error else message }}</textarea>
+      <button class="mb-0.5 inline-flex size-10 shrink-0 items-center justify-center rounded-xl bg-primary text-lg font-semibold text-primary-foreground transition hover:bg-primary-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-50" type="submit" id="coach-submit" aria-label="Nachricht senden" {% if not configured %}disabled{% endif %}>↑</button>
     </div>
-    <label class="mt-6 flex flex-col gap-2 text-sm font-semibold">Frage
-      <textarea class="w-full resize-y rounded-lg border border-input bg-surface px-3 py-2 text-sm leading-6 text-foreground outline-none transition placeholder:text-muted-foreground focus:border-ring focus:ring-2 focus:ring-ring/20" name="message" rows="5" maxlength="4000" placeholder="Zum Beispiel: Wie sollte ich meine Laufwoche nach den letzten Einheiten strukturieren?" required>{{ message }}</textarea>
-    </label>
-    <div class="mt-5 flex flex-col items-stretch justify-between gap-4 sm:flex-row sm:items-center">
-      <p class="text-xs leading-5 text-muted-foreground">Die Anfrage nutzt einen aktuellen Snapshot. Es wird kein Chatverlauf gespeichert.</p>
-      <button class="inline-flex shrink-0 items-center justify-center rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition hover:bg-primary-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-50" type="submit" {% if not configured %}disabled{% endif %}>Coach fragen</button>
-    </div>
+    <div class="mt-2 flex items-center justify-between gap-3 px-1 text-[0.6875rem] leading-4 text-muted-foreground"><span>Enter zum Senden · Shift+Enter für eine neue Zeile</span><span>Verlauf nur in diesem Browser-Tab</span></div>
   </form>
-
-  {% if answer or error %}
-  <article class="rounded-xl border border-border border-l-2 {{ 'border-l-danger' if error else 'border-l-primary' }} bg-surface p-4 sm:p-5" aria-live="polite">
-    <p class="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">{{ 'Fehler' if error else 'Antwort' }}</p>
-    <h2 class="mt-2 text-lg font-semibold">{{ 'Coach nicht erreichbar' if error else 'Vorschlag des Coaches' }}</h2>
-    <div class="my-5 whitespace-pre-wrap text-sm leading-7 text-foreground">{{ error or answer }}</div>
-    {% if answer %}<a class="inline-flex items-center justify-center rounded-lg border border-border bg-surface px-4 py-2 text-sm font-semibold text-foreground transition hover:bg-secondary focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" href="/workouts/new">Im Workout-Editor prüfen</a>{% endif %}
-  </article>
-  {% elif not configured %}
-  <article class="rounded-xl border border-border bg-surface p-4 sm:p-5">
-    <div><p class="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">Nicht verfügbar</p><h2 class="mt-2 text-lg font-semibold">Der Coach ist derzeit nicht erreichbar</h2><p class="mt-2 text-sm leading-6 text-muted-foreground">Garmin-Sync und manuelle Workout-Planung funktionieren unabhängig davon.</p></div>
-  </article>
-  {% endif %}
 </section>
+
+<template id="coach-user-template">
+  <article class="flex justify-end" data-chat-message="user"><div class="max-w-2xl whitespace-pre-wrap rounded-2xl rounded-tr-sm bg-primary px-4 py-3 text-sm leading-7 text-primary-foreground" data-message-content></div></article>
+</template>
+
+<template id="coach-assistant-template">
+  <article class="flex gap-3" data-chat-message="assistant">
+    <span class="grid size-8 shrink-0 place-items-center rounded-lg bg-primary-subtle font-display text-xs font-bold text-primary-emphasis">P</span>
+    <div class="min-w-0 max-w-3xl flex-1 rounded-2xl rounded-tl-sm border border-border bg-surface px-4 py-3 shadow-sm">
+      <div class="flex items-start justify-between gap-4" data-run-header>
+        <div class="flex min-w-0 items-center gap-2"><span class="sync-spinner size-3 shrink-0 rounded-full border-2 border-primary border-t-transparent" data-run-spinner></span><p class="truncate text-sm font-medium text-foreground" data-run-status>Analyse wird gestartet ...</p></div>
+        <span class="shrink-0 font-mono text-xs tabular-nums text-muted-foreground" data-run-timer>0:00</span>
+      </div>
+      <div class="mt-3 rounded-xl border border-border bg-surface-muted" data-activity-panel>
+        <button class="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left" type="button" data-activity-toggle aria-expanded="true"><span class="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Live-Aktivität</span><span class="text-xs text-muted-foreground" data-activity-toggle-label>Details ausblenden</span></button>
+        <div class="border-t border-border px-3 py-3" data-activity-details>
+          <div class="coach-current-step" data-current-step>
+            <div class="coach-current-step-content">
+              <div class="flex items-center justify-between gap-3"><span class="text-[0.625rem] font-semibold uppercase tracking-[0.14em] text-primary-emphasis" data-current-kicker>Aktueller Schritt</span><span class="text-[0.625rem] font-medium text-muted-foreground" data-current-state>läuft</span></div>
+              <p class="mt-1 text-sm font-semibold text-foreground" data-current-label>Frage verstehen</p>
+              <p class="mt-1 text-xs leading-5 text-muted-foreground" data-waiting-explanation>Der Coach bestimmt, welche Daten für diese Frage wirklich nötig sind.</p>
+            </div>
+          </div>
+          <p class="mb-2 mt-4 text-[0.625rem] font-semibold uppercase tracking-[0.14em] text-muted-foreground">Bisher erledigt</p>
+          <ol class="space-y-3" data-progress-list></ol>
+        </div>
+      </div>
+      <div class="mt-4 hidden" data-answer-wrap><p class="mb-2 text-xs font-semibold uppercase tracking-wide text-primary-emphasis">Einordnung</p><div class="whitespace-pre-wrap text-sm leading-7 text-foreground" data-answer></div></div>
+    </div>
+  </article>
+</template>
 {% endblock %}

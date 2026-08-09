@@ -32,6 +32,10 @@ uv sync
 uv run uvicorn app.main:app --reload
 ```
 
+Coach-Läufe werden zusätzlich zur Serverkonsole unter `DATA_DIR/logs/coach.log` protokolliert.
+Die Datei rotiert bei 5 MB und behält drei Backups. Eine konkrete Ausführung lässt sich über ihre
+Run-ID finden, zum Beispiel mit `rg "<run-id>" data/logs`.
+
 Danach ist PacePilot unter <http://localhost:8000> erreichbar. Vor dem ersten Login muss mindestens ein Anmeldeanbieter konfiguriert sein.
 
 Die Oberfläche nutzt Tailwind-Utilities direkt in den Jinja-Templates. Semantische Theme-Variablen und wenige laufzeitabhängige Zustände liegen in `app/static/css/tailwind.input.css`; `tailwind.css` ist das eingecheckte Build-Ergebnis. Nach Änderungen an Templates oder der Eingabedatei wird das Stylesheet mit der offiziellen [Tailwind Standalone CLI](https://tailwindcss.com/blog/standalone-cli) 4.3.3 neu gebaut:

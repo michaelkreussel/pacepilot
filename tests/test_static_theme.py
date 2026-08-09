@@ -36,11 +36,14 @@ def test_generated_tailwind_keeps_only_runtime_components() -> None:
         ".readiness-score",
         ".definition-step.warmup",
         ".calendar-workout.running",
+        ".coach-current-step",
+        ".coach-progress-item.is-complete",
     ):
         assert runtime_selector in CSS
 
     assert "layer(legacy)" not in SOURCE
     assert "./app.css" not in SOURCE
+    assert "@keyframes coach-wave" in SOURCE
 
 
 def test_templates_use_the_bundled_stylesheet() -> None:

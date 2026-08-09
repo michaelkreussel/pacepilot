@@ -1,21 +1,34 @@
 import json
+from collections.abc import AsyncIterator, Callable
 from dataclasses import asdict, dataclass
-from typing import Protocol
-
-SnapshotValue = str | int | float | None
-SnapshotRow = dict[str, SnapshotValue]
+from typing import Literal, Protocol
 
 
 @dataclass(frozen=True)
-class TrainingSnapshot:
-    as_of: str
-    weekly_load: SnapshotRow
-    recent_activities: tuple[SnapshotRow, ...]
-    recent_health: tuple[SnapshotRow, ...]
-    upcoming_workouts: tuple[SnapshotRow, ...]
+class ConversationTurn:
+    role: Literal["user", "assistant"]
+    content: str
 
-    def as_json(self) -> str:
-        return json.dumps(asdict(self), ensure_ascii=False, separators=(",", ":"))
+
+@dataclass(frozen=True)
+class CoachEvent:
+    type: str
+    content: str = ""
+    run_id: str | None = None
+    tool: str | None = None
+    label: str | None = None
+    arguments: dict[str, object] | None = None
+    phase: str | None = None
+    elapsed_seconds: int | None = None
+    replace: bool = False
+    done: bool = False
+
+    def as_json_line(self) -> str:
+        return json.dumps(asdict(self), ensure_ascii=False, separators=(",", ":")) + "\n"
+
+
+class CoachCapabilities(Protocol):
+    def agent_tools(self) -> tuple[Callable[..., str], ...]: ...
 
 
 class TrainingAgentError(RuntimeError):
@@ -23,4 +36,9 @@ class TrainingAgentError(RuntimeError):
 
 
 class TrainingAgent(Protocol):
-    async def respond(self, message: str, snapshot: TrainingSnapshot) -> str: ...
+    def stream(
+        self,
+        message: str,
+        capabilities: CoachCapabilities,
+        history: tuple[ConversationTurn, ...] = (),
+    ) -> AsyncIterator[CoachEvent]: ...

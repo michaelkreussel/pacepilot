@@ -1,6 +1,7 @@
 @import "tailwindcss";
 
 @source "../../templates";
+@source "../js";
 
 @custom-variant dark (&:where(.dark, .dark *));
 
@@ -447,6 +448,89 @@
   .calendar-workout.hiking {
     border-left-color: var(--muted-foreground);
   }
+
+  .coach-current-step {
+    position: relative;
+    overflow: hidden;
+    border: 1px solid color-mix(in srgb, var(--primary) 24%, var(--border));
+    border-left: 3px solid var(--primary);
+    border-radius: 0.75rem;
+    background: color-mix(in srgb, var(--primary-subtle) 68%, transparent);
+  }
+
+  .coach-current-step::before {
+    position: absolute;
+    inset: 0;
+    width: 42%;
+    content: "";
+    background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--primary) 14%, transparent), transparent);
+    transform: translateX(-140%);
+    animation: coach-wave 1.8s ease-in-out infinite;
+  }
+
+  .coach-current-step-content {
+    position: relative;
+    z-index: 1;
+    padding: 0.75rem;
+  }
+
+  .coach-current-step.is-complete {
+    border-color: color-mix(in srgb, var(--success) 25%, var(--border));
+    border-left-color: var(--success);
+    background: color-mix(in srgb, var(--success-subtle) 58%, transparent);
+  }
+
+  .coach-current-step.is-complete::before,
+  .coach-current-step.is-error::before {
+    animation: none;
+    content: none;
+  }
+
+  .coach-current-step.is-error {
+    border-color: color-mix(in srgb, var(--danger) 25%, var(--border));
+    border-left-color: var(--danger);
+    background: color-mix(in srgb, var(--danger-subtle) 58%, transparent);
+  }
+
+  .coach-progress-item {
+    display: flex;
+    gap: 0.75rem;
+    color: var(--muted-foreground);
+    opacity: 0.68;
+    transition: opacity 180ms ease;
+  }
+
+  .coach-progress-item.is-running {
+    display: none;
+  }
+
+  .coach-progress-item.is-complete .coach-progress-mark {
+    border-color: var(--success);
+    background: var(--success);
+    color: var(--success-foreground);
+  }
+
+  .coach-progress-item.is-error .coach-progress-mark {
+    border-color: var(--danger);
+    background: var(--danger);
+    color: var(--danger-foreground);
+  }
+
+  .coach-progress-mark {
+    display: grid;
+    width: 1rem;
+    height: 1rem;
+    flex: none;
+    place-items: center;
+    margin-top: 0.125rem;
+    border: 1px solid var(--primary);
+    border-radius: 9999px;
+    background: var(--surface);
+    color: transparent;
+    font-size: 0.625rem;
+    font-weight: 700;
+    line-height: 1;
+  }
 }
 
 @keyframes sync-spin {
@@ -498,6 +582,13 @@
   }
 }
 
+@keyframes coach-wave {
+  55%,
+  100% {
+    transform: translateX(340%);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .readiness-score-value,
   .readiness-score-number,
@@ -505,6 +596,10 @@
   .readiness-component-bar,
   .profile-metric,
   .profile-stat {
+    animation: none;
+  }
+
+  .coach-current-step::before {
     animation: none;
   }
 }
