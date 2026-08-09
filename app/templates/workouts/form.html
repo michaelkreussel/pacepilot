@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Workout {{ 'bearbeiten' if workout else 'erstellen' }} · PacePilot{% endblock %}
-{% block head %}<link rel="stylesheet" href="{{ url_for('static', path='/css/workout-builder.css') }}?v=20260809-1"><script src="{{ url_for('static', path='/js/workout-builder.js') }}?v=20260809-1"></script>{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ url_for('static', path='/css/workout-builder.css') }}?v=20260809-2"><script src="{{ url_for('static', path='/js/workout-builder.js') }}?v=20260809-2"></script>{% endblock %}
 {% block content %}
 <div class="page-heading builder-heading"><div><p class="eyebrow">Workout-Editor</p><h1>{{ 'Einheit bearbeiten.' if workout else 'Eine klare Einheit bauen.' }}</h1><p>{{ 'Gespeicherte Änderungen werden direkt mit Garmin und deiner Uhr synchronisiert.' if workout and workout.garmin_workout_id else 'Bausteine ordnen, Wiederholungen bündeln und erst danach zu Garmin senden.' }}</p></div></div>
 {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
@@ -15,12 +15,12 @@
 
   <div class="builder-workspace">
     <aside class="card builder-palette" aria-label="Bausteine">
-      <div class="builder-section-heading"><span class="section-number">02</span><div><h2>Bausteine</h2><p>Am Ende des Ablaufs einfügen.</p></div></div>
+      <div class="builder-section-heading"><span class="section-number">02</span><div><h2>Bausteine</h2><p>Klicken oder in den Ablauf ziehen.</p></div></div>
       <div class="block-palette">
         {% for value, label, icon in [('warmup','Aufwärmen','sunrise'),('interval','Belastung','bolt'),('recovery','Erholung','pause'),('cooldown','Auslaufen','flag')] %}
-        <button type="button" class="palette-button" @click="addStep('{{ value }}')"><svg aria-hidden="true"><use href="/static/icons/workout.svg#{{ icon }}"></use></svg><span>{{ label }}</span><small>Schritt</small></button>
+        <button type="button" class="palette-button" draggable="true" @click="if (!ignorePaletteClick) addStep('{{ value }}')" @dragstart="startPaletteDrag('{{ value }}', $event)" @dragend="endDrag()"><svg aria-hidden="true"><use href="/static/icons/workout.svg#{{ icon }}"></use></svg><span>{{ label }}</span><small>Schritt</small></button>
         {% endfor %}
-        <button type="button" class="palette-button repeat" @click="addRepeat()"><svg aria-hidden="true"><use href="/static/icons/workout.svg#repeat"></use></svg><span>Wiederholung</span><small>Container</small></button>
+        <button type="button" class="palette-button repeat" draggable="true" @click="if (!ignorePaletteClick) addRepeat()" @dragstart="startPaletteDrag('repeat', $event)" @dragend="endDrag()"><svg aria-hidden="true"><use href="/static/icons/workout.svg#repeat"></use></svg><span>Wiederholung</span><small>Container</small></button>
       </div>
       <div class="builder-legend"><p><svg aria-hidden="true"><use href="/static/icons/workout.svg#grip"></use></svg>Ziehen am Griff</p><p>Auf Mobilgeräten die Pfeilaktionen verwenden.</p></div>
     </aside>
@@ -31,12 +31,12 @@
       <div class="flow-list">
         <template x-for="(block, index) in definition.blocks" :key="block.id">
           <div>
-            <button type="button" class="drop-zone" :class="isDragging && 'active'" @dragover.prevent @drop.prevent="dropAt(null, index)"><span>Hier einfügen</span></button>
+            <button type="button" class="drop-zone" :class="{ active: canDrop(null), hovered: isDropTarget(null, index) }" @dragover.prevent="setDropTarget(null, index)" @drop.prevent="dropAt(null, index)"><span>Hier einfügen</span></button>
             <article class="flow-block" :class="block.kind === 'repeat' ? 'repeat-block' : `step-block ${block.step_type}`">
               <header class="block-header">
                 <button type="button" class="drag-handle" draggable="true" @dragstart.stop="startDrag(null, index, $event)" @dragend="endDrag()" aria-label="Block ziehen"><svg aria-hidden="true"><use href="/static/icons/workout.svg#grip"></use></svg></button>
                 <span class="block-icon"><svg aria-hidden="true"><use :href="`/static/icons/workout.svg#${blockIcon(block)}`"></use></svg></span>
-                <button type="button" class="block-summary" @click="toggle(block.id)" :aria-expanded="isExpanded(block.id)"><span><strong x-text="blockTitle(block)"></strong><small x-text="blockSummary(block)"></small></span><svg aria-hidden="true" :class="isExpanded(block.id) && 'rotated'"><use href="/static/icons/workout.svg#chevron"></use></svg></button>
+                <button type="button" class="block-summary" @click="toggle(block.id)" :aria-expanded="isExpanded(block.id)" :aria-label="`${blockTitle(block)} bearbeiten`"><span><strong x-text="blockTitle(block)"></strong><small x-text="blockSummary(block)"></small></span><svg class="edit-indicator" aria-hidden="true"><use href="/static/icons/workout.svg#pencil"></use></svg></button>
                 <div class="block-actions">
                   <button type="button" @click="move(null, index, -1)" :disabled="index === 0" aria-label="Nach oben"><svg aria-hidden="true"><use href="/static/icons/workout.svg#up"></use></svg></button>
                   <button type="button" @click="move(null, index, 1)" :disabled="index === definition.blocks.length - 1" aria-label="Nach unten"><svg aria-hidden="true"><use href="/static/icons/workout.svg#down"></use></svg></button>
@@ -56,12 +56,12 @@
                   <div class="repeat-children" :class="!block.children.length && 'empty'">
                     <template x-for="(child, childIndex) in block.children" :key="child.id">
                       <div>
-                        <button type="button" class="drop-zone child-drop" :class="isDragging && 'active'" @dragover.prevent @drop.prevent="dropAt(block.id, childIndex)"><span>In Wiederholung einfügen</span></button>
+                        <button type="button" class="drop-zone child-drop" :class="{ active: canDrop(block.id), hovered: isDropTarget(block.id, childIndex) }" @dragover.prevent="setDropTarget(block.id, childIndex)" @drop.prevent="dropAt(block.id, childIndex)"><span>In Wiederholung einfügen</span></button>
                         <article class="flow-block child-block" :class="child.step_type">
                           <header class="block-header">
                             <button type="button" class="drag-handle" draggable="true" @dragstart.stop="startDrag(block.id, childIndex, $event)" @dragend="endDrag()" aria-label="Schritt ziehen"><svg aria-hidden="true"><use href="/static/icons/workout.svg#grip"></use></svg></button>
                             <span class="block-icon"><svg aria-hidden="true"><use :href="`/static/icons/workout.svg#${blockIcon(child)}`"></use></svg></span>
-                            <button type="button" class="block-summary" @click="toggle(child.id)" :aria-expanded="isExpanded(child.id)"><span><strong x-text="blockTitle(child)"></strong><small x-text="blockSummary(child)"></small></span><svg aria-hidden="true" :class="isExpanded(child.id) && 'rotated'"><use href="/static/icons/workout.svg#chevron"></use></svg></button>
+                            <button type="button" class="block-summary" @click="toggle(child.id)" :aria-expanded="isExpanded(child.id)" :aria-label="`${blockTitle(child)} bearbeiten`"><span><strong x-text="blockTitle(child)"></strong><small x-text="blockSummary(child)"></small></span><svg class="edit-indicator" aria-hidden="true"><use href="/static/icons/workout.svg#pencil"></use></svg></button>
                             <div class="block-actions">
                               <button type="button" @click="move(block.id, childIndex, -1)" :disabled="childIndex === 0" aria-label="Nach oben"><svg aria-hidden="true"><use href="/static/icons/workout.svg#up"></use></svg></button>
                               <button type="button" @click="move(block.id, childIndex, 1)" :disabled="childIndex === block.children.length - 1" aria-label="Nach unten"><svg aria-hidden="true"><use href="/static/icons/workout.svg#down"></use></svg></button>
@@ -74,7 +74,7 @@
                         </article>
                       </div>
                     </template>
-                    <button type="button" class="drop-zone child-drop final" :class="isDragging && 'active'" @dragover.prevent @drop.prevent="dropAt(block.id, block.children.length)"><span x-text="block.children.length ? 'Am Ende einfügen' : 'Schritt hier ablegen'"></span></button>
+                    <button type="button" class="drop-zone child-drop final" :class="{ active: canDrop(block.id), hovered: isDropTarget(block.id, block.children.length) }" @dragover.prevent="setDropTarget(block.id, block.children.length)" @drop.prevent="dropAt(block.id, block.children.length)"><span x-text="block.children.length ? 'Am Ende einfügen' : 'Schritt hier ablegen'"></span></button>
                   </div>
                   <div class="repeat-add"><button type="button" @click="addStep('interval', block.id)">+ Belastung</button><button type="button" @click="addStep('recovery', block.id)">+ Erholung</button></div>
                 </div>
@@ -82,7 +82,7 @@
             </article>
           </div>
         </template>
-        <button type="button" class="drop-zone final" :class="isDragging && 'active'" @dragover.prevent @drop.prevent="dropAt(null, definition.blocks.length)"><span>Am Ende einfügen</span></button>
+        <button type="button" class="drop-zone final" :class="{ active: canDrop(null), hovered: isDropTarget(null, definition.blocks.length) }" @dragover.prevent="setDropTarget(null, definition.blocks.length)" @drop.prevent="dropAt(null, definition.blocks.length)"><span>Am Ende einfügen</span></button>
       </div>
     </section>
   </div>

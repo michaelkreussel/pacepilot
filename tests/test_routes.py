@@ -651,6 +651,10 @@ def test_edit_draft_workout(client: TestClient, session_factory: sessionmaker[Se
     assert '"fastest_seconds_per_km": 240.0' in form.text
     assert 'class="builder-workspace"' in form.text
     assert 'class="repeat-content"' in form.text
+    assert 'draggable="true"' in form.text
+    assert "startPaletteDrag('interval'" in form.text
+    assert "/static/icons/workout.svg#pencil" in form.text
+    assert "setDropTarget(null, index)" in form.text
     assert "/static/css/app.css?v=20260807-4" in form.text
 
     updated = client.post(

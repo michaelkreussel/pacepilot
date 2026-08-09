@@ -9,7 +9,9 @@ function workoutBuilder(initialDefinition, initialSport) {
     sport: initialSport,
     expanded,
     dragSource: null,
+    dropTarget: null,
     isDragging: false,
+    ignorePaletteClick: false,
     announcement: "",
 
     serializedDefinition() {
@@ -30,13 +32,16 @@ function workoutBuilder(initialDefinition, initialSport) {
       this.expanded.push(step.id);
       this.announcement = `${this.blockTitle(step)} hinzugefügt.`;
     },
-    addRepeat() {
-      const repeat = {
+    newRepeat() {
+      return {
         id: makeId(),
         kind: "repeat",
         iterations: 8,
         children: [this.newStep("interval"), this.newStep("recovery")],
       };
+    },
+    addRepeat() {
+      const repeat = this.newRepeat();
       this.definition.blocks.push(repeat);
       this.expanded.push(repeat.id);
       this.announcement = "Wiederholung mit Belastung und Erholung hinzugefügt.";
@@ -94,18 +99,52 @@ function workoutBuilder(initialDefinition, initialSport) {
       this.announcement = `${this.blockTitle(block)} entfernt.`;
     },
     startDrag(parentId, index, event) {
-      this.dragSource = { parentId, index };
+      this.dragSource = { origin: "flow", parentId, index };
       this.isDragging = true;
       event.dataTransfer.effectAllowed = "move";
       event.dataTransfer.setData("text/plain", `${parentId || "root"}:${index}`);
     },
+    startPaletteDrag(blockType, event) {
+      this.dragSource = { origin: "palette", blockType };
+      this.isDragging = true;
+      this.ignorePaletteClick = true;
+      event.dataTransfer.effectAllowed = "copy";
+      event.dataTransfer.setData("text/plain", `palette:${blockType}`);
+    },
     endDrag() {
+      const paletteDrag = this.dragSource?.origin === "palette";
       this.dragSource = null;
+      this.dropTarget = null;
       this.isDragging = false;
+      if (paletteDrag) window.setTimeout(() => { this.ignorePaletteClick = false; }, 0);
+    },
+    canDrop(parentId) {
+      if (!this.dragSource) return false;
+      if (!parentId) return true;
+      if (this.dragSource.origin === "palette") return this.dragSource.blockType !== "repeat";
+      const source = this.container(this.dragSource.parentId)[this.dragSource.index];
+      return source?.kind !== "repeat";
+    },
+    dropKey(parentId, index) {
+      return `${parentId || "root"}:${index}`;
+    },
+    setDropTarget(parentId, index) {
+      if (this.canDrop(parentId)) this.dropTarget = this.dropKey(parentId, index);
+    },
+    isDropTarget(parentId, index) {
+      return this.dropTarget === this.dropKey(parentId, index);
     },
     dropAt(parentId, index) {
-      if (!this.dragSource) return;
+      if (!this.dragSource || !this.canDrop(parentId)) return;
       const source = this.dragSource;
+      if (source.origin === "palette") {
+        const block = source.blockType === "repeat" ? this.newRepeat() : this.newStep(source.blockType);
+        this.container(parentId).splice(index, 0, block);
+        this.expanded.push(block.id);
+        this.announcement = `${this.blockTitle(block)} hinzugefügt.`;
+        this.endDrag();
+        return;
+      }
       const sourceList = this.container(source.parentId);
       const [block] = sourceList.splice(source.index, 1);
       if (!block || (parentId && block.kind === "repeat")) {
