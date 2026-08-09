@@ -31,7 +31,7 @@ def test_empty_profile_renders_without_zeroing_missing_metrics(client):
     assert "Noch keine belastbare Einschätzung" in response.text
     assert "Trainingshistorie noch nicht belastbar" in response.text
     assert "Garmin Bereitschaft</span>\n        <strong>0" not in response.text
-    assert 'class="nav-item active" href="/profile"' in response.text
+    assert re.search(r'class="nav-item active[^"]*" href="/profile"', response.text)
     assert _chart_payload(response.text) == {"charts": []}
 
 

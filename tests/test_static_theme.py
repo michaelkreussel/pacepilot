@@ -2,6 +2,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
 CSS = (ROOT / "app/static/css/tailwind.css").read_text(encoding="utf-8")
+SOURCE = (ROOT / "app/static/css/tailwind.input.css").read_text(encoding="utf-8")
 
 
 def test_generated_tailwind_contains_semantic_themes() -> None:
@@ -17,15 +18,26 @@ def test_generated_tailwind_contains_semantic_themes() -> None:
     assert "@apply" not in CSS
 
 
-def test_generated_tailwind_bundles_feature_styles() -> None:
-    for selector in (
+def test_generated_tailwind_keeps_only_runtime_components() -> None:
+    for obsolete_selector in (
         ".activity-heading",
         ".coach-shell",
         ".profile-heading",
-        ".sync-progress",
         ".workout-builder",
     ):
-        assert selector in CSS
+        assert obsolete_selector not in CSS
+
+    for runtime_selector in (
+        ".sidebar.is-open",
+        ".sync-metric.success",
+        ".readiness-score",
+        ".definition-step.warmup",
+        ".calendar-workout.running",
+    ):
+        assert runtime_selector in CSS
+
+    assert "layer(legacy)" not in SOURCE
+    assert "./app.css" not in SOURCE
 
 
 def test_templates_use_the_bundled_stylesheet() -> None:
@@ -45,3 +57,4 @@ def test_templates_use_the_bundled_stylesheet() -> None:
         "/css/workout-definition.css",
     ):
         assert legacy_stylesheet not in html
+        assert not (ROOT / "app/static" / legacy_stylesheet.removeprefix("/")).exists()

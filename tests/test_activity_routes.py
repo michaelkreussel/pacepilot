@@ -76,7 +76,8 @@ def test_activity_detail_renders_charts_and_map(
     assert "Bewegungszeit" in response.text
     assert "Gesamtzeit" in response.text
     assert "Ø Leistung" in response.text
-    assert '<details class="card detailed-stats">' in response.text
+    assert '<details class="group ' in response.text
+    assert "Garmin-Metriken" in response.text
     assert 'id="activity-map"' in response.text
     assert "sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" in response.text
     assert str(details_path) not in response.text

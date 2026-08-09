@@ -141,9 +141,9 @@ def test_training_plan_can_switch_between_week_and_month(client: TestClient) -> 
     week = client.get("/plans")
     month = client.get("/plans?view=month")
 
-    assert 'class="active" href="/plans?view=week">Woche</a>' in week.text
+    assert 'href="/plans?view=week" aria-current="page">Woche</a>' in week.text
     assert "Diese Woche" in week.text
-    assert 'class="active" href="/plans?view=month">Monat</a>' in month.text
+    assert 'href="/plans?view=month" aria-current="page">Monat</a>' in month.text
     assert "Dieser Monat" in month.text
     assert 'const storageKey = "pacepilot-plan-url"' in month.text
     assert "window.location.replace(savedUrl)" in month.text
@@ -510,8 +510,8 @@ def test_delete_garmin_data_preserves_connection_user_and_local_workout(
 def test_garmin_account_actions_are_in_connection_card(client: TestClient) -> None:
     response = client.get("/settings")
 
-    start = response.text.index('class="card connection-card garmin-connection-card"')
-    end = response.text.index("</article>", start)
+    start = response.text.index('id="garmin-connection"')
+    end = response.text.index("</section>", start)
     connection_card = response.text[start:end]
     assert 'action="/settings/garmin/disconnect"' in connection_card
     assert 'action="/settings/garmin/data/delete"' in connection_card
@@ -672,14 +672,16 @@ def test_edit_draft_workout(client: TestClient, session_factory: sessionmaker[Se
     assert 'value="Lockerer Dauerlauf"' in form.text
     assert "workoutBuilder" in form.text
     assert '"fastest_seconds_per_km": 240.0' in form.text
-    assert 'class="builder-workspace"' in form.text
-    assert 'class="repeat-content"' in form.text
+    assert 'aria-label="Bausteine"' in form.text
+    assert 'aria-labelledby="flow-heading"' in form.text
+    assert "repeat-children" in form.text
     assert 'draggable="true"' in form.text
     assert "startPaletteDrag('interval'" in form.text
     assert "/static/icons/workout.svg#pencil" in form.text
     assert "setDropTarget(null, index)" in form.text
-    assert "/static/css/tailwind.css?v=20260809-1" in form.text
-    assert "/static/js/theme.js?v=20260809-1" in form.text
+    assert "/static/css/tailwind.css?v=20260809-3" in form.text
+    assert "/static/js/theme.js?v=20260809-3" in form.text
+    assert "data-theme-toggle" in form.text
 
     updated = client.post(
         location,

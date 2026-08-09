@@ -1,42 +1,42 @@
 {% extends "base.html" %}
 {% block title %}KI-Coach · PacePilot{% endblock %}
 {% block content %}
-<div class="page-heading">
-  <div><p class="eyebrow">Planungsassistenz</p><h1>KI-Coach</h1><p>Vorschläge statt Autopilot.</p></div>
-  <span class="pill">Experimentell</span>
+<div class="mb-6 flex items-start justify-between gap-4">
+  <div><p class="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">Planungsassistenz</p><h1 class="mt-2 font-display text-3xl font-semibold tracking-tight">KI-Coach</h1><p class="mt-2 text-sm text-muted-foreground">Vorschläge statt Autopilot.</p></div>
+  <span class="rounded-full bg-surface-muted px-3 py-1 text-xs font-medium text-muted-foreground">Experimentell</span>
 </div>
-<div class="alert warning coach-development-note" role="status"><strong>Diese Funktion befindet sich noch in Entwicklung.</strong><br>Empfehlungen können unvollständig oder unpassend sein. Prüfe jeden Vorschlag, bevor du ihn in dein Training übernimmst.</div>
-<section class="coach-stage">
-  <article class="coach-principle"><span>01</span><h2>Das Modell entwirft.</h2><p>Aktuelle Trainings-, Erholungs- und Kalenderdaten fließen als begrenzter Snapshot ein.</p></article>
-  <article class="coach-principle"><span>02</span><h2>Die App bleibt Herrin der Daten.</h2><p>Der Agent kann weder Workouts speichern noch Garmin-Aktionen ausführen.</p></article>
-  <article class="coach-principle"><span>03</span><h2>Du entscheidest.</h2><p>Empfehlungen bleiben Text, bis du sie im Workout-Editor selbst übernimmst.</p></article>
+<div class="mb-6 rounded-lg border border-warning/25 bg-warning-subtle p-4 text-sm leading-6 text-warning-emphasis" role="status"><strong>Diese Funktion befindet sich noch in Entwicklung.</strong><br>Empfehlungen können unvollständig oder unpassend sein. Prüfe jeden Vorschlag, bevor du ihn in dein Training übernimmst.</div>
+<section class="grid gap-3 md:grid-cols-3">
+  <article class="rounded-xl border border-border bg-surface p-4 sm:p-5"><span class="text-xs font-semibold text-muted-foreground">01</span><h2 class="mt-5 text-lg font-semibold">Das Modell entwirft.</h2><p class="mt-2 text-sm leading-6 text-muted-foreground">Aktuelle Trainings-, Erholungs- und Kalenderdaten fließen als begrenzter Snapshot ein.</p></article>
+  <article class="rounded-xl border border-border bg-surface p-4 sm:p-5"><span class="text-xs font-semibold text-muted-foreground">02</span><h2 class="mt-5 text-lg font-semibold">Die App bleibt Herrin der Daten.</h2><p class="mt-2 text-sm leading-6 text-muted-foreground">Der Agent kann weder Workouts speichern noch Garmin-Aktionen ausführen.</p></article>
+  <article class="rounded-xl border border-border bg-surface p-4 sm:p-5"><span class="text-xs font-semibold text-muted-foreground">03</span><h2 class="mt-5 text-lg font-semibold">Du entscheidest.</h2><p class="mt-2 text-sm leading-6 text-muted-foreground">Empfehlungen bleiben Text, bis du sie im Workout-Editor selbst übernimmst.</p></article>
 </section>
 
-<section class="coach-shell">
-  <form class="card coach-form" method="post" action="/coach">
-    <div class="coach-form-heading">
-      <div><p class="eyebrow">Neue Anfrage</p><h2>Was möchtest du planen?</h2></div>
-      {% if configured %}<span class="status-badge success">{{ model }}</span>{% else %}<span class="status-badge">Nicht konfiguriert</span>{% endif %}
+<section class="mt-6 grid items-start gap-4 lg:grid-cols-[minmax(0,1.5fr)_minmax(300px,1fr)]">
+  <form class="rounded-xl border border-border bg-surface p-4 sm:p-5" method="post" action="/coach">
+    <div class="flex flex-col items-start justify-between gap-3 sm:flex-row">
+      <div><p class="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">Neue Anfrage</p><h2 class="mt-2 text-lg font-semibold">Was möchtest du planen?</h2></div>
+      {% if configured %}<span class="max-w-full truncate rounded-full bg-success-subtle px-3 py-1 text-xs font-semibold text-success-emphasis">{{ model }}</span>{% else %}<span class="max-w-full truncate rounded-full bg-surface-muted px-3 py-1 text-xs font-semibold text-muted-foreground">Nicht konfiguriert</span>{% endif %}
     </div>
-    <label>Frage
-      <textarea name="message" rows="5" maxlength="4000" placeholder="Zum Beispiel: Wie sollte ich meine Laufwoche nach den letzten Einheiten strukturieren?" required>{{ message }}</textarea>
+    <label class="mt-6 flex flex-col gap-2 text-sm font-semibold">Frage
+      <textarea class="w-full resize-y rounded-lg border border-input bg-surface px-3 py-2 text-sm leading-6 text-foreground outline-none transition placeholder:text-muted-foreground focus:border-ring focus:ring-2 focus:ring-ring/20" name="message" rows="5" maxlength="4000" placeholder="Zum Beispiel: Wie sollte ich meine Laufwoche nach den letzten Einheiten strukturieren?" required>{{ message }}</textarea>
     </label>
-    <div class="coach-submit">
-      <p>Die Anfrage nutzt einen aktuellen Snapshot. Es wird kein Chatverlauf gespeichert.</p>
-      <button class="button" type="submit" {% if not configured %}disabled{% endif %}>Coach fragen</button>
+    <div class="mt-5 flex flex-col items-stretch justify-between gap-4 sm:flex-row sm:items-center">
+      <p class="text-xs leading-5 text-muted-foreground">Die Anfrage nutzt einen aktuellen Snapshot. Es wird kein Chatverlauf gespeichert.</p>
+      <button class="inline-flex shrink-0 items-center justify-center rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition hover:bg-primary-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-50" type="submit" {% if not configured %}disabled{% endif %}>Coach fragen</button>
     </div>
   </form>
 
   {% if answer or error %}
-  <article class="card coach-answer {{ 'coach-error' if error else '' }}" aria-live="polite">
-    <p class="eyebrow">{{ 'Fehler' if error else 'Antwort' }}</p>
-    <h2>{{ 'Coach nicht erreichbar' if error else 'Vorschlag des Coaches' }}</h2>
-    <div class="coach-answer-text">{{ error or answer }}</div>
-    {% if answer %}<a class="button secondary" href="/workouts/new">Im Workout-Editor prüfen</a>{% endif %}
+  <article class="rounded-xl border border-border border-l-2 {{ 'border-l-danger' if error else 'border-l-primary' }} bg-surface p-4 sm:p-5" aria-live="polite">
+    <p class="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">{{ 'Fehler' if error else 'Antwort' }}</p>
+    <h2 class="mt-2 text-lg font-semibold">{{ 'Coach nicht erreichbar' if error else 'Vorschlag des Coaches' }}</h2>
+    <div class="my-5 whitespace-pre-wrap text-sm leading-7 text-foreground">{{ error or answer }}</div>
+    {% if answer %}<a class="inline-flex items-center justify-center rounded-lg border border-border bg-surface px-4 py-2 text-sm font-semibold text-foreground transition hover:bg-secondary focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" href="/workouts/new">Im Workout-Editor prüfen</a>{% endif %}
   </article>
   {% elif not configured %}
-  <article class="card coach-config">
-    <div><p class="eyebrow">Nicht verfügbar</p><h2>Der Coach ist derzeit nicht erreichbar</h2><p>Garmin-Sync und manuelle Workout-Planung funktionieren unabhängig davon.</p></div>
+  <article class="rounded-xl border border-border bg-surface p-4 sm:p-5">
+    <div><p class="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">Nicht verfügbar</p><h2 class="mt-2 text-lg font-semibold">Der Coach ist derzeit nicht erreichbar</h2><p class="mt-2 text-sm leading-6 text-muted-foreground">Garmin-Sync und manuelle Workout-Planung funktionieren unabhängig davon.</p></div>
   </article>
   {% endif %}
 </section>

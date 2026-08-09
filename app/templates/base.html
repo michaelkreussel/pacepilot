@@ -7,51 +7,58 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@600;700;800&display=swap" rel="stylesheet">
-  <script src="{{ url_for('static', path='/js/theme.js') }}?v=20260809-1"></script>
+  <script src="{{ url_for('static', path='/js/theme.js') }}?v=20260809-3"></script>
   <script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
   <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js" defer></script>
   <script src="{{ url_for('static', path='/js/local-time.js') }}?v=20260809-1" defer></script>
   {% block head %}{% endblock %}
-  <link rel="stylesheet" href="{{ url_for('static', path='/css/tailwind.css') }}?v=20260809-1">
+  <link rel="stylesheet" href="{{ url_for('static', path='/css/tailwind.css') }}?v=20260809-3">
 </head>
-<body>
-  <div class="app-shell" x-data="{ menuOpen: false }">
-    <aside class="sidebar" :class="menuOpen && 'is-open'">
-      <a class="brand" href="{{ '/' if onboarding.complete else '/onboarding' }}">
-        <span class="brand-mark">P</span>
-        <span>PacePilot <small class="early-access-badge">Early Access</small></span>
+<body class="m-0 min-h-screen bg-background font-sans text-sm text-foreground">
+  <div class="min-h-screen min-[1051px]:grid min-[1051px]:grid-cols-[248px_minmax(0,1fr)]" x-data="{ menuOpen: false }">
+    <aside class="sidebar fixed inset-y-0 -left-[248px] z-30 flex w-[248px] flex-col overflow-y-auto overscroll-contain border-r border-border bg-surface p-5 transition-[left] duration-200 min-[1051px]:sticky min-[1051px]:left-0 min-[1051px]:top-0 min-[1051px]:h-screen min-[1051px]:p-6" :class="menuOpen && 'is-open'">
+      <a class="flex items-center gap-3 font-display text-lg font-bold tracking-tight text-foreground" href="{{ '/' if onboarding.complete else '/onboarding' }}">
+        <span class="grid size-9 place-items-center rounded-lg bg-secondary font-display text-base font-bold text-secondary-foreground">P</span>
+        <span class="leading-tight">PacePilot <small class="block text-[0.625rem] font-semibold uppercase tracking-[0.14em] text-muted-foreground">Early Access</small></span>
       </a>
-      <nav class="nav-list" @click="menuOpen = false">
-        <a class="nav-item{{ ' active' if active_page in ['dashboard', 'onboarding'] else '' }}" href="{{ '/' if onboarding.complete else '/onboarding' }}">Übersicht</a>
-        <a class="nav-item{{ ' active' if active_page == 'profile' else '' }}{{ ' locked' if not onboarding.data_unlocked else '' }}" href="{{ '/profile' if onboarding.data_unlocked else '/onboarding?blocked=data' }}">Profil{% if not onboarding.data_unlocked %}<span class="nav-lock">Gesperrt</span>{% endif %}</a>
-        <a class="nav-item{{ ' active' if active_page == 'activities' else '' }}{{ ' locked' if not onboarding.data_unlocked else '' }}" href="{{ '/activities' if onboarding.data_unlocked else '/onboarding?blocked=data' }}">Aktivitäten{% if not onboarding.data_unlocked %}<span class="nav-lock">Gesperrt</span>{% endif %}</a>
-        <a class="nav-item{{ ' active' if active_page == 'plans' else '' }}{{ ' locked' if not onboarding.planning_unlocked else '' }}" href="{{ '/plans' if onboarding.planning_unlocked else '/onboarding?blocked=planning' }}">Trainingsplan{% if not onboarding.planning_unlocked %}<span class="nav-lock">Gesperrt</span>{% endif %}</a>
-        <a class="nav-item{{ ' active' if active_page == 'workout-new' else '' }}{{ ' locked' if not onboarding.planning_unlocked else '' }}" href="{{ '/workouts/new' if onboarding.planning_unlocked else '/onboarding?blocked=planning' }}">Workout erstellen{% if not onboarding.planning_unlocked %}<span class="nav-lock">Gesperrt</span>{% endif %}</a>
-        <a class="nav-item{{ ' active' if active_page == 'coach' else '' }}{{ ' locked' if not onboarding.data_unlocked else '' }}" href="{{ '/coach' if onboarding.data_unlocked else '/onboarding?blocked=data' }}">KI-Coach <span class="nav-badge">Beta</span></a>
+      <nav class="mt-10 flex flex-col gap-1" aria-label="Hauptnavigation" @click="menuOpen = false">
+        <p class="mb-2 px-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Training</p>
+        <a class="nav-item{{ ' active' if active_page in ['dashboard', 'onboarding'] else '' }} rounded-lg px-3 py-2.5 text-sm font-medium shadow-none transition hover:bg-secondary hover:text-secondary-foreground{{ ' border-l-2 border-primary bg-primary-subtle text-foreground' if active_page in ['dashboard', 'onboarding'] else ' text-muted-foreground' }}" href="{{ '/' if onboarding.complete else '/onboarding' }}">Übersicht</a>
+        <a class="nav-item{{ ' active' if active_page == 'profile' else '' }}{{ ' locked' if not onboarding.data_unlocked else '' }} rounded-lg px-3 py-2.5 text-sm font-medium shadow-none transition hover:bg-secondary hover:text-secondary-foreground{{ ' border-l-2 border-primary bg-primary-subtle text-foreground' if active_page == 'profile' else ' text-muted-foreground' }}{{ ' opacity-60' if not onboarding.data_unlocked else '' }}" href="{{ '/profile' if onboarding.data_unlocked else '/onboarding?blocked=data' }}">Profil{% if not onboarding.data_unlocked %}<span class="float-right text-[0.625rem] uppercase tracking-wide">Gesperrt</span>{% endif %}</a>
+        <a class="nav-item{{ ' active' if active_page == 'activities' else '' }}{{ ' locked' if not onboarding.data_unlocked else '' }} rounded-lg px-3 py-2.5 text-sm font-medium shadow-none transition hover:bg-secondary hover:text-secondary-foreground{{ ' border-l-2 border-primary bg-primary-subtle text-foreground' if active_page == 'activities' else ' text-muted-foreground' }}{{ ' opacity-60' if not onboarding.data_unlocked else '' }}" href="{{ '/activities' if onboarding.data_unlocked else '/onboarding?blocked=data' }}">Aktivitäten{% if not onboarding.data_unlocked %}<span class="float-right text-[0.625rem] uppercase tracking-wide">Gesperrt</span>{% endif %}</a>
+        <p class="mb-2 mt-5 px-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Planung</p>
+        <a class="nav-item{{ ' active' if active_page == 'plans' else '' }}{{ ' locked' if not onboarding.planning_unlocked else '' }} rounded-lg px-3 py-2.5 text-sm font-medium shadow-none transition hover:bg-secondary hover:text-secondary-foreground{{ ' border-l-2 border-primary bg-primary-subtle text-foreground' if active_page == 'plans' else ' text-muted-foreground' }}{{ ' opacity-60' if not onboarding.planning_unlocked else '' }}" href="{{ '/plans' if onboarding.planning_unlocked else '/onboarding?blocked=planning' }}">Trainingsplan{% if not onboarding.planning_unlocked %}<span class="float-right text-[0.625rem] uppercase tracking-wide">Gesperrt</span>{% endif %}</a>
+        <a class="nav-item{{ ' active' if active_page == 'workout-new' else '' }}{{ ' locked' if not onboarding.planning_unlocked else '' }} rounded-lg px-3 py-2.5 text-sm font-medium shadow-none transition hover:bg-secondary hover:text-secondary-foreground{{ ' border-l-2 border-primary bg-primary-subtle text-foreground' if active_page == 'workout-new' else ' text-muted-foreground' }}{{ ' opacity-60' if not onboarding.planning_unlocked else '' }}" href="{{ '/workouts/new' if onboarding.planning_unlocked else '/onboarding?blocked=planning' }}">Workout erstellen{% if not onboarding.planning_unlocked %}<span class="float-right text-[0.625rem] uppercase tracking-wide">Gesperrt</span>{% endif %}</a>
+        <a class="nav-item{{ ' active' if active_page == 'coach' else '' }}{{ ' locked' if not onboarding.data_unlocked else '' }} rounded-lg px-3 py-2.5 text-sm font-medium shadow-none transition hover:bg-secondary hover:text-secondary-foreground{{ ' border-l-2 border-primary bg-primary-subtle text-foreground' if active_page == 'coach' else ' text-muted-foreground' }}{{ ' opacity-60' if not onboarding.data_unlocked else '' }}" href="{{ '/coach' if onboarding.data_unlocked else '/onboarding?blocked=data' }}">KI-Coach <span class="float-right rounded-full bg-info-subtle px-2 py-0.5 text-[0.625rem] font-semibold text-info-emphasis">Beta</span></a>
       </nav>
-      <div class="sidebar-footer">
-        <button class="nav-item theme-toggle" type="button" data-theme-toggle aria-pressed="false"><span data-theme-label>Design wechseln</span></button>
-        <a class="nav-item{{ ' active' if active_page == 'help' else '' }}" href="/help">Hilfe & Einführung</a>
-        <a class="nav-item{{ ' active' if active_page == 'settings' else '' }}" href="/settings">Einstellungen</a>
-        <div class="signed-in-user">
-          <span>{{ current_user.display_name }}</span>
-          <form method="post" action="/logout"><button type="submit">Abmelden</button></form>
+      <div class="mt-auto border-t border-border pt-4">
+        <a class="nav-item{{ ' active' if active_page == 'help' else '' }} block rounded-lg px-3 py-2.5 text-sm font-medium shadow-none transition hover:bg-secondary hover:text-secondary-foreground{{ ' border-l-2 border-primary bg-primary-subtle text-foreground' if active_page == 'help' else ' text-muted-foreground' }}" href="/help">Hilfe & Einführung</a>
+        <a class="nav-item{{ ' active' if active_page == 'settings' else '' }} block rounded-lg px-3 py-2.5 text-sm font-medium shadow-none transition hover:bg-secondary hover:text-secondary-foreground{{ ' border-l-2 border-primary bg-primary-subtle text-foreground' if active_page == 'settings' else ' text-muted-foreground' }}" href="/settings">Einstellungen</a>
+        <div class="mt-4 flex items-center justify-between gap-3 border-t border-border px-3 pt-4">
+          <div class="min-w-0">
+            <span class="block truncate text-xs font-semibold text-foreground">{{ current_user.display_name }}</span>
+            <form class="mt-1" method="post" action="/logout"><button class="text-xs text-muted-foreground transition hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" type="submit">Abmelden</button></form>
+          </div>
+          {% include "partials/theme_toggle.html" %}
         </div>
       </div>
     </aside>
-    <main class="main">
-      <header class="mobile-header">
-        <a class="brand" href="{{ '/' if onboarding.complete else '/onboarding' }}"><span class="brand-mark">P</span><span>PacePilot</span></a>
-        <button class="menu-button" @click="menuOpen = !menuOpen" :aria-expanded="menuOpen" aria-label="Navigation öffnen">Menü</button>
+    <main class="min-w-0">
+      <header class="flex items-center justify-between border-b border-border bg-surface px-4 py-3 sm:px-6 min-[1051px]:hidden">
+        <a class="flex items-center gap-2.5 font-display text-base font-bold tracking-tight" href="{{ '/' if onboarding.complete else '/onboarding' }}"><span class="grid size-8 place-items-center rounded-lg bg-secondary text-sm text-secondary-foreground">P</span><span>PacePilot</span></a>
+        <div class="flex items-center gap-2">
+          {% include "partials/theme_toggle.html" %}
+          <button class="inline-flex items-center justify-center rounded-lg border border-border bg-surface px-3 py-2 text-sm font-semibold text-foreground transition hover:bg-secondary focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" @click="menuOpen = !menuOpen" :aria-expanded="menuOpen" aria-label="Navigation öffnen">Menü</button>
+        </div>
       </header>
-      <div class="content">
+      <div class="mx-auto w-full max-w-7xl px-4 py-8 sm:px-6 sm:py-10 lg:px-8 min-[1051px]:py-12">
         {% if not onboarding.complete and active_page not in ['onboarding'] %}
-        <a class="setup-strip" href="/onboarding"><strong>Einrichtung {{ onboarding.step_number }} von 2</strong><span>{% if onboarding.phase == 'welcome' %}Einführung starten{% elif onboarding.phase == 'connect' %}Garmin verbinden{% else %}Erste Synchronisierung abschließen{% endif %}</span></a>
+        <a class="mb-8 flex flex-col gap-1 rounded-xl border border-info/25 bg-info-subtle p-4 text-sm text-info-emphasis sm:flex-row sm:items-center sm:gap-3" href="/onboarding"><strong class="text-xs font-semibold uppercase tracking-wide">Einrichtung {{ onboarding.step_number }} von 2</strong><span>{% if onboarding.phase == 'welcome' %}Einführung starten{% elif onboarding.phase == 'connect' %}Garmin verbinden{% else %}Erste Synchronisierung abschließen{% endif %}</span></a>
         {% endif %}
         {% block content %}{% endblock %}
       </div>
     </main>
-    <div class="scrim" x-show="menuOpen" x-transition @click="menuOpen = false"></div>
+    <div class="fixed inset-0 z-20 bg-foreground/40 min-[1051px]:hidden" x-cloak x-show="menuOpen" x-transition @click="menuOpen = false"></div>
   </div>
 </body>
 </html>

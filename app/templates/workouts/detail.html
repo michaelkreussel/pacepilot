@@ -1,33 +1,54 @@
 {% extends "base.html" %}
 {% block title %}{{ workout.name }} · PacePilot{% endblock %}
-{% macro render_blocks(blocks) %}
-  <ol class="definition-timeline">
+{% macro render_blocks(blocks, nested=false) %}
+  <ol class="grid list-none gap-2 p-0 {{ 'ml-2 mt-3 border-l-2 border-border pl-3 sm:ml-3 sm:pl-4' if nested else 'mt-4' }}">
   {% for block in blocks %}
     {% if block.kind == 'repeat' %}
-      <li class="definition-repeat">
-        <div class="definition-repeat-heading"><svg aria-hidden="true"><use href="/static/icons/workout.svg#repeat"></use></svg><div><strong>{{ block.iterations }}× wiederholen</strong><p>{{ block.children|length }} Schritte pro Runde</p></div></div>
-        {{ render_blocks(block.children) }}
+      <li class="definition-repeat rounded-xl border border-primary/30 border-l-4 border-l-primary bg-primary-subtle p-3 sm:p-4">
+        <div class="flex items-center gap-3"><svg class="size-5 shrink-0 fill-none stroke-primary stroke-2" aria-hidden="true"><use href="/static/icons/workout.svg#repeat"></use></svg><div><strong class="text-sm font-semibold">{{ block.iterations }}× wiederholen</strong><p class="mt-0.5 text-xs text-muted-foreground">{{ block.children|length }} Schritte pro Runde</p></div></div>
+        {{ render_blocks(block.children, true) }}
       </li>
     {% else %}
-      <li class="definition-step {{ block.step_type }}"><span>{{ loop.index }}</span><div><strong>{{ {'warmup':'Aufwärmen','interval':'Belastung','recovery':'Erholung','cooldown':'Auslaufen'}.get(block.step_type, block.step_type) }}</strong><p>{% if block.end.type == 'time' %}{{ block.end.seconds|precise_duration }}{% else %}{{ block.end.meters|round|int }} m{% endif %}{% if block.target.type == 'pace_range' %} · Pace {{ block.target.fastest_seconds_per_km|pace }} bis {{ block.target.slowest_seconds_per_km|pace }}{% elif block.target.type == 'heart_rate_range' %} · {{ block.target.lower_bpm }}–{{ block.target.upper_bpm }} bpm{% elif block.target.type == 'heart_rate_zone' %} · HF-Zone {{ block.target.zone }}{% endif %}</p></div></li>
+      <li class="definition-step {{ block.step_type }} grid grid-cols-[2rem_minmax(0,1fr)] items-center gap-3 rounded-lg border-y border-r border-l-[3px] border-y-border border-r-border bg-surface p-3"><span class="grid size-8 place-items-center rounded-lg bg-surface-muted text-xs font-semibold text-primary">{{ loop.index }}</span><div><strong class="text-sm font-semibold">{{ {'warmup':'Aufwärmen','interval':'Belastung','recovery':'Erholung','cooldown':'Auslaufen'}.get(block.step_type, block.step_type) }}</strong><p class="mt-0.5 text-xs leading-5 text-muted-foreground">{% if block.end.type == 'time' %}{{ block.end.seconds|precise_duration }}{% else %}{{ block.end.meters|round|int }} m{% endif %}{% if block.target.type == 'pace_range' %} · Pace {{ block.target.fastest_seconds_per_km|pace }} bis {{ block.target.slowest_seconds_per_km|pace }}{% elif block.target.type == 'heart_rate_range' %} · {{ block.target.lower_bpm }}–{{ block.target.upper_bpm }} bpm{% elif block.target.type == 'heart_rate_zone' %} · HF-Zone {{ block.target.zone }}{% endif %}</p></div></li>
     {% endif %}
   {% endfor %}
   </ol>
 {% endmacro %}
 {% block content %}
-<a class="back-link" href="/plans">← Trainingsplan</a>
-<div class="page-heading"><div><p class="eyebrow">{{ workout.sport|capitalize }} · {{ workout.status|capitalize }}</p><h1>{{ workout.name }}</h1><p>{{ workout.scheduled_for|date }}{% if workout.description %} · {{ workout.description }}{% endif %}</p></div><div class="workout-actions"><a class="button secondary" href="/workouts/{{ workout.id }}/edit">Bearbeiten</a><form method="post" action="/workouts/{{ workout.id }}/delete" onsubmit="return confirm('Workout wirklich bei PacePilot und Garmin löschen?')"><button class="button danger" type="submit">Löschen</button></form></div></div>
-{% if error %}<div class="alert error">{{ error }}</div>{% endif %}
-<div class="workout-detail-grid">
-  <section class="card timeline-card"><p class="section-number">Ablauf</p>{{ render_blocks(workout.definition_model.blocks) }}</section>
-  <aside class="card publish-card">
-    <p class="section-number">Freigabe</p><h2>Sicher zu Garmin</h2>
-    <div class="release-steps"><div class="{{ 'done' if workout.status != 'draft' else 'current' }}"><span>1</span><p><strong>Entwurf prüfen</strong><small>Inhalt und Datum kontrollieren</small></p></div><div class="{{ 'done' if workout.garmin_workout_id else '' }}"><span>2</span><p><strong>Zu Garmin laden</strong><small>Workout und Termin anlegen</small></p></div><div class="{{ 'done' if workout.status == 'pushed' else '' }}"><span>3</span><p><strong>An Uhr senden</strong><small>Über Garmin Connect zustellen</small></p></div></div>
-    {% if workout.status == 'draft' %}<form method="post" action="/workouts/{{ workout.id }}/confirm"><button class="button full" type="submit">Entwurf bestätigen</button></form>
-    {% elif not workout.garmin_workout_id %}<form method="post" action="/workouts/{{ workout.id }}/publish"><button class="button full" type="submit">An Garmin übertragen</button></form>
-    {% elif workout.status != 'pushed' %}<form method="post" action="/workouts/{{ workout.id }}/push"><button class="button full" type="submit">An meine Uhr senden</button></form>
-    {% else %}<div class="success-note">Workout wurde für deine Uhr vorgemerkt.</div>{% endif %}
-    {% if workout.garmin_workout_id %}<p class="garmin-id">Garmin-ID {{ workout.garmin_workout_id }}</p>{% endif %}
+<a class="mb-4 inline-flex text-sm font-semibold text-primary hover:text-primary-hover" href="/plans">← Trainingsplan</a>
+
+<header class="mb-5 flex flex-col gap-4 border-b border-border pb-5 sm:flex-row sm:items-end sm:justify-between">
+  <div class="min-w-0">
+    <div class="mb-2 flex flex-wrap items-center gap-2"><span class="rounded-full bg-primary-subtle px-2.5 py-1 text-xs font-semibold text-primary-emphasis">{{ workout.sport|capitalize }} · {{ workout.status|capitalize }}</span></div>
+    <h1 class="font-display text-3xl font-semibold tracking-tight">{{ workout.name }}</h1>
+    <p class="mt-1 text-sm text-muted-foreground">{{ workout.scheduled_for|date }}{% if workout.description %} · {{ workout.description }}{% endif %}</p>
+  </div>
+  <div class="flex w-full gap-2 sm:w-auto">
+    <a class="inline-flex flex-1 items-center justify-center rounded-lg border border-border bg-surface px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background sm:flex-none" href="/workouts/{{ workout.id }}/edit">Bearbeiten</a>
+    <form class="flex-1 sm:flex-none" method="post" action="/workouts/{{ workout.id }}/delete" onsubmit="return confirm('Workout wirklich bei PacePilot und Garmin löschen?')"><button class="inline-flex w-full items-center justify-center rounded-lg border border-danger bg-danger px-4 py-2 text-sm font-semibold text-danger-foreground transition-colors hover:bg-danger/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger focus-visible:ring-offset-2 focus-visible:ring-offset-background" type="submit">Löschen</button></form>
+  </div>
+</header>
+
+{% if error %}<div class="mb-4 rounded-lg border border-danger/25 bg-danger-subtle px-4 py-3 text-sm text-danger-emphasis">{{ error }}</div>{% endif %}
+
+<div class="grid items-start gap-4 lg:grid-cols-[minmax(0,1.5fr)_minmax(18rem,0.75fr)]">
+  <section class="rounded-xl border border-border bg-surface p-4 sm:p-5">
+    <p class="text-xs font-semibold uppercase tracking-widest text-muted-foreground">Ablauf</p>
+    {{ render_blocks(workout.definition_model.blocks) }}
+  </section>
+  <aside class="rounded-xl border border-border bg-surface p-4 sm:p-5 lg:sticky lg:top-6">
+    <p class="text-xs font-semibold uppercase tracking-widest text-muted-foreground">Freigabe</p>
+    <h2 class="mt-1 text-lg font-semibold">Sicher zu Garmin</h2>
+    <div class="mt-4">
+      <div class="{{ 'done border-success' if workout.status != 'draft' else 'current border-primary' }} relative flex gap-3 border-l-2 pb-4 pl-5"><span class="absolute -left-[0.8125rem] grid size-6 place-items-center rounded-full text-xs font-semibold {{ 'bg-success text-success-foreground' if workout.status != 'draft' else 'bg-primary text-primary-foreground' }}">1</span><p class="grid"><strong class="text-sm font-semibold">Entwurf prüfen</strong><small class="mt-0.5 text-xs text-muted-foreground">Inhalt und Datum kontrollieren</small></p></div>
+      <div class="{{ 'done border-success' if workout.garmin_workout_id else 'border-border' }} relative flex gap-3 border-l-2 pb-4 pl-5"><span class="absolute -left-[0.8125rem] grid size-6 place-items-center rounded-full text-xs font-semibold {{ 'bg-success text-success-foreground' if workout.garmin_workout_id else 'bg-surface-muted text-muted-foreground' }}">2</span><p class="grid"><strong class="text-sm font-semibold">Zu Garmin laden</strong><small class="mt-0.5 text-xs text-muted-foreground">Workout und Termin anlegen</small></p></div>
+      <div class="{{ 'done' if workout.status == 'pushed' else '' }} relative flex gap-3 pl-5"><span class="absolute -left-[0.6875rem] grid size-6 place-items-center rounded-full text-xs font-semibold {{ 'bg-success text-success-foreground' if workout.status == 'pushed' else 'bg-surface-muted text-muted-foreground' }}">3</span><p class="grid"><strong class="text-sm font-semibold">An Uhr senden</strong><small class="mt-0.5 text-xs text-muted-foreground">Über Garmin Connect zustellen</small></p></div>
+    </div>
+    {% if workout.status == 'draft' %}<form class="mt-5" method="post" action="/workouts/{{ workout.id }}/confirm"><button class="inline-flex w-full items-center justify-center rounded-lg border border-transparent bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background" type="submit">Entwurf bestätigen</button></form>
+    {% elif not workout.garmin_workout_id %}<form class="mt-5" method="post" action="/workouts/{{ workout.id }}/publish"><button class="inline-flex w-full items-center justify-center rounded-lg border border-transparent bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background" type="submit">An Garmin übertragen</button></form>
+    {% elif workout.status != 'pushed' %}<form class="mt-5" method="post" action="/workouts/{{ workout.id }}/push"><button class="inline-flex w-full items-center justify-center rounded-lg border border-transparent bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background" type="submit">An meine Uhr senden</button></form>
+    {% else %}<div class="mt-5 rounded-lg border border-success/25 bg-success-subtle p-3 text-sm text-success-emphasis">Workout wurde für deine Uhr vorgemerkt.</div>{% endif %}
+    {% if workout.garmin_workout_id %}<p class="mt-3 text-center font-mono text-xs text-muted-foreground">Garmin-ID {{ workout.garmin_workout_id }}</p>{% endif %}
   </aside>
 </div>
 {% endblock %}

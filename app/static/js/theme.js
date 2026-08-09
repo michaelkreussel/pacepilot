@@ -13,6 +13,7 @@
     document.querySelectorAll("[data-theme-toggle]").forEach((button) => {
       button.setAttribute("aria-pressed", String(dark));
       button.setAttribute("title", dark ? "Helles Design verwenden" : "Dunkles Design verwenden");
+      button.setAttribute("aria-label", dark ? "Helles Design verwenden" : "Dunkles Design verwenden");
       const label = button.querySelector("[data-theme-label]");
       if (label) label.textContent = dark ? "Helles Design" : "Dunkles Design";
     });

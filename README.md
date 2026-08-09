@@ -34,7 +34,7 @@ uv run uvicorn app.main:app --reload
 
 Danach ist PacePilot unter <http://localhost:8000> erreichbar. Vor dem ersten Login muss mindestens ein Anmeldeanbieter konfiguriert sein.
 
-Nach Änderungen an Templates oder einer Datei unter `app/static/css/` wird das Stylesheet mit der offiziellen [Tailwind Standalone CLI](https://tailwindcss.com/blog/standalone-cli) 4.3.3 neu gebaut:
+Die Oberfläche nutzt Tailwind-Utilities direkt in den Jinja-Templates. Semantische Theme-Variablen und wenige laufzeitabhängige Zustände liegen in `app/static/css/tailwind.input.css`; `tailwind.css` ist das eingecheckte Build-Ergebnis. Nach Änderungen an Templates oder der Eingabedatei wird das Stylesheet mit der offiziellen [Tailwind Standalone CLI](https://tailwindcss.com/blog/standalone-cli) 4.3.3 neu gebaut:
 
 ```bash
 tailwindcss -i ./app/static/css/tailwind.input.css -o ./app/static/css/tailwind.css --minify
