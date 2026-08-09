@@ -1,7 +1,8 @@
 from collections.abc import Generator
+from typing import Annotated
 
 import pytest
-from fastapi import Request
+from fastapi import Depends, Request
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -12,6 +13,7 @@ from app.auth import get_current_user
 from app.config import get_settings
 from app.database import Base, get_db
 from app.models import User
+from app.models.user import utcnow
 
 app = main_module.app
 
@@ -39,11 +41,22 @@ def client(
             yield session
 
     with session_factory() as session:
-        user = User(display_name="Testathlet")
+        completed_at = utcnow()
+        user = User(
+            display_name="Testathlet",
+            onboarding_notice_acknowledged_at=completed_at,
+            onboarding_completed_at=completed_at,
+            onboarding_completed_version=1,
+        )
         session.add(user)
         session.commit()
+        user_id = user.id
 
-    def override_current_user(request: Request) -> User:
+    def override_current_user(
+        request: Request, session: Annotated[Session, Depends(get_db)]
+    ) -> User:
+        user = session.get(User, user_id)
+        assert user is not None
         request.state.current_user = user
         return user
 

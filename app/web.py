@@ -5,6 +5,8 @@ from typing import Any
 from fastapi import Request
 from fastapi.templating import Jinja2Templates
 
+from app.onboarding import onboarding_state
+
 templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
 
 
@@ -57,8 +59,10 @@ templates.env.filters.update(
 
 
 def context(request: Request, **values: Any) -> dict[str, Any]:
+    current_user = getattr(request.state, "current_user", None)
     return {
         "request": request,
-        "current_user": getattr(request.state, "current_user", None),
+        "current_user": current_user,
+        "onboarding": onboarding_state(current_user) if current_user is not None else None,
         **values,
     }

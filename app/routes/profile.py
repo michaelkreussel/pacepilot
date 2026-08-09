@@ -2,18 +2,19 @@ from collections import defaultdict
 from datetime import date, timedelta
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
 from app.auth import CurrentUser
 from app.database import SessionDep
+from app.onboarding import require_data_access
 from app.repositories.users import get_or_create_garmin_account
 from app.services.analytics import AthleteDataService
 from app.services.analytics.health_trends import MetricTrend
 from app.services.analytics.training_trends import RecentWorkout, TrainingTimelinePoint
 from app.web import context, format_distance, format_duration, templates
 
-router = APIRouter(prefix="/profile")
+router = APIRouter(prefix="/profile", dependencies=[Depends(require_data_access)])
 
 Period = Literal["day", "week", "month", "3m", "year"]
 PERIODS: tuple[tuple[Period, str, int], ...] = (

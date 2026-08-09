@@ -218,6 +218,8 @@ def test_sync_normalizes_and_stores_data(
         assert health.hrv_average == 54.0
         assert session.scalar(select(GarminDevice)) is not None
         assert session.scalar(select(SyncEvent).where(SyncEvent.status == "success")) is not None
+        assert user.onboarding_completed_at is not None
+        assert user.onboarding_completed_version == 1
 
 
 def test_sync_releases_lock_when_initial_commit_fails(
@@ -268,12 +270,14 @@ def test_sync_records_rate_limit_cooldown(
         session.expire_all()
         stored_account = session.get(GarminAccount, account.id)
         stored_run = session.get(SyncRun, run.id)
+        stored_user = session.get(User, user.id)
 
         assert stored_account is not None and stored_account.sync_status == "rate_limited"
         assert stored_account.rate_limit_until is not None
         assert stored_run is not None and stored_run.status == "rate_limited"
         assert stored_run.stage == "cooldown"
         assert rate_limit_cooldown_remaining(session, stored_account) > 0
+        assert stored_user is not None and stored_user.onboarding_completed_at is None
 
 
 def test_wrapped_rate_limit_and_retry_after_are_detected() -> None:

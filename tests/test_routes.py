@@ -92,12 +92,15 @@ def test_main_pages_render(client: TestClient) -> None:
         "/workouts/new",
         "/coach",
         "/settings",
+        "/help",
     ):
         response = client.get(path)
         assert response.status_code == 200
         assert "PacePilot" in response.text
 
     assert client.get("/api/health").json() == {"status": "ok"}
+    assert "So entsteht deine Einheit" in client.get("/workouts/new").text
+    assert "Diese Funktion befindet sich noch in Entwicklung" in client.get("/coach").text
 
     openapi = client.get("/openapi.json").json()
     assert "303" in openapi["paths"]["/workouts/{workout_id}/publish"]["post"]["responses"]
@@ -890,10 +893,10 @@ def test_manual_sync_is_queued_once(
 
     queued: set[int] = set()
 
-    def queue_once(queued_account_id: int, mark_queued: Callable[[], None]) -> bool:
+    def queue_once(queued_account_id: int, mark_queued: Callable[[], bool]) -> bool:
         if queued_account_id in queued:
             return False
-        mark_queued()
+        assert mark_queued()
         queued.add(queued_account_id)
         return True
 

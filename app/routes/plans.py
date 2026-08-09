@@ -1,16 +1,17 @@
 from datetime import date, timedelta
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import HTMLResponse
 
 from app.auth import CurrentUser
 from app.database import SessionDep
 from app.models import Workout
+from app.onboarding import require_planning_access
 from app.repositories.workouts import workouts_between
 from app.web import context, templates
 
-router = APIRouter(prefix="/plans")
+router = APIRouter(prefix="/plans", dependencies=[Depends(require_planning_access)])
 
 MONTH_NAMES = (
     "Januar",

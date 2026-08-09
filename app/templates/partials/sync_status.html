@@ -45,7 +45,7 @@
   {% elif account.sync_status == 'rate_limited' %}
     <div class="alert warning compact"><strong>Garmin-Synchronisierung pausiert</strong><br>Garmin begrenzt derzeit die Anfragen. Der nächste Lauf setzt die Synchronisierung automatisch fort{% if cooldown_seconds %} (in etwa {{ cooldown_seconds }} Sekunden){% endif %}.</div>
   {% elif account.sync_error or (sync_run and sync_run.status == 'error') %}
-    <div class="alert error compact"><strong>Synchronisierung fehlgeschlagen</strong><br>{{ account.sync_error or sync_run.error }}</div>
+    <div class="alert error compact"><strong>Synchronisierung fehlgeschlagen</strong><br>{{ account.sync_error or sync_run.error }}<br><small>Bereits importierte Daten bleiben erhalten. Du kannst den Lauf erneut starten.</small></div>
   {% endif %}
 
   {% if sync_run and sync_events %}
@@ -74,7 +74,7 @@
 
   <form method="post" action="/settings/garmin/sync">
     <button class="button" type="submit" {% if sync_active %}disabled{% endif %}>
-      {% if sync_active %}Synchronisierung läuft …{% else %}Jetzt synchronisieren{% endif %}
+      {% if sync_active %}Synchronisierung läuft …{% elif not onboarding.complete %}Erste Synchronisierung starten{% else %}Jetzt synchronisieren{% endif %}
     </button>
   </form>
 </div>

@@ -2,12 +2,13 @@ from contextlib import suppress
 from datetime import date
 
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from sqlalchemy import select
 
 from app.auth import CurrentUser
 from app.database import SessionDep
 from app.models import Activity, DailyHealth, Workout
+from app.onboarding import onboarding_state
 from app.repositories.health import recent_health
 from app.repositories.users import get_or_create_garmin_account
 from app.services.analytics.training_load import calculate_weekly_load
@@ -24,7 +25,9 @@ def _today_health(session: SessionDep, user_id: int) -> DailyHealth | None:
 
 
 @router.get("/", response_class=HTMLResponse)
-def dashboard(request: Request, session: SessionDep, user: CurrentUser) -> HTMLResponse:
+def dashboard(request: Request, session: SessionDep, user: CurrentUser) -> Response:
+    if not onboarding_state(user).complete:
+        return RedirectResponse("/onboarding", status_code=303)
     account = get_or_create_garmin_account(session, user)
     latest_activity = session.scalar(
         select(Activity)

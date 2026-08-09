@@ -18,6 +18,19 @@
 .builder-flow { min-width: 0; }
 .flow-heading { margin-bottom: 10px; }
 .builder-live { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); }
+.help-button { display: grid; place-items: center; flex: none; width: 42px; height: 42px; border: 1px solid var(--line); border-radius: 50%; background: var(--card); color: var(--green); font: 800 18px "Manrope", sans-serif; cursor: pointer; box-shadow: var(--shadow); }
+.help-button:hover { border-color: var(--green); background: #f3f8f4; }
+.help-dialog { width: min(680px, calc(100vw - 32px)); max-height: calc(100vh - 32px); padding: 32px; border: 0; border-radius: 20px; background: var(--card); color: var(--ink); box-shadow: 0 28px 90px rgba(9, 28, 21, .28); }
+.help-dialog::backdrop { background: rgba(5, 20, 15, .62); backdrop-filter: blur(3px); }
+.help-dialog h2 { margin: 5px 42px 24px 0; font: 800 30px/1.1 "Manrope", sans-serif; }
+.dialog-close { position: absolute; top: 20px; right: 20px; display: grid; place-items: center; width: 34px; height: 34px; border: 1px solid var(--line); border-radius: 50%; background: transparent; color: var(--muted); font-size: 21px; cursor: pointer; }
+.help-steps { display: grid; gap: 18px; }
+.help-steps section { display: grid; grid-template-columns: 36px 1fr; gap: 13px; }
+.help-steps section > span { color: var(--orange-dark); font: 800 12px "Manrope", sans-serif; }
+.help-steps h3 { margin: 0 0 4px; font: 800 16px "Manrope", sans-serif; }
+.help-steps p { margin: 0; color: var(--muted); line-height: 1.55; }
+.help-example { display: grid; gap: 4px; margin: 24px 0; padding: 16px; border-left: 3px solid var(--lime); border-radius: 0 10px 10px 0; background: #f3f6e8; }
+.help-example span { color: var(--muted); line-height: 1.5; }
 .flow-list { display: grid; }
 .drop-zone { display: grid; place-items: center; width: 100%; height: 14px; margin: 0; padding: 0; border: 1px dashed transparent; border-radius: 12px; background: transparent; color: transparent; cursor: default; transition: height .16s ease, margin .16s ease, border-color .16s ease, background .16s ease, box-shadow .16s ease; }
 .drop-zone span { padding: 3px 10px; border-radius: 999px; background: transparent; font-size: 11px; font-weight: 800; opacity: 0; transform: scale(.94); transition: .15s; }

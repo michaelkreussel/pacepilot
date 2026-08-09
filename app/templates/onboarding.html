@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}{{ 'Einführung' if review else 'Einrichtung' }} · PacePilot{% endblock %}
+{% block content %}
+{% if blocked_message %}<div class="alert warning" role="status">{{ blocked_message }}</div>{% endif %}
+<div class="page-heading onboarding-heading">
+  <div><p class="eyebrow">{{ 'Einführung' if review else 'Willkommen bei PacePilot' }}</p><h1>{{ 'Dein Training. Klar verbunden.' if not review else 'PacePilot im Überblick.' }}</h1><p>Garmin-Daten verstehen, Einheiten planen und jeden Schritt selbst freigeben.</p></div>
+  {% if not review %}<span class="setup-progress">{{ onboarding.step_number }} / 2</span>{% endif %}
+</div>
+
+<section class="onboarding-areas" aria-label="Bereiche von PacePilot">
+  <article><span>01</span><h2>Übersicht</h2><p>Training, Erholung und die nächste geplante Einheit auf einen Blick.</p></article>
+  <article><span>02</span><h2>Profil & Aktivitäten</h2><p>Garmin-Verlauf, Belastung und Gesundheitsdaten mit sichtbaren Datenlücken.</p></article>
+  <article><span>03</span><h2>Trainingsplanung</h2><p>Workouts aus einzelnen Schritten und Wiederholungen als Entwurf aufbauen.</p></article>
+  <article><span>04</span><h2>KI-Coach</h2><p>Experimentelle Vorschläge auf Basis eines begrenzten Datenausschnitts.</p></article>
+</section>
+
+{% if review %}
+<section class="card onboarding-action"><div><p class="eyebrow">Noch einmal ansehen</p><h2>Wobei brauchst du Hilfe?</h2><p>Die Einführung zu öffnen ändert deinen Einrichtungsstatus nicht.</p></div><div class="onboarding-buttons"><a class="button" href="/help">Zu den Hilfethemen</a><a class="button secondary" href="/settings">Garmin-Einrichtung prüfen</a></div></section>
+{% elif onboarding.phase == 'welcome' %}
+<section class="card onboarding-action early-notice"><div><p class="eyebrow">Aktive Entwicklung</p><h2>Transparent von Anfang an.</h2><p>PacePilot befindet sich in früher Entwicklung. Funktionen können sich verändern und einzelne Bereiche noch unvollständig sein. Workouts gelangen erst nach deiner ausdrücklichen Freigabe zu Garmin.</p></div><form method="post" action="/onboarding/start"><button class="button large" type="submit">Verstanden, Einrichtung starten</button></form></section>
+{% elif onboarding.phase == 'connect' %}
+<section class="card onboarding-action"><div><p class="eyebrow">Schritt 1 von 2</p><h2>Garmin Connect verbinden.</h2><p>Die Verbindung liefert Aktivitäten und Gesundheitsdaten. Dein Passwort wird nicht in PacePilot gespeichert; nach der Anmeldung werden lokale Zugriffstokens verwendet.</p></div><a class="button large" href="/settings">Garmin in Einstellungen verbinden</a></section>
+{% elif onboarding.phase == 'sync' %}
+<section class="card onboarding-action"><div><p class="eyebrow">Schritt 2 von 2</p><h2>Erste Synchronisierung abschließen.</h2><p>Garmin ist verbunden. Starte jetzt den ersten Lauf; bereits importierte Daten bleiben auch erhalten, falls ein späterer Schritt fehlschlägt.</p></div><div class="onboarding-buttons"><a class="button large" href="/settings">Synchronisierung öffnen</a><a class="button secondary" href="/workouts/new">Währenddessen Workout planen</a></div></section>
+{% endif %}
+{% endblock %}

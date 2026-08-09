@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from typing import Annotated
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Form, HTTPException, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from sqlalchemy import select
 
@@ -13,6 +13,7 @@ from app.database import SessionDep
 from app.jobs.scheduler import queue_account_sync
 from app.models import GarminAccount, SyncEvent, SyncRun
 from app.models.user import utcnow
+from app.onboarding import require_notice_acknowledged
 from app.repositories.users import get_or_create_garmin_account
 from app.services.garmin.account_data import delete_garmin_data, disconnect_garmin_account
 from app.services.garmin.client import (
@@ -28,7 +29,7 @@ from app.services.garmin.locks import GarminAccountBusyError
 from app.services.garmin.sync import METRIC_LABELS, rate_limit_cooldown_remaining
 from app.web import context, templates
 
-router = APIRouter(prefix="/settings")
+router = APIRouter(prefix="/settings", dependencies=[Depends(require_notice_acknowledged)])
 GARMIN_MFA_SESSION_KEY = "garmin_mfa_challenge"
 logger = logging.getLogger("uvicorn.error")
 
@@ -348,9 +349,10 @@ def start_sync(
         )
         return RedirectResponse(f"/settings?{query}", status_code=303)
 
-    def mark_queued() -> None:
+    def mark_queued() -> bool:
         account.sync_status = "queued"
         session.commit()
+        return True
 
     queue_account_sync(account.id, mark_queued)
     return RedirectResponse("/settings", status_code=303)

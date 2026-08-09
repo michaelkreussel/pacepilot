@@ -13,6 +13,7 @@
 .coach-answer.coach-error{border-top-color:#8f2f24}
 .coach-answer-text{margin:18px 0 22px;white-space:pre-wrap;line-height:1.7;color:#273b34}
 .coach-config{grid-column:2}
+.coach-development-note{margin-bottom:22px}
 .status-dot{max-width:220px;padding:7px 10px;border-radius:999px;background:#ecece6;color:var(--muted);font-size:11px;font-weight:800;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .status-dot.success{background:#e4f1eb;color:var(--green)}
 @media(max-width:900px){.coach-shell{grid-template-columns:1fr}.coach-config{grid-column:auto}}

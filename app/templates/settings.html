@@ -1,15 +1,26 @@
 {% extends "base.html" %}
 {% block title %}Einstellungen · PacePilot{% endblock %}
 {% block content %}
-<div class="page-heading"><div><p class="eyebrow">System</p><h1>Einstellungen</h1><p>Verbindungen und Synchronisierung verwalten.</p></div></div>
-{% if error %}<div class="alert error">{{ error }}</div>{% endif %}
-{% if notice %}<div class="alert success-note">{{ notice }}</div>{% endif %}
+<div class="page-heading"><div><p class="eyebrow">System</p><h1>Einstellungen</h1><p>Verbindungen und Synchronisierung verwalten.</p></div>{% if not onboarding.complete %}<span class="setup-progress">{{ onboarding.step_number }} / 2</span>{% endif %}</div>
+{% if error %}<div class="alert error" role="alert">{{ error }}</div>{% endif %}
+{% if notice %}<div class="alert success-note" role="status">{{ notice }}</div>{% endif %}
+{% if not onboarding.complete %}
+<section class="card setup-checklist" aria-label="Einrichtungsfortschritt">
+  <div><p class="eyebrow">Ersteinrichtung</p><h2>{{ 'Noch ein Schritt.' if onboarding.connected else 'Zwei klare Schritte.' }}</h2><p>Planung wird nach der Verbindung verfügbar. Profil, Aktivitäten und Coach folgen nach dem ersten erfolgreichen Sync.</p></div>
+  <ol>
+    <li class="{{ 'complete' if onboarding.connected else 'current' }}"><span>1</span><div><strong>Garmin verbinden</strong><small>{{ 'Verbindung hergestellt' if onboarding.connected else 'Zugang sicher bestätigen' }}</small></div></li>
+    <li class="{{ 'current' if onboarding.connected else '' }}"><span>2</span><div><strong>Ersten Sync abschließen</strong><small>Aktivitäten und Gesundheitsdaten importieren</small></div></li>
+  </ol>
+</section>
+{% elif not account.connected_at %}
+<div class="alert warning" role="status"><strong>Garmin ist nicht verbunden.</strong><br>Deine Einführung bleibt abgeschlossen. Verbinde das Konto erneut, um neue Daten zu laden und Workouts zu übertragen.</div>
+{% endif %}
 <section class="settings-grid">
   <article class="card connection-card garmin-connection-card">
     <div class="integration-mark">G</div>
-    <div class="connection-copy"><p class="eyebrow">Integration</p><h2>Garmin Connect</h2><p>Abmelden entfernt die lokale Anmeldung. Das Löschen importierter Daten lässt die Garmin-Verbindung und Tokens bestehen.</p></div>
+    <div class="connection-copy"><p class="eyebrow">Integration</p><h2>Garmin Connect</h2><p>PacePilot speichert dein Passwort nicht. Nach der Anmeldung werden lokale Zugriffstokens verwendet. Abmelden entfernt diese Tokens; importierte Daten bleiben erhalten.</p></div>
     <div class="garmin-connection-controls">
-      <div class="connection-status {{ account.sync_status }}"><span class="status-dot"></span>{{ account.sync_status|replace('_', ' ') }}</div>
+      <div class="connection-status {{ account.sync_status }}"><span class="status-dot"></span>{{ {'not_connected':'Nicht verbunden','connected':'Verbunden','mfa_required':'Bestätigung nötig','queued':'Wartet','running':'Synchronisiert','ok':'Aktuell','error':'Fehler','rate_limited':'Pausiert'}.get(account.sync_status, account.sync_status|replace('_', ' ')) }}</div>
       <div class="garmin-account-actions">
         <form method="post" action="/settings/garmin/disconnect" onsubmit="return confirm('Garmin wirklich abmelden? Importierte Daten bleiben erhalten.')">
           <button class="button secondary" type="submit" {% if not account.connected_at and not mfa_required %}disabled{% endif %}>Abmelden</button>
@@ -26,7 +37,7 @@
   {% elif mfa_required %}
   <form class="card settings-panel" method="post" action="/settings/garmin/mfa"><h2>Anmeldung bestätigen</h2><p class="muted">Garmin hat einen Bestätigungscode angefordert. Gib den Code aus deiner Authenticator-App, E-Mail oder SMS ein.</p><label>Bestätigungscode<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" autofocus required></label><button class="button" type="submit">Code bestätigen</button><button class="button secondary" type="submit" formaction="/settings/garmin/mfa/cancel" formnovalidate>Andere Zugangsdaten verwenden</button></form>
   {% else %}
-  <form class="card settings-panel" method="post" action="/settings/garmin/connect"><h2>Garmin verbinden</h2><p class="muted">Wenn dein Garmin-Konto MFA verwendet, fragt PacePilot im nächsten Schritt nach dem Bestätigungscode.</p><label>E-Mail<input type="email" name="email" autocomplete="username" required></label><label>Passwort<input type="password" name="password" autocomplete="current-password" required></label><button class="button" type="submit">Sicher anmelden</button></form>
+  <form class="card settings-panel" method="post" action="/settings/garmin/connect"><h2>Garmin verbinden</h2><p class="muted">Melde dich über Garmin Connect an. Wenn dein Konto MFA verwendet, fragt PacePilot anschließend nach dem Bestätigungscode.</p><label>E-Mail<input type="email" name="email" autocomplete="username" required></label><label>Passwort<input type="password" name="password" autocomplete="current-password" required></label><button class="button" type="submit">Sicher anmelden</button><p class="form-hint">Die Integration nutzt die inoffizielle Garmin-Connect-Schnittstelle und kann sich durch Änderungen bei Garmin vorübergehend anders verhalten.</p></form>
   {% endif %}
 </section>
 {% endblock %}

@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -22,6 +22,9 @@ class User(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     display_name: Mapped[str] = mapped_column(String(100), default="Athlet")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    onboarding_notice_acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime)
+    onboarding_completed_at: Mapped[datetime | None] = mapped_column(DateTime)
+    onboarding_completed_version: Mapped[int] = mapped_column(Integer, default=0)
 
     garmin_account: Mapped["GarminAccount | None"] = relationship(
         back_populates="user", cascade="all, delete-orphan"

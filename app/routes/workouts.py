@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.auth import CurrentUser
 from app.database import SessionDep
 from app.models import User, Workout
+from app.onboarding import require_planning_access
 from app.repositories.users import get_or_create_garmin_account
 from app.repositories.workouts import find_workout
 from app.services.garmin.client import (
@@ -37,7 +38,7 @@ from app.services.planning.workout_definition import (
 )
 from app.web import context, templates
 
-router = APIRouter(prefix="/workouts")
+router = APIRouter(prefix="/workouts", dependencies=[Depends(require_planning_access)])
 
 
 def _parse_optional_date(value: str) -> date | None:

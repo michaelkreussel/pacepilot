@@ -13,7 +13,18 @@ from app.config import get_settings
 from app.database import engine
 from app.jobs.scheduler import start_scheduler, stop_scheduler
 from app.migrations import upgrade_database
-from app.routes import activities, auth, coach, dashboard, plans, profile, settings, workouts
+from app.onboarding import OnboardingAccessRequired
+from app.routes import (
+    activities,
+    auth,
+    coach,
+    dashboard,
+    onboarding,
+    plans,
+    profile,
+    settings,
+    workouts,
+)
 
 
 @asynccontextmanager
@@ -51,6 +62,7 @@ app.add_middleware(
 )
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 app.include_router(auth.router)
+app.include_router(onboarding.router)
 app.include_router(dashboard.router)
 app.include_router(profile.router)
 app.include_router(activities.router)
@@ -70,6 +82,15 @@ def authentication_required(request: Request, _: AuthenticationRequired) -> Redi
     response = RedirectResponse(f"/login?{urlencode({'next': target})}", status_code=303)
     if request.headers.get("HX-Request") == "true":
         response.headers["HX-Redirect"] = response.headers["location"]
+    return response
+
+
+@app.exception_handler(OnboardingAccessRequired)
+def onboarding_required(request: Request, exc: OnboardingAccessRequired) -> RedirectResponse:
+    location = f"/onboarding?{urlencode({'blocked': exc.area})}"
+    response = RedirectResponse(location, status_code=303)
+    if request.headers.get("HX-Request") == "true":
+        response.headers["HX-Redirect"] = location
     return response
 
 

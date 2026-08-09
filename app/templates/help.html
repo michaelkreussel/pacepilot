@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}Hilfe & Einführung · PacePilot{% endblock %}
+{% block content %}
+<div class="page-heading"><div><p class="eyebrow">Orientierung</p><h1>Hilfe & Einführung</h1><p>Kurze Erklärungen für die wichtigsten Abläufe.</p></div><a class="button secondary" href="/onboarding?review=true">Einführung erneut ansehen</a></div>
+<section class="help-grid">
+  <article class="card"><p class="eyebrow">Garmin</p><h2>Verbindung & Sync</h2><p>Verbinde dein Konto, bestätige bei Bedarf MFA und starte den Datenimport. Ein fehlgeschlagener Lauf kann fortgesetzt werden; bereits importierte Daten bleiben erhalten.</p><a class="text-link" href="/settings">Einstellungen öffnen →</a></article>
+  <article class="card"><p class="eyebrow">Planung</p><h2>Workout-Editor</h2><p>Baue Einheiten aus Aufwärmen, Belastung, Erholung und Auslaufen. Wiederholungen führen ihre enthaltenen Schritte mehrfach in derselben Reihenfolge aus.</p>{% if onboarding.planning_unlocked %}<a class="text-link" href="/workouts/new">Editor öffnen →</a>{% endif %}</article>
+  <article class="card"><p class="eyebrow">Sicher zu Garmin</p><h2>Freigabeschritte</h2><p>Ein neues Workout bleibt zunächst Entwurf. Erst nach Prüfung und Bestätigung kann es veröffentlicht und anschließend an die Uhr gesendet werden.</p></article>
+  <article class="card"><p class="eyebrow">Experimentell</p><h2>KI-Coach</h2><p>Der Coach arbeitet mit einem begrenzten Snapshot, speichert keinen Chatverlauf und kann keine Garmin-Aktion ausführen. Prüfe Empfehlungen immer selbst.</p></article>
+</section>
+{% endblock %}

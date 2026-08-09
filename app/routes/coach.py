@@ -6,12 +6,13 @@ from fastapi.responses import HTMLResponse
 from app.auth import CurrentUser
 from app.config import get_settings
 from app.database import SessionDep
+from app.onboarding import require_data_access
 from app.services.training_agent.backend import TrainingAgentError, TrainingSnapshot
 from app.services.training_agent.context import build_training_snapshot
 from app.services.training_agent.dependencies import TrainingAgentDep
 from app.web import context, templates
 
-router = APIRouter(prefix="/coach")
+router = APIRouter(prefix="/coach", dependencies=[Depends(require_data_access)])
 
 
 def _training_snapshot(session: SessionDep, user: CurrentUser) -> TrainingSnapshot:

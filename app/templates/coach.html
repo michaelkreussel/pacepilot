@@ -4,8 +4,9 @@
 {% block content %}
 <div class="page-heading">
   <div><p class="eyebrow">Planungsassistenz</p><h1>KI-Coach</h1><p>Vorschläge statt Autopilot.</p></div>
-  <span class="pill">Agno + OpenRouter</span>
+  <span class="pill">Experimentell</span>
 </div>
+<div class="alert warning coach-development-note" role="status"><strong>Diese Funktion befindet sich noch in Entwicklung.</strong><br>Empfehlungen können unvollständig oder unpassend sein. Prüfe jeden Vorschlag, bevor du ihn in dein Training übernimmst.</div>
 <section class="coach-stage">
   <article class="coach-principle"><span>01</span><h2>Das Modell entwirft.</h2><p>Aktuelle Trainings-, Erholungs- und Kalenderdaten fließen als begrenzter Snapshot ein.</p></article>
   <article class="coach-principle"><span>02</span><h2>Die App bleibt Herrin der Daten.</h2><p>Der Agent kann weder Workouts speichern noch Garmin-Aktionen ausführen.</p></article>
@@ -36,7 +37,7 @@
   </article>
   {% elif not configured %}
   <article class="card coach-config">
-    <div><p class="eyebrow">Konfiguration</p><h2>OpenRouter-Zugang fehlt</h2><p>Setze <code>LLM_API_KEY</code> und <code>LLM_MODEL</code>. Garmin-Sync und manuelle Workout-Planung funktionieren unabhängig davon.</p></div>
+    <div><p class="eyebrow">Nicht verfügbar</p><h2>Der Coach ist derzeit nicht erreichbar</h2><p>Garmin-Sync und manuelle Workout-Planung funktionieren unabhängig davon.</p></div>
   </article>
   {% endif %}
 </section>

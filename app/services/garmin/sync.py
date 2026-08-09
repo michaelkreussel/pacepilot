@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.models import DailyHealth, GarminAccount, GarminDevice, SyncEvent, SyncRun
 from app.models.user import utcnow
+from app.onboarding import complete_onboarding
 from app.services.garmin.activity_backfill import sync_activity_history
 from app.services.garmin.client import (
     GarminUnavailableError,
@@ -726,6 +727,7 @@ def sync_garmin(
             run.current_item = run.days_completed
             run.total_items = run.days_total
             run.finished_at = utcnow()
+            complete_onboarding(session, account.user_id)
             session.commit()
             duration_ms = (time.perf_counter() - started) * 1000
             _event(

@@ -2,13 +2,15 @@ import logging
 import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy import select
 
 from app.config import get_settings
 from app.database import SessionLocal
-from app.models import GarminAccount
+from app.models import GarminAccount, SyncRun
+from app.models.user import utcnow
 from app.services.garmin.locks import GarminAccountBusyError, garmin_account_slot
 from app.services.garmin.sync import rate_limit_cooldown_remaining, sync_garmin
 
@@ -36,23 +38,35 @@ def synchronize_account(account_id: int, *, wait_for_slot: bool = False) -> None
 
 
 def synchronize_accounts() -> None:
+    cutoff = utcnow() - timedelta(minutes=get_settings().sync_interval_minutes)
     with SessionLocal() as session:
         account_ids = list(
-            session.scalars(select(GarminAccount.id).where(GarminAccount.connected_at.is_not(None)))
+            session.scalars(
+                select(GarminAccount.id).where(
+                    GarminAccount.connected_at.is_not(None),
+                    GarminAccount.last_sync_at.is_not(None),
+                    GarminAccount.last_sync_at <= cutoff,
+                )
+            )
         )
     for account_id in account_ids:
 
-        def mark_queued(current_account_id: int = account_id) -> None:
+        def mark_queued(current_account_id: int = account_id) -> bool:
             with SessionLocal() as session:
                 account = session.get(GarminAccount, current_account_id)
                 if (
                     account is not None
                     and account.connected_at is not None
+                    and account.last_sync_at is not None
+                    and account.last_sync_at
+                    <= utcnow() - timedelta(minutes=get_settings().sync_interval_minutes)
                     and account.sync_status not in {"queued", "running"}
                     and not rate_limit_cooldown_remaining(session, account)
                 ):
                     account.sync_status = "queued"
                     session.commit()
+                    return True
+                return False
 
         queue_account_sync(account_id, mark_queued)
 
@@ -65,17 +79,20 @@ def _run_queued_account_sync(account_id: int) -> None:
             _queued_account_ids.discard(account_id)
 
 
-def queue_account_sync(account_id: int, mark_queued: Callable[[], None]) -> bool:
+def queue_account_sync(account_id: int, mark_queued: Callable[[], bool]) -> bool:
     global _sync_executor
     with _executor_lock:
         if account_id in _queued_account_ids:
             return False
         _queued_account_ids.add(account_id)
         try:
-            mark_queued()
+            queued = mark_queued()
         except Exception:
             _queued_account_ids.discard(account_id)
             raise
+        if not queued:
+            _queued_account_ids.discard(account_id)
+            return False
         if _sync_executor is None:
             _sync_executor = ThreadPoolExecutor(
                 max_workers=get_settings().garmin_sync_workers,
@@ -89,10 +106,35 @@ def queue_account_sync(account_id: int, mark_queued: Callable[[], None]) -> bool
         return True
 
 
+def repair_interrupted_syncs() -> None:
+    """Make process-local jobs retryable after an application restart."""
+    message = "Der vorherige Sync wurde durch einen Neustart unterbrochen. Bitte erneut starten."
+    with SessionLocal() as session:
+        accounts = list(
+            session.scalars(
+                select(GarminAccount).where(GarminAccount.sync_status.in_({"queued", "running"}))
+            )
+        )
+        running_runs = list(session.scalars(select(SyncRun).where(SyncRun.status == "running")))
+        if not accounts and not running_runs:
+            return
+        for account in accounts:
+            account.sync_status = "error"
+            account.sync_error = message
+        for run in running_runs:
+            run.status = "error"
+            run.stage = "error"
+            run.message = "Synchronisierung unterbrochen"
+            run.error = message
+            run.finished_at = utcnow()
+        session.commit()
+
+
 def start_scheduler() -> None:
     settings = get_settings()
     if not settings.scheduler_enabled or scheduler.running:
         return
+    repair_interrupted_syncs()
     scheduler.add_job(
         synchronize_accounts,
         "interval",

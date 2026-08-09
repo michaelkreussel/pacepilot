@@ -12,6 +12,7 @@ from httpx import HTTPError
 from app.auth import PROVIDERS, SESSION_USER_ID, configured_providers, oauth
 from app.config import Settings, get_settings
 from app.database import SessionDep
+from app.onboarding import CURRENT_ONBOARDING_VERSION
 from app.repositories.users import get_or_create_oauth_user
 from app.web import context, templates
 
@@ -150,6 +151,11 @@ async def oauth_callback(
     redirect_target = _safe_next(request.session.pop("post_login_redirect", "/"))
     request.session.clear()
     request.session[SESSION_USER_ID] = user.id
+    if (
+        user.onboarding_completed_at is None
+        or user.onboarding_completed_version < CURRENT_ONBOARDING_VERSION
+    ):
+        redirect_target = "/onboarding"
     return RedirectResponse(redirect_target, status_code=303)
 
 

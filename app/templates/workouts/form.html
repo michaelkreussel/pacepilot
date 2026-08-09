@@ -1,8 +1,20 @@
 {% extends "base.html" %}
 {% block title %}Workout {{ 'bearbeiten' if workout else 'erstellen' }} · PacePilot{% endblock %}
-{% block head %}<link rel="stylesheet" href="{{ url_for('static', path='/css/workout-builder.css') }}?v=20260809-2"><script src="{{ url_for('static', path='/js/workout-builder.js') }}?v=20260809-2"></script>{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ url_for('static', path='/css/workout-builder.css') }}?v=20260809-3"><script src="{{ url_for('static', path='/js/workout-builder.js') }}?v=20260809-2"></script>{% endblock %}
 {% block content %}
-<div class="page-heading builder-heading"><div><p class="eyebrow">Workout-Editor</p><h1>{{ 'Einheit bearbeiten.' if workout else 'Eine klare Einheit bauen.' }}</h1><p>{{ 'Gespeicherte Änderungen werden direkt mit Garmin und deiner Uhr synchronisiert.' if workout and workout.garmin_workout_id else 'Bausteine ordnen, Wiederholungen bündeln und erst danach zu Garmin senden.' }}</p></div></div>
+<div class="page-heading builder-heading"><div><p class="eyebrow">Workout-Editor</p><h1>{{ 'Einheit bearbeiten.' if workout else 'Eine klare Einheit bauen.' }}</h1><p>{{ 'Gespeicherte Änderungen werden direkt mit Garmin und deiner Uhr synchronisiert.' if workout and workout.garmin_workout_id else 'Bausteine ordnen, Wiederholungen bündeln und erst danach zu Garmin senden.' }}</p></div><button class="help-button" type="button" onclick="document.getElementById('workout-help').showModal()" aria-label="Hilfe zum Workout-Editor öffnen">?</button></div>
+<dialog class="help-dialog" id="workout-help" aria-labelledby="workout-help-title">
+  <form method="dialog"><button class="dialog-close" value="close" aria-label="Hilfe schließen">×</button></form>
+  <p class="eyebrow">Workout-Editor</p><h2 id="workout-help-title">So entsteht deine Einheit.</h2>
+  <div class="help-steps">
+    <section><span>01</span><div><h3>Schritte wählen</h3><p>Aufwärmen, Belastung, Erholung und Auslaufen bilden den zeitlichen Ablauf. Lege je Schritt Dauer oder Distanz und optional ein Ziel wie Pace, Herzfrequenz oder Garmin-Zone fest.</p></div></section>
+    <section><span>02</span><div><h3>Wiederholungen bauen</h3><p>Ein Wiederholungsblock führt alle enthaltenen Schritte in derselben Reihenfolge mehrfach aus. Für 6 × 400 m legst du Belastung und Erholung in einen Block mit sechs Wiederholungen.</p></div></section>
+    <section><span>03</span><div><h3>Ordnen und prüfen</h3><p>Ziehe Bausteine am Griff oder nutze auf Mobilgeräten die Pfeile. Du kannst Schritte duplizieren, entfernen sowie in Wiederholungen hinein- und herausbewegen.</p></div></section>
+    <section><span>04</span><div><h3>Sicher speichern</h3><p>Neue Einheiten werden als Entwurf gespeichert. Erst nach deiner Bestätigung können sie zu Garmin geladen und an die Uhr gesendet werden.</p></div></section>
+  </div>
+  <div class="help-example"><strong>Beispiel</strong><span>10 min Aufwärmen → 6 × (400 m Belastung + 200 m Erholung) → 10 min Auslaufen</span></div>
+  <form method="dialog"><button class="button" value="close">Verstanden</button></form>
+</dialog>
 {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
 <form method="post" action="{{ '/workouts/' ~ workout.id if workout else '/workouts' }}" class="workout-builder" x-data='workoutBuilder({{ initial_definition|tojson }}, {{ form_data.sport|tojson }})'>
   <input type="hidden" name="definition" :value="serializedDefinition()">

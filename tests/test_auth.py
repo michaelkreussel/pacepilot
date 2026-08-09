@@ -54,7 +54,7 @@ def test_google_callback_creates_session_and_reuses_identity(
     )
 
     assert response.status_code == 303
-    assert response.headers["location"] == "/"
+    assert response.headers["location"] == "/onboarding"
     dashboard = unauthenticated_client.get("/")
     assert dashboard.status_code == 200
     assert "Ada Athlete" in dashboard.text
