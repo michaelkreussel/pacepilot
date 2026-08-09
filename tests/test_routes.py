@@ -155,6 +155,26 @@ def test_sync_status_partial_renders(client: TestClient) -> None:
     assert 'id="sync-progress"' in response.text
 
 
+def test_last_sync_is_marked_as_utc_for_browser_localization(
+    client: TestClient, session_factory: sessionmaker[Session]
+) -> None:
+    client.get("/")
+    with session_factory() as session:
+        account = session.scalar(select(GarminAccount))
+        assert account is not None
+        account.connected_at = datetime(2026, 8, 9, 10, 0)
+        account.last_sync_at = datetime(2026, 8, 9, 12, 34)
+        session.commit()
+
+    dashboard = client.get("/")
+    settings = client.get("/settings")
+
+    expected = 'data-local-datetime datetime="2026-08-09T12:34:00Z"'
+    assert expected in dashboard.text
+    assert expected in settings.text
+    assert "/static/js/local-time.js" in dashboard.text
+
+
 def test_sync_status_shows_authoritative_day_and_metric_progress(
     client: TestClient, session_factory: sessionmaker[Session]
 ) -> None:

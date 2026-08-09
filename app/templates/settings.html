@@ -33,7 +33,7 @@
     </div>
   </article>
   {% if account.connected_at %}
-  <article class="card settings-panel"><h2>Verbunden</h2><div class="metric-list"><div><span>Konto</span><strong>{{ account.email or 'Token-Anmeldung' }}</strong></div><div><span>Verbunden seit</span><strong>{{ account.connected_at|date }}</strong></div><div><span>Letzter Sync</span><strong>{{ account.last_sync_at|datetime }}</strong></div></div>{% include "partials/sync_status.html" %}</article>
+  <article class="card settings-panel"><h2>Verbunden</h2><div class="metric-list"><div><span>Konto</span><strong>{{ account.email or 'Token-Anmeldung' }}</strong></div><div><span>Verbunden seit</span><strong>{{ account.connected_at|date }}</strong></div><div><span>Letzter Sync</span><strong>{% if account.last_sync_at %}<time data-local-datetime datetime="{{ account.last_sync_at.isoformat() }}Z">{{ account.last_sync_at|datetime }}</time>{% else %}–{% endif %}</strong></div></div>{% include "partials/sync_status.html" %}</article>
   {% elif mfa_required %}
   <form class="card settings-panel" method="post" action="/settings/garmin/mfa"><h2>Anmeldung bestätigen</h2><p class="muted">Garmin hat einen Bestätigungscode angefordert. Gib den Code aus deiner Authenticator-App, E-Mail oder SMS ein.</p><label>Bestätigungscode<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" autofocus required></label><button class="button" type="submit">Code bestätigen</button><button class="button secondary" type="submit" formaction="/settings/garmin/mfa/cancel" formnovalidate>Andere Zugangsdaten verwenden</button></form>
   {% else %}

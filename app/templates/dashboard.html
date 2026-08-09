@@ -10,7 +10,7 @@
   </div>
   <div class="sync-state {{ account.sync_status }}">
     <span class="status-dot"></span>
-    {% if account.last_sync_at %}Sync {{ account.last_sync_at|datetime }}{% else %}Noch nicht synchronisiert{% endif %}
+    {% if account.last_sync_at %}Sync <time data-local-datetime datetime="{{ account.last_sync_at.isoformat() }}Z">{{ account.last_sync_at|datetime }}</time>{% else %}Noch nicht synchronisiert{% endif %}
   </div>
 </div>
 
