@@ -1,6 +1,5 @@
 {% extends "base.html" %}
 {% block title %}{{ workout.name }} · PacePilot{% endblock %}
-{% block head %}<link rel="stylesheet" href="{{ url_for('static', path='/css/workout-definition.css') }}?v=20260809-1">{% endblock %}
 {% macro render_blocks(blocks) %}
   <ol class="definition-timeline">
   {% for block in blocks %}

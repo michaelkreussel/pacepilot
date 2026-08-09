@@ -16,7 +16,7 @@
 }
 
 .activity-section-heading > span {
-  color: var(--muted);
+  color: var(--muted-foreground);
   font-size: 12px;
   font-weight: 600;
 }
@@ -53,7 +53,7 @@
 }
 
 .details-toggle {
-  color: var(--orange-dark);
+  color: var(--secondary-hover);
   font-size: 12px;
   font-weight: 800;
 }
@@ -67,13 +67,13 @@
 }
 
 .detail-metrics-secondary {
-  border-top: 1px solid var(--line);
+  border-top: 1px solid var(--border);
   margin: 0;
   padding: 22px 27px 27px;
 }
 
 #activity-map {
-  background: #dce7df;
+  background: var(--surface-muted);
   border-radius: 14px;
   height: clamp(330px, 44vw, 540px);
   overflow: hidden;
@@ -105,7 +105,7 @@
 
 .chart-kicker {
   align-items: center;
-  color: var(--muted);
+  color: var(--muted-foreground);
   display: flex;
   font-size: 11px;
   font-weight: 800;
@@ -122,9 +122,9 @@
   width: 8px;
 }
 
-.chart-kicker.heart-rate { color: #e24b3b; }
-.chart-kicker.pace, .chart-kicker.speed { color: #1d5a48; }
-.chart-kicker.cadence { color: #7a5ad8; }
+.chart-kicker.heart-rate { color: var(--chart-heart-rate); }
+.chart-kicker.pace, .chart-kicker.speed { color: var(--chart-pace); }
+.chart-kicker.cadence { color: var(--chart-cadence); }
 
 .chart-frame {
   height: 250px;
@@ -141,7 +141,7 @@
 }
 
 .activity-data-empty p:last-child {
-  color: var(--muted);
+  color: var(--muted-foreground);
   margin-bottom: 0;
 }
 

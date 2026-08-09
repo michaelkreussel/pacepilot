@@ -1,6 +1,5 @@
 {% extends "base.html" %}
 {% block title %}KI-Coach · PacePilot{% endblock %}
-{% block head %}<link rel="stylesheet" href="{{ url_for('static', path='/css/coach.css') }}?v=20260807-1">{% endblock %}
 {% block content %}
 <div class="page-heading">
   <div><p class="eyebrow">Planungsassistenz</p><h1>KI-Coach</h1><p>Vorschläge statt Autopilot.</p></div>
@@ -17,7 +16,7 @@
   <form class="card coach-form" method="post" action="/coach">
     <div class="coach-form-heading">
       <div><p class="eyebrow">Neue Anfrage</p><h2>Was möchtest du planen?</h2></div>
-      {% if configured %}<span class="status-dot success">{{ model }}</span>{% else %}<span class="status-dot">Nicht konfiguriert</span>{% endif %}
+      {% if configured %}<span class="status-badge success">{{ model }}</span>{% else %}<span class="status-badge">Nicht konfiguriert</span>{% endif %}
     </div>
     <label>Frage
       <textarea name="message" rows="5" maxlength="4000" placeholder="Zum Beispiel: Wie sollte ich meine Laufwoche nach den letzten Einheiten strukturieren?" required>{{ message }}</textarea>

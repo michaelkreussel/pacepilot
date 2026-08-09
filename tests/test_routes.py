@@ -678,7 +678,8 @@ def test_edit_draft_workout(client: TestClient, session_factory: sessionmaker[Se
     assert "startPaletteDrag('interval'" in form.text
     assert "/static/icons/workout.svg#pencil" in form.text
     assert "setDropTarget(null, index)" in form.text
-    assert "/static/css/app.css?v=20260807-4" in form.text
+    assert "/static/css/tailwind.css?v=20260809-1" in form.text
+    assert "/static/js/theme.js?v=20260809-1" in form.text
 
     updated = client.post(
         location,

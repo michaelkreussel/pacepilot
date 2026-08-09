@@ -1,0 +1,770 @@
+@layer legacy, theme, base, components, utilities;
+
+@import "tailwindcss/theme.css" layer(theme);
+@import "./app.css" layer(legacy);
+@import "./activity-detail.css" layer(legacy);
+@import "./coach.css" layer(legacy);
+@import "./onboarding.css" layer(legacy);
+@import "./profile.css" layer(legacy);
+@import "./profile-accessibility.css" layer(legacy);
+@import "./sync.css" layer(legacy);
+@import "./workout-builder.css" layer(legacy);
+@import "./workout-definition.css" layer(legacy);
+@import "tailwindcss/utilities.css" layer(utilities);
+
+@source "../../templates";
+@source inline("{bg,text,border}-{brand-{50,100,200,300,400,500,600,700,800,900,950},background,foreground,surface,surface-muted,surface-elevated,border,input,muted,muted-foreground,primary,primary-hover,primary-subtle,primary-foreground,secondary,secondary-hover,secondary-foreground,success,success-subtle,success-foreground,warning,warning-subtle,warning-foreground,danger,danger-subtle,danger-foreground,info,info-subtle,info-foreground}");
+@source inline("{hover:,focus-visible:}{bg,text,border}-{primary,primary-hover,secondary,secondary-hover,danger,ring}");
+@source inline("ring-ring");
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --color-brand-50: #effaf6;
+  --color-brand-100: #d9f3e9;
+  --color-brand-200: #b8e7d7;
+  --color-brand-300: #86d4bd;
+  --color-brand-400: #54bda0;
+  --color-brand-500: #2f9979;
+  --color-brand-600: #247c63;
+  --color-brand-700: #206451;
+  --color-brand-800: #1e5042;
+  --color-brand-900: #1a4237;
+  --color-brand-950: #0d2620;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-surface: var(--surface);
+  --color-surface-muted: var(--surface-muted);
+  --color-surface-elevated: var(--surface-elevated);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-primary: var(--primary);
+  --color-primary-hover: var(--primary-hover);
+  --color-primary-subtle: var(--primary-subtle);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-hover: var(--secondary-hover);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-ring: var(--ring);
+  --color-success: var(--success);
+  --color-success-subtle: var(--success-subtle);
+  --color-success-foreground: var(--success-foreground);
+  --color-warning: var(--warning);
+  --color-warning-subtle: var(--warning-subtle);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-danger: var(--danger);
+  --color-danger-subtle: var(--danger-subtle);
+  --color-danger-foreground: var(--danger-foreground);
+  --color-info: var(--info);
+  --color-info-subtle: var(--info-subtle);
+  --color-info-foreground: var(--info-foreground);
+}
+
+:root {
+  color-scheme: light;
+
+  --background: #f7faf9;
+  --foreground: #14201c;
+  --surface: #ffffff;
+  --surface-muted: #f0f5f3;
+  --surface-elevated: #ffffff;
+  --border: #dce5e1;
+  --input: #d2ddd8;
+  --muted: #eef3f1;
+  --muted-foreground: #64716c;
+  --primary: #247c63;
+  --primary-hover: #206451;
+  --primary-subtle: #d9f3e9;
+  --primary-foreground: #ffffff;
+  --secondary: #eef3f1;
+  --secondary-hover: #e1e9e5;
+  --secondary-foreground: #25332e;
+  --ring: #2f9979;
+  --success: #15803d;
+  --success-subtle: #dcfce7;
+  --success-foreground: #ffffff;
+  --warning: #b45309;
+  --warning-subtle: #fef3c7;
+  --warning-foreground: #ffffff;
+  --danger: #dc2626;
+  --danger-subtle: #fee2e2;
+  --danger-foreground: #ffffff;
+  --info: #2563eb;
+  --info-subtle: #dbeafe;
+  --info-foreground: #ffffff;
+  --success-emphasis: #166534;
+  --warning-emphasis: #92400e;
+  --danger-emphasis: #b91c1c;
+  --info-emphasis: #1d4ed8;
+
+  --shadow-color: rgb(20 32 28 / 8%);
+  --shadow-elevated: 0 18px 50px var(--shadow-color);
+  --overlay: rgb(5 15 11 / 45%);
+  --sidebar-background: #0d2620;
+  --sidebar-foreground: #edf5f1;
+  --sidebar-muted: #9baca5;
+  --sidebar-hover: rgb(255 255 255 / 9%);
+  --chart-grid: rgb(20 32 28 / 8%);
+  --chart-heart-rate: #e24b3b;
+  --chart-heart-rate-fill: rgb(226 75 59 / 10%);
+  --chart-hrv: #2f9979;
+  --chart-hrv-fill: rgb(47 153 121 / 10%);
+  --chart-pace: #247c63;
+  --chart-pace-fill: rgb(36 124 99 / 10%);
+  --chart-cadence: #7a5ad8;
+  --chart-cadence-fill: rgb(122 90 216 / 9%);
+  --chart-neutral: #64716c;
+  --chart-accent: #2f9979;
+  --chart-violet: #6757a8;
+  --chart-highlight: #6f8500;
+  --map-route: #2f9979;
+  --map-marker-border: #ffffff;
+  --map-start: #15803d;
+  --map-finish: #dc2626;
+  --workout-step-neutral: #9ca8a2;
+  --workout-step-warmup: #d99a22;
+  --workout-step-interval: #2f9979;
+  --workout-step-recovery: #659286;
+  --workout-step-cooldown: #466b88;
+  --workout-repeat-border: #b8c9c1;
+  --workout-repeat-surface: #f0f7f3;
+  --sport-running-surface: #dbeee6;
+  --sport-running-foreground: #206451;
+  --sport-cycling-surface: #e4e9f7;
+  --sport-cycling-foreground: #536dba;
+
+  /* Compatibility aliases while the legacy layout CSS is decomposed. */
+  --ink: var(--foreground);
+  --paper: var(--background);
+  --card: var(--surface);
+  --line: var(--border);
+  --orange: var(--primary);
+  --orange-dark: var(--primary);
+  --green: var(--primary);
+  --lime: #54bda0;
+  --shadow: var(--shadow-elevated);
+}
+
+.dark {
+  color-scheme: dark;
+
+  --background: #0c1210;
+  --foreground: #edf5f1;
+  --surface: #121a17;
+  --surface-muted: #18221e;
+  --surface-elevated: #1b2622;
+  --border: #293832;
+  --input: #34453e;
+  --muted: #1b2622;
+  --muted-foreground: #9baca5;
+  --primary: #54bda0;
+  --primary-hover: #86d4bd;
+  --primary-subtle: #183d32;
+  --primary-foreground: #0d2620;
+  --secondary: #1b2622;
+  --secondary-hover: #25332e;
+  --secondary-foreground: #e3ece8;
+  --ring: #54bda0;
+  --success: #4ade80;
+  --success-subtle: #153c25;
+  --success-foreground: #092113;
+  --warning: #fbbf24;
+  --warning-subtle: #422d0c;
+  --warning-foreground: #221704;
+  --danger: #f87171;
+  --danger-subtle: #451b1b;
+  --danger-foreground: #260808;
+  --info: #60a5fa;
+  --info-subtle: #172d50;
+  --info-foreground: #09182c;
+  --success-emphasis: var(--success);
+  --warning-emphasis: var(--warning);
+  --danger-emphasis: var(--danger);
+  --info-emphasis: var(--info);
+
+  --shadow-color: rgb(0 0 0 / 30%);
+  --overlay: rgb(0 0 0 / 65%);
+  --sidebar-background: #121a17;
+  --sidebar-foreground: #edf5f1;
+  --sidebar-muted: #9baca5;
+  --sidebar-hover: rgb(84 189 160 / 12%);
+  --chart-grid: rgb(237 245 241 / 10%);
+  --chart-heart-rate: #f87171;
+  --chart-heart-rate-fill: rgb(248 113 113 / 12%);
+  --chart-hrv: #54bda0;
+  --chart-hrv-fill: rgb(84 189 160 / 12%);
+  --chart-pace: #54bda0;
+  --chart-pace-fill: rgb(84 189 160 / 12%);
+  --chart-cadence: #a78bfa;
+  --chart-cadence-fill: rgb(167 139 250 / 12%);
+  --chart-neutral: #9baca5;
+  --chart-accent: #54bda0;
+  --chart-violet: #a78bfa;
+  --chart-highlight: #d8f36a;
+  --map-marker-border: #edf5f1;
+  --workout-step-neutral: #9baca5;
+  --workout-step-warmup: #fbbf24;
+  --workout-step-interval: #54bda0;
+  --workout-step-recovery: #86a99e;
+  --workout-step-cooldown: #60a5fa;
+  --workout-repeat-border: #34453e;
+  --workout-repeat-surface: #183d32;
+  --sport-running-surface: #183d32;
+  --sport-running-foreground: #86d4bd;
+  --sport-cycling-surface: #172d50;
+  --sport-cycling-foreground: #93c5fd;
+  --lime: #54bda0;
+}
+
+@layer base {
+  html,
+  body {
+    @apply bg-background text-foreground;
+  }
+
+  body,
+  .card,
+  .button,
+  input,
+  select,
+  textarea,
+  .nav-item {
+    transition-property: color, background-color, border-color, box-shadow;
+    transition-duration: 160ms;
+  }
+
+  :where(a, button, input, select, textarea, summary):focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background: var(--primary-subtle);
+    color: var(--foreground);
+  }
+}
+
+@layer components {
+  .card,
+  .workout-step,
+  .login-provider,
+  .month-day,
+  .flow-block,
+  .definition-step {
+    @apply border-border bg-surface text-foreground;
+  }
+
+  .card,
+  .help-dialog {
+    box-shadow: var(--shadow-elevated);
+  }
+
+  .muted,
+  .page-heading p,
+  .form-hint,
+  .login-copy,
+  .login-note {
+    @apply text-muted-foreground;
+  }
+
+  .eyebrow,
+  .text-link,
+  .text-button,
+  .details-toggle,
+  .chart-data-link {
+    @apply text-primary;
+  }
+
+  .text-link:hover,
+  .text-button:hover,
+  .chart-data-link:hover {
+    @apply text-primary-hover;
+  }
+
+  .button {
+    @apply border border-transparent bg-primary text-primary-foreground;
+  }
+
+  .button:hover {
+    @apply bg-primary-hover;
+    transform: translateY(-1px);
+  }
+
+  .button:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+    transform: none;
+  }
+
+  .button.secondary,
+  .button--secondary {
+    @apply border-border bg-secondary text-secondary-foreground;
+  }
+
+  .button.secondary:hover,
+  .button--secondary:hover {
+    @apply bg-secondary-hover;
+  }
+
+  .button.ghost,
+  .button--ghost {
+    @apply bg-transparent text-foreground;
+  }
+
+  .button.ghost:hover,
+  .button--ghost:hover {
+    @apply bg-secondary;
+  }
+
+  .button.outline,
+  .button--outline {
+    @apply border-input bg-surface text-foreground;
+  }
+
+  .button.outline:hover,
+  .button--outline:hover {
+    @apply bg-secondary;
+  }
+
+  .button.danger,
+  .button--danger {
+    @apply border-transparent bg-danger text-danger-foreground;
+  }
+
+  .button.danger:hover,
+  .button--danger:hover {
+    background: color-mix(in srgb, var(--danger) 86%, black);
+  }
+
+  .button-light {
+    @apply bg-primary text-primary-foreground;
+  }
+
+  .button-light:hover {
+    @apply bg-primary-hover;
+  }
+
+  .alert {
+    @apply border border-info/25 bg-info-subtle;
+    color: var(--info-emphasis);
+  }
+
+  .alert.success,
+  .alert.success-note,
+  .alert--success {
+    @apply border-success/25 bg-success-subtle;
+    color: var(--success-emphasis);
+  }
+
+  .alert.warning,
+  .alert--warning {
+    @apply border-warning/25 bg-warning-subtle;
+    color: var(--warning-emphasis);
+  }
+
+  .alert.error,
+  .alert.danger,
+  .alert--danger {
+    @apply border-danger/25 bg-danger-subtle;
+    color: var(--danger-emphasis);
+  }
+
+  .alert.info,
+  .alert--info {
+    @apply border-info/25 bg-info-subtle;
+    color: var(--info-emphasis);
+  }
+
+  .alert.compact {
+    padding: 10px 12px;
+  }
+
+  .badge,
+  .pill,
+  .status-badge {
+    @apply bg-muted text-muted-foreground;
+  }
+
+  .badge.success,
+  .status-badge.success {
+    @apply bg-success-subtle;
+    color: var(--success-emphasis);
+  }
+
+  .badge.warning {
+    @apply bg-warning-subtle;
+    color: var(--warning-emphasis);
+  }
+
+  .badge.danger {
+    @apply bg-danger-subtle;
+    color: var(--danger-emphasis);
+  }
+
+  .badge.info {
+    @apply bg-info-subtle;
+    color: var(--info-emphasis);
+  }
+
+  .nav-badge {
+    @apply bg-info-subtle;
+    color: var(--info-emphasis);
+  }
+
+  input,
+  select,
+  textarea,
+  .coach-form textarea {
+    @apply border-input bg-surface text-foreground;
+  }
+
+  input::placeholder,
+  textarea::placeholder {
+    @apply text-muted-foreground;
+  }
+
+  input:focus,
+  select:focus,
+  textarea:focus,
+  .coach-form textarea:focus {
+    border-color: var(--ring);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 18%, transparent);
+    outline: none;
+  }
+
+  .sidebar,
+  .mobile-header {
+    background: var(--sidebar-background);
+    color: var(--sidebar-foreground);
+  }
+
+  .sidebar {
+    border-right: 1px solid color-mix(in srgb, var(--sidebar-foreground) 10%, transparent);
+  }
+
+  .nav-item,
+  .signed-in-user button {
+    color: var(--sidebar-muted);
+  }
+
+  .nav-item:hover,
+  .nav-item.active,
+  .signed-in-user button:hover {
+    background: var(--sidebar-hover);
+    color: var(--sidebar-foreground);
+  }
+
+  .nav-item.active {
+    box-shadow: inset 3px 0 var(--primary);
+  }
+
+  .brand-mark {
+    @apply bg-primary text-primary-foreground;
+  }
+
+  .early-access-badge {
+    color: var(--primary);
+  }
+
+  .theme-toggle {
+    width: 100%;
+    border: 0;
+    background: transparent;
+    cursor: pointer;
+    text-align: left;
+  }
+
+  .next-workout-card,
+  .readiness-card {
+    background: var(--primary-subtle);
+    color: var(--foreground);
+    border: 1px solid color-mix(in srgb, var(--primary) 20%, var(--border));
+  }
+
+  .next-workout-card > p,
+  .workout-facts,
+  .readiness-copy > p:not(.eyebrow),
+  .readiness-meta span,
+  .readiness-components span,
+  .readiness-components small {
+    color: var(--muted-foreground);
+  }
+
+  .eyebrow.light {
+    color: var(--primary) !important;
+  }
+
+  .pill.light {
+    @apply bg-surface text-foreground;
+  }
+
+  .progress-track,
+  .sync-progress-track {
+    @apply bg-secondary;
+  }
+
+  .progress-track span,
+  .sync-progress-track span {
+    @apply bg-primary;
+  }
+
+  .sync-spinner {
+    border-color: var(--border);
+    border-top-color: var(--primary);
+  }
+
+  .sync-state.ok .status-dot,
+  .connection-status.ok .status-dot,
+  .connection-status.connected .status-dot {
+    @apply bg-success;
+  }
+
+  .connection-status.error .status-dot {
+    @apply bg-danger;
+  }
+
+  .connection-status.rate_limited .status-dot,
+  .connection-status.mfa_required .status-dot {
+    @apply bg-warning;
+  }
+
+  .connection-status.queued .status-dot,
+  .connection-status.running .status-dot {
+    @apply bg-info;
+  }
+
+  .connection-status.ok,
+  .connection-status.connected {
+    @apply bg-success-subtle;
+    color: var(--success-emphasis);
+  }
+
+  .connection-status.error {
+    @apply bg-danger-subtle;
+    color: var(--danger-emphasis);
+  }
+
+  .connection-status.rate_limited,
+  .connection-status.mfa_required {
+    @apply bg-warning-subtle;
+    color: var(--warning-emphasis);
+  }
+
+  .connection-status.queued,
+  .connection-status.running {
+    @apply bg-info-subtle;
+    color: var(--info-emphasis);
+  }
+
+  .load-card,
+  .settings-panel,
+  .filter-card,
+  .coach-form,
+  .coach-config,
+  .sync-current,
+  .sync-metric,
+  .block-palette,
+  .block-editor,
+  .month-week-number,
+  .month-day.outside-month,
+  .sport-volume,
+  code {
+    @apply border-border bg-surface-muted text-foreground;
+  }
+
+  .table-wrap,
+  table,
+  th,
+  td,
+  .metric-list > div,
+  .detail-metrics > div,
+  .release-steps > div,
+  .profile-chart-card,
+  .recent-workout {
+    border-color: var(--border);
+  }
+
+  th {
+    @apply bg-surface-muted text-muted-foreground;
+  }
+
+  .plan-view-switcher,
+  .profile-periods {
+    @apply border-border bg-surface-muted;
+  }
+
+  .plan-view-switcher a.active,
+  .profile-periods a.active {
+    @apply bg-primary text-primary-foreground;
+  }
+
+  .profile-window {
+    border-left-color: var(--primary);
+  }
+
+  .readiness-card.high {
+    background: var(--success-subtle);
+    border-color: color-mix(in srgb, var(--success) 28%, var(--border));
+  }
+
+  .readiness-card.low {
+    background: var(--danger-subtle);
+    border-color: color-mix(in srgb, var(--danger) 28%, var(--border));
+  }
+
+  .readiness-score::before,
+  .readiness-card.high .readiness-score::before,
+  .readiness-card.low .readiness-score::before {
+    @apply bg-surface;
+  }
+
+  .readiness-score strong {
+    @apply text-foreground;
+  }
+
+  .readiness-meta span {
+    border-color: var(--border);
+  }
+
+  .component-track {
+    @apply bg-muted;
+  }
+
+  .component-track span {
+    @apply bg-primary;
+  }
+
+  .profile-metric,
+  .training-stat-strip > div,
+  .sport-volume-list > div,
+  .recent-workout {
+    @apply border-border bg-surface text-foreground;
+  }
+
+  .profile-metric > span,
+  .profile-metric > small,
+  .profile-metric > p,
+  .chart-heading > span,
+  .section-note,
+  .sport-volume-list span,
+  .recent-workout div > span,
+  .recent-workout p {
+    @apply text-muted-foreground;
+  }
+
+  .profile-metric.positive {
+    border-top-color: var(--success);
+  }
+
+  .profile-metric.positive strong,
+  .coverage-pill.complete {
+    @apply text-success;
+  }
+
+  .coverage-pill.complete {
+    @apply bg-success-subtle;
+  }
+
+  .profile-metric.caution {
+    border-top-color: var(--warning);
+  }
+
+  .profile-metric.caution strong,
+  .coverage-pill.partial,
+  .recent-workout b {
+    @apply text-warning;
+  }
+
+  .coverage-pill.partial,
+  .recent-workout b {
+    @apply bg-warning-subtle;
+  }
+
+  .coverage-pill:not(.complete, .partial) {
+    @apply bg-muted text-muted-foreground;
+  }
+
+  .month-corner,
+  .month-weekday {
+    @apply bg-primary text-primary-foreground;
+  }
+
+  .month-day.today {
+    box-shadow: inset 0 0 0 2px var(--primary);
+  }
+
+  .month-day.today .month-day-heading strong {
+    @apply bg-primary text-primary-foreground;
+  }
+
+  .calendar-workout {
+    background: var(--sport-running-surface);
+    color: var(--sport-running-foreground);
+  }
+
+  .calendar-workout.cycling {
+    background: var(--sport-cycling-surface);
+    color: var(--sport-cycling-foreground);
+  }
+
+  .login-body,
+  .login-intro {
+    background-color: var(--sidebar-background);
+  }
+
+  .login-intro {
+    color: var(--sidebar-foreground);
+    background-image:
+      radial-gradient(circle at 20% 20%, color-mix(in srgb, var(--primary) 18%, transparent), transparent 32%),
+      radial-gradient(circle at 80% 70%, color-mix(in srgb, var(--info) 12%, transparent), transparent 34%);
+  }
+
+  .login-intro > p:last-child {
+    color: var(--sidebar-muted);
+  }
+
+  .login-card {
+    @apply bg-background;
+  }
+
+  .login-theme-toggle {
+    align-self: flex-end;
+    margin-bottom: 24px;
+    padding: 8px 11px;
+    font-size: 12px;
+  }
+
+  .login-provider:hover {
+    @apply border-input bg-surface-elevated;
+  }
+
+  .provider-mark {
+    @apply bg-secondary text-secondary-foreground;
+  }
+
+  .step-remove {
+    @apply text-danger;
+  }
+
+  .remove-button,
+  .empty-inline,
+  .empty-state,
+  .coach-placeholder {
+    @apply bg-surface-muted text-muted-foreground;
+  }
+
+  .scrim,
+  .help-dialog::backdrop {
+    background: var(--overlay);
+  }
+}
+
+/* Leaflet is unlayered vendor CSS, so this theme-aware fallback must also be unlayered. */
+#activity-map {
+  background: var(--surface-muted);
+}

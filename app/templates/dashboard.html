@@ -77,14 +77,23 @@
 {% if health %}
 <script>
 document.addEventListener('DOMContentLoaded', () => {
+  const cssValue = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  Chart.defaults.color = cssValue('--muted-foreground');
   const values = {{ health|map(attribute='hrv_average')|list|tojson }};
-  new Chart(document.getElementById('healthChart'), {
+  const chart = new Chart(document.getElementById('healthChart'), {
     type: 'line',
     data: {
       labels: {{ health|map(attribute='day')|map('date')|list|tojson }},
-      datasets: [{ label: 'HRV', data: values, borderColor: '#ff5c35', backgroundColor: 'rgba(255,92,53,.09)', tension: .35, fill: true, spanGaps: true }]
+      datasets: [{ label: 'HRV', data: values, borderColor: cssValue('--chart-hrv'), backgroundColor: cssValue('--chart-hrv-fill'), tension: .35, fill: true, spanGaps: true }]
     },
-    options: { plugins: { legend: { display: false } }, scales: { x: { grid: { display: false } }, y: { border: { display: false } } } }
+    options: { plugins: { legend: { display: false } }, scales: { x: { grid: { display: false } }, y: { border: { display: false }, grid: { color: cssValue('--chart-grid') } } } }
+  });
+  document.addEventListener('pacepilot:themechange', () => {
+    Chart.defaults.color = cssValue('--muted-foreground');
+    chart.data.datasets[0].borderColor = cssValue('--chart-hrv');
+    chart.data.datasets[0].backgroundColor = cssValue('--chart-hrv-fill');
+    chart.options.scales.y.grid.color = cssValue('--chart-grid');
+    chart.update('none');
   });
 });
 </script>

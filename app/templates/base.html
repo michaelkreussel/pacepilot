@@ -7,13 +7,12 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="{{ url_for('static', path='/css/app.css') }}?v=20260807-4">
-  <link rel="stylesheet" href="{{ url_for('static', path='/css/onboarding.css') }}?v=20260809-1">
-  <link rel="stylesheet" href="{{ url_for('static', path='/css/sync.css') }}?v=20260808-5">
+  <script src="{{ url_for('static', path='/js/theme.js') }}?v=20260809-1"></script>
   <script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
   <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js" defer></script>
   <script src="{{ url_for('static', path='/js/local-time.js') }}?v=20260809-1" defer></script>
   {% block head %}{% endblock %}
+  <link rel="stylesheet" href="{{ url_for('static', path='/css/tailwind.css') }}?v=20260809-1">
 </head>
 <body>
   <div class="app-shell" x-data="{ menuOpen: false }">
@@ -31,6 +30,7 @@
         <a class="nav-item{{ ' active' if active_page == 'coach' else '' }}{{ ' locked' if not onboarding.data_unlocked else '' }}" href="{{ '/coach' if onboarding.data_unlocked else '/onboarding?blocked=data' }}">KI-Coach <span class="nav-badge">Beta</span></a>
       </nav>
       <div class="sidebar-footer">
+        <button class="nav-item theme-toggle" type="button" data-theme-toggle aria-pressed="false"><span data-theme-label>Design wechseln</span></button>
         <a class="nav-item{{ ' active' if active_page == 'help' else '' }}" href="/help">Hilfe & Einführung</a>
         <a class="nav-item{{ ' active' if active_page == 'settings' else '' }}" href="/settings">Einstellungen</a>
         <div class="signed-in-user">

@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Workout {{ 'bearbeiten' if workout else 'erstellen' }} · PacePilot{% endblock %}
-{% block head %}<link rel="stylesheet" href="{{ url_for('static', path='/css/workout-builder.css') }}?v=20260809-3"><script src="{{ url_for('static', path='/js/workout-builder.js') }}?v=20260809-2"></script>{% endblock %}
+{% block head %}<script src="{{ url_for('static', path='/js/workout-builder.js') }}?v=20260809-2"></script>{% endblock %}
 {% block content %}
 <div class="page-heading builder-heading"><div><p class="eyebrow">Workout-Editor</p><h1>{{ 'Einheit bearbeiten.' if workout else 'Eine klare Einheit bauen.' }}</h1><p>{{ 'Gespeicherte Änderungen werden direkt mit Garmin und deiner Uhr synchronisiert.' if workout and workout.garmin_workout_id else 'Bausteine ordnen, Wiederholungen bündeln und erst danach zu Garmin senden.' }}</p></div><button class="help-button" type="button" onclick="document.getElementById('workout-help').showModal()" aria-label="Hilfe zum Workout-Editor öffnen">?</button></div>
 <dialog class="help-dialog" id="workout-help" aria-labelledby="workout-help-title">
