@@ -8,6 +8,7 @@ from app.database import Base
 
 if TYPE_CHECKING:
     from app.models.activity import Activity
+    from app.models.coach import CoachConversation
     from app.models.health import DailyHealth
     from app.models.workout import Workout
 
@@ -36,6 +37,9 @@ class User(Base):
         back_populates="user", cascade="all, delete-orphan", passive_deletes=True
     )
     workouts: Mapped[list["Workout"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan", passive_deletes=True
+    )
+    coach_conversations: Mapped[list["CoachConversation"]] = relationship(
         back_populates="user", cascade="all, delete-orphan", passive_deletes=True
     )
     oauth_identities: Mapped[list["OAuthIdentity"]] = relationship(

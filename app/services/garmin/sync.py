@@ -32,7 +32,7 @@ from app.services.garmin.locks import (
     garmin_account_slot,
 )
 
-logger = logging.getLogger("uvicorn.error")
+logger = logging.getLogger(__name__)
 
 METRIC_LABELS = {
     "daily_summary": "Tagesübersicht",

@@ -22,7 +22,7 @@
 - Production schema creation belongs to Alembic. `Base.metadata.create_all()` is used only by the in-memory test fixture.
 - Garmin tokens live under `GARMIN_TOKEN_DIR`, not in SQLite. Activity source payloads are gzip JSON files under `DATA_DIR/raw/activities/<year>/`; preserve the database-to-file relationship when changing sync behavior.
 - Garmin Connect is an unofficial external API. Tests must replace `connect_garmin` with a fake and direct raw files to `tmp_path`; do not require live credentials or network access.
-- Preserve the workout boundary `draft -> confirmed -> published -> pushed`: unconfirmed or unvalidated content must not reach Garmin. The coach UI is a placeholder and does not yet generate or persist plans.
+- Preserve the workout boundary `draft -> confirmed -> published -> pushed`: unconfirmed or unvalidated content must not reach Garmin. The coach persists chats but does not generate or persist plans.
 
 ## Tests And UI
 

@@ -1,43 +1,130 @@
 {% extends "base.html" %}
 {% block title %}KI-Coach · PacePilot{% endblock %}
+{% block head %}<script src="{{ url_for('static', path='/js/coach.js') }}?v=20260811-2" defer></script>{% endblock %}
+{% block main_class %}flex h-dvh min-h-0 flex-col overflow-hidden{% endblock %}
+{% block content_class %}flex min-h-0 flex-1 flex-col overflow-hidden{% endblock %}
 {% block content %}
-<div class="mb-6 flex items-start justify-between gap-4">
-  <div><p class="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">Planungsassistenz</p><h1 class="mt-2 font-display text-3xl font-semibold tracking-tight">KI-Coach</h1><p class="mt-2 text-sm text-muted-foreground">Vorschläge statt Autopilot.</p></div>
-  <span class="rounded-full bg-surface-muted px-3 py-1 text-xs font-medium text-muted-foreground">Experimentell</span>
+{% set response_running = messages|selectattr('status', 'equalto', 'streaming')|list|length > 0 %}
+<div class="flex min-h-0 flex-1 flex-col bg-surface">
+  <header class="shrink-0 border-b border-border bg-surface px-4 py-3 sm:px-6">
+    <div class="flex items-center gap-3">
+      <div class="min-w-0 flex-1">
+        <div class="flex flex-wrap items-center gap-2">
+          <h1 class="font-display text-xl font-semibold tracking-tight sm:text-2xl">KI-Coach</h1>
+          {% if configured %}<span class="max-w-40 truncate rounded-full bg-success-subtle px-2.5 py-1 text-[0.6875rem] font-semibold text-success-emphasis">{{ model }}</span>{% else %}<span class="rounded-full bg-surface-muted px-2.5 py-1 text-[0.6875rem] font-semibold text-muted-foreground">Nicht konfiguriert</span>{% endif %}
+          <span class="rounded-full bg-info-subtle px-2.5 py-1 text-[0.6875rem] font-semibold text-info-emphasis">Beta</span>
+        </div>
+        <p class="mt-1 hidden truncate text-xs text-muted-foreground sm:block">Persönliche Einordnung deiner Gesundheits- und Trainingsdaten.</p>
+      </div>
+      <form method="post" action="/coach/conversations">
+        <button class="inline-flex size-10 items-center justify-center rounded-xl bg-primary text-primary-foreground shadow-sm transition hover:bg-primary-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" type="submit" aria-label="Neuen Chat starten" title="Neuen Chat starten">
+          <svg class="size-5 fill-none stroke-current stroke-2" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke-linecap="round"/></svg>
+        </button>
+      </form>
+    </div>
+    <p class="mt-2 flex items-start gap-2 text-[0.6875rem] leading-5 text-warning-emphasis"><svg class="mt-0.5 size-3.5 shrink-0 fill-none stroke-current stroke-2" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v5m0 3h.01" stroke-linecap="round"/></svg><span>Keine medizinische Diagnose. Fragen und abgerufene Daten werden an den konfigurierten Modellanbieter übertragen.</span></p>
+  </header>
+
+  <div class="grid min-h-0 flex-1 grid-rows-[auto_minmax(0,1fr)] min-[1051px]:grid-cols-[280px_minmax(0,1fr)] min-[1051px]:grid-rows-1">
+    <aside class="min-w-0 border-b border-border bg-surface-muted/60 p-2 min-[1051px]:flex min-[1051px]:min-h-0 min-[1051px]:flex-col min-[1051px]:border-b-0 min-[1051px]:border-r min-[1051px]:p-3">
+      <div class="hidden items-center justify-between px-2 pb-2 pt-1 min-[1051px]:flex">
+        <h2 class="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">Chats</h2>
+        <span class="text-[0.6875rem] text-muted-foreground">{{ conversations|length }}</span>
+      </div>
+      <div class="flex gap-2 overflow-x-auto pb-1 min-[1051px]:min-h-0 min-[1051px]:flex-1 min-[1051px]:flex-col min-[1051px]:overflow-x-hidden min-[1051px]:overflow-y-auto" aria-label="Chatverlauf">
+        {% for item in conversations %}
+        {% set active = conversation and item.id == conversation.id %}
+        <div class="group grid min-w-60 grid-cols-[minmax(0,1fr)_2.5rem] items-stretch overflow-hidden rounded-xl border transition min-[1051px]:min-w-0 {{ 'border-primary/30 bg-primary-subtle shadow-sm' if active else 'border-transparent bg-surface hover:border-border hover:bg-secondary' }}">
+          <a class="min-w-0 px-3 py-2.5 text-left focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-ring" href="/coach/{{ item.id }}" {% if active %}aria-current="page"{% endif %}>
+            <span class="block truncate text-sm font-semibold text-foreground" data-conversation-title="{{ item.id }}">{{ item.title }}</span>
+            <time class="mt-1 block text-[0.6875rem] text-muted-foreground" datetime="{{ item.updated_at.isoformat() }}Z" data-local-datetime>{{ item.updated_at.strftime('%d.%m.%Y, %H:%M') }}</time>
+          </a>
+          <form class="grid place-items-center" method="post" action="/coach/{{ item.id }}/delete" onsubmit="return confirm('Diesen Chat und alle enthaltenen Nachrichten wirklich löschen?')">
+            {% if conversation %}<input type="hidden" name="selected_conversation_id" value="{{ conversation.id }}">{% endif %}
+            <button class="inline-flex size-8 items-center justify-center rounded-lg text-muted-foreground transition hover:bg-danger-subtle hover:text-danger-emphasis focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-40" type="submit" aria-label="Chat löschen" title="Chat löschen" data-delete-chat="{{ item.id }}" {% if active and response_running %}disabled{% endif %}>
+              <svg class="size-4 fill-none stroke-current stroke-[1.8]" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m-8 0 1 13h8l1-13M10 11v5m4-5v5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+          </form>
+        </div>
+        {% else %}
+        <p class="max-w-sm px-3 py-4 text-xs leading-5 text-muted-foreground">Noch keine Chats. Starte oben rechts eine neue Unterhaltung.</p>
+        {% endfor %}
+      </div>
+    </aside>
+
+    <section class="flex min-h-0 min-w-0 flex-col bg-background" {% if conversation %}data-coach-chat data-conversation-id="{{ conversation.id }}"{% endif %}>
+      {% if conversation %}
+      <header class="shrink-0 border-b border-border bg-surface/90 px-4 py-3 backdrop-blur sm:px-6">
+        <p class="truncate font-semibold text-foreground" data-selected-conversation-title>{{ conversation.title }}</p>
+        <p class="mt-0.5 text-[0.6875rem] text-muted-foreground">Der Coach greift nur lesend auf deine PacePilot-Daten zu.</p>
+      </header>
+
+      <div class="min-h-0 flex-1 space-y-6 overflow-y-auto px-4 py-6 sm:px-6 lg:px-10" data-coach-messages aria-live="polite">
+        {% for item in messages %}
+        {% if item.role == 'user' %}
+        <article class="ml-auto max-w-[88%] rounded-2xl rounded-br-md bg-primary px-4 py-3 text-sm leading-6 text-primary-foreground sm:max-w-[72%]">{{ item.content }}</article>
+        {% else %}
+        {% set duration_seconds = ((item.completed_at - item.created_at).total_seconds()|round|int) if item.completed_at else none %}
+        {% set step_count = item.tool_calls|length + 2 %}
+        <article class="max-w-3xl" data-assistant-message="{{ item.id }}">
+          <div class="flex items-start gap-3">
+            <div class="grid size-8 shrink-0 place-items-center rounded-xl bg-secondary font-display text-xs font-bold text-secondary-foreground">P</div>
+            <div class="min-w-0 flex-1">
+              <details class="group mb-3 text-xs text-muted-foreground" data-coach-activity>
+                <summary class="flex w-fit cursor-pointer list-none items-center gap-2 rounded-md py-1 font-medium transition hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring">
+                  <span class="relative flex size-4 items-center justify-center" data-activity-icon><span class="size-1.5 rounded-full {{ 'coach-activity-pulse bg-primary' if item.status == 'streaming' else 'bg-muted-foreground' }}"></span></span>
+                  <span class="{{ 'coach-activity-wave' if item.status == 'streaming' else '' }}" data-activity-summary>{% if item.status == 'streaming' %}Deine Frage wird analysiert{% elif item.status in ['failed', 'interrupted'] %}Antwort nicht abgeschlossen{% elif duration_seconds is not none %}{{ step_count }} Schritte · {% if duration_seconds >= 60 %}{{ duration_seconds // 60 }} Min. {{ duration_seconds % 60 }} Sek.{% else %}{{ duration_seconds }} Sek.{% endif %} nachgedacht{% else %}{{ step_count }} Schritte ausgeführt{% endif %}</span>
+                  <svg class="size-3.5 fill-none stroke-current stroke-2 transition-transform group-open:rotate-180" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </summary>
+                <ol class="mt-2 space-y-2 border-l border-border pl-3" data-activity-log>
+                  <li class="relative pl-3" data-activity-step><span class="absolute -left-[0.9375rem] top-1 size-1.5 rounded-full bg-muted-foreground"></span><span class="font-medium text-foreground">Frage analysiert</span></li>
+                  {% for call in item.tool_calls %}
+                  {% set call_duration = ((call.completed_at - call.started_at).total_seconds()|round|int) if call.completed_at else none %}
+                  <li class="relative pl-3" data-tool-call="{{ call.call_id }}" data-tool-state="{{ call.status }}">
+                    <span class="absolute -left-[0.9375rem] top-1 size-1.5 rounded-full {{ 'bg-danger' if call.status == 'failed' else 'bg-primary' if call.status == 'running' else 'bg-muted-foreground' }}"></span>
+                    <div class="flex flex-wrap items-baseline gap-x-2 gap-y-0.5"><span class="font-medium text-foreground" data-tool-label>{{ call.label }}</span><span class="text-[0.6875rem]" data-tool-status>{% if call.status == 'running' %}Wird ausgeführt{% elif call.status == 'failed' %}Fehlgeschlagen{% else %}Abgeschlossen{% endif %}{% if call_duration is not none %} · {{ call_duration }} Sek.{% endif %}</span></div>
+                    {% if call.input_summary %}<p class="mt-0.5 leading-5" data-tool-summary>{{ call.input_summary }}</p>{% endif %}
+                    {% if call.error_message %}<p class="mt-0.5 text-danger-emphasis">{{ call.error_message }}</p>{% endif %}
+                  </li>
+                  {% endfor %}
+                  {% if item.status == 'completed' %}<li class="relative pl-3" data-activity-final><span class="absolute -left-[0.9375rem] top-1 size-1.5 rounded-full bg-muted-foreground"></span><span class="font-medium text-foreground">Antwort formuliert</span></li>{% endif %}
+                </ol>
+              </details>
+              <div class="whitespace-pre-wrap text-sm leading-7 text-foreground" data-answer-text>{{ item.content }}</div>
+              {% if item.status in ['failed', 'interrupted'] %}<p class="mt-2 text-xs text-danger-emphasis" role="status">Diese Antwort wurde nicht abgeschlossen.</p>{% endif %}
+            </div>
+          </div>
+        </article>
+        {% endif %}
+        {% else %}
+        <div class="mx-auto grid min-h-full max-w-xl place-items-center py-12 text-center" data-coach-empty>
+          <div>
+            <div class="mx-auto grid size-14 place-items-center rounded-2xl bg-primary-subtle font-display text-xl font-bold text-primary-emphasis">P</div>
+            <h2 class="mt-5 font-display text-2xl font-semibold">Was möchtest du über dein Training wissen?</h2>
+            <p class="mt-3 text-sm leading-6 text-muted-foreground">Frage zum Beispiel nach deiner heutigen Erholung, deinem HRV-Trend oder dem Zusammenhang zwischen Schlaf und Belastung.</p>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+
+      <form class="shrink-0 border-t border-border bg-surface px-3 py-3 sm:px-6 sm:py-4 lg:px-10" data-coach-form action="/coach/{{ conversation.id }}/messages" method="post">
+        <div class="mx-auto flex max-w-4xl items-end gap-2 rounded-2xl border border-input bg-background p-2 shadow-sm transition focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/20">
+          <label class="sr-only" for="coach-message">Frage an den Coach</label>
+          <textarea class="max-h-40 min-h-11 flex-1 resize-none bg-transparent px-2 py-2 text-sm leading-6 text-foreground outline-none placeholder:text-muted-foreground" id="coach-message" name="message" rows="1" maxlength="4000" placeholder="Frage zu Gesundheit, Erholung oder Training ..." required {% if not configured %}disabled{% endif %}></textarea>
+          <button class="inline-flex size-10 shrink-0 items-center justify-center rounded-xl bg-primary text-primary-foreground transition hover:bg-primary-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-50" type="submit" aria-label="Nachricht senden" {% if not configured %}disabled{% endif %}><svg class="size-4 fill-none stroke-current stroke-2" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 7-7 7 7M12 5v14" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        </div>
+        <p class="mx-auto mt-2 max-w-4xl px-1 text-[0.6875rem] leading-5 text-muted-foreground">Antworten können Fehler enthalten. Prüfe wichtige Entscheidungen selbst.</p>
+      </form>
+      {% else %}
+      <div class="grid min-h-0 flex-1 place-items-center overflow-y-auto px-6 text-center">
+        <div class="max-w-md">
+          <div class="mx-auto grid size-14 place-items-center rounded-2xl bg-primary-subtle font-display text-xl font-bold text-primary-emphasis">P</div>
+          <h2 class="mt-5 font-display text-2xl font-semibold">Dein persönlicher Gesundheitscoach</h2>
+          <p class="mt-3 text-sm leading-6 text-muted-foreground">Starte über das Plus oben rechts einen Chat und ordne deine Gesundheits- und Trainingsdaten im persönlichen Kontext ein.</p>
+        </div>
+      </div>
+      {% endif %}
+    </section>
+  </div>
 </div>
-<div class="mb-6 rounded-lg border border-warning/25 bg-warning-subtle p-4 text-sm leading-6 text-warning-emphasis" role="status"><strong>Diese Funktion befindet sich noch in Entwicklung.</strong><br>Empfehlungen können unvollständig oder unpassend sein. Prüfe jeden Vorschlag, bevor du ihn in dein Training übernimmst.</div>
-<section class="grid gap-3 md:grid-cols-3">
-  <article class="rounded-xl border border-border bg-surface p-4 sm:p-5"><span class="text-xs font-semibold text-muted-foreground">01</span><h2 class="mt-5 text-lg font-semibold">Das Modell entwirft.</h2><p class="mt-2 text-sm leading-6 text-muted-foreground">Aktuelle Trainings-, Erholungs- und Kalenderdaten fließen als begrenzter Snapshot ein.</p></article>
-  <article class="rounded-xl border border-border bg-surface p-4 sm:p-5"><span class="text-xs font-semibold text-muted-foreground">02</span><h2 class="mt-5 text-lg font-semibold">Die App bleibt Herrin der Daten.</h2><p class="mt-2 text-sm leading-6 text-muted-foreground">Der Agent kann weder Workouts speichern noch Garmin-Aktionen ausführen.</p></article>
-  <article class="rounded-xl border border-border bg-surface p-4 sm:p-5"><span class="text-xs font-semibold text-muted-foreground">03</span><h2 class="mt-5 text-lg font-semibold">Du entscheidest.</h2><p class="mt-2 text-sm leading-6 text-muted-foreground">Empfehlungen bleiben Text, bis du sie im Workout-Editor selbst übernimmst.</p></article>
-</section>
-
-<section class="mt-6 grid items-start gap-4 lg:grid-cols-[minmax(0,1.5fr)_minmax(300px,1fr)]">
-  <form class="rounded-xl border border-border bg-surface p-4 sm:p-5" method="post" action="/coach">
-    <div class="flex flex-col items-start justify-between gap-3 sm:flex-row">
-      <div><p class="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">Neue Anfrage</p><h2 class="mt-2 text-lg font-semibold">Was möchtest du planen?</h2></div>
-      {% if configured %}<span class="max-w-full truncate rounded-full bg-success-subtle px-3 py-1 text-xs font-semibold text-success-emphasis">{{ model }}</span>{% else %}<span class="max-w-full truncate rounded-full bg-surface-muted px-3 py-1 text-xs font-semibold text-muted-foreground">Nicht konfiguriert</span>{% endif %}
-    </div>
-    <label class="mt-6 flex flex-col gap-2 text-sm font-semibold">Frage
-      <textarea class="w-full resize-y rounded-lg border border-input bg-surface px-3 py-2 text-sm leading-6 text-foreground outline-none transition placeholder:text-muted-foreground focus:border-ring focus:ring-2 focus:ring-ring/20" name="message" rows="5" maxlength="4000" placeholder="Zum Beispiel: Wie sollte ich meine Laufwoche nach den letzten Einheiten strukturieren?" required>{{ message }}</textarea>
-    </label>
-    <div class="mt-5 flex flex-col items-stretch justify-between gap-4 sm:flex-row sm:items-center">
-      <p class="text-xs leading-5 text-muted-foreground">Die Anfrage nutzt einen aktuellen Snapshot. Es wird kein Chatverlauf gespeichert.</p>
-      <button class="inline-flex shrink-0 items-center justify-center rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition hover:bg-primary-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-50" type="submit" {% if not configured %}disabled{% endif %}>Coach fragen</button>
-    </div>
-  </form>
-
-  {% if answer or error %}
-  <article class="rounded-xl border border-border border-l-2 {{ 'border-l-danger' if error else 'border-l-primary' }} bg-surface p-4 sm:p-5" aria-live="polite">
-    <p class="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">{{ 'Fehler' if error else 'Antwort' }}</p>
-    <h2 class="mt-2 text-lg font-semibold">{{ 'Coach nicht erreichbar' if error else 'Vorschlag des Coaches' }}</h2>
-    <div class="my-5 whitespace-pre-wrap text-sm leading-7 text-foreground">{{ error or answer }}</div>
-    {% if answer %}<a class="inline-flex items-center justify-center rounded-lg border border-border bg-surface px-4 py-2 text-sm font-semibold text-foreground transition hover:bg-secondary focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" href="/workouts/new">Im Workout-Editor prüfen</a>{% endif %}
-  </article>
-  {% elif not configured %}
-  <article class="rounded-xl border border-border bg-surface p-4 sm:p-5">
-    <div><p class="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">Nicht verfügbar</p><h2 class="mt-2 text-lg font-semibold">Der Coach ist derzeit nicht erreichbar</h2><p class="mt-2 text-sm leading-6 text-muted-foreground">Garmin-Sync und manuelle Workout-Planung funktionieren unabhängig davon.</p></div>
-  </article>
-  {% endif %}
-</section>
 {% endblock %}

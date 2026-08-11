@@ -1,8 +1,10 @@
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timedelta
 
 from sqlalchemy.orm import Session
 
+from app.repositories.health import find_health_day
+from app.repositories.workouts import workouts_between
 from app.services.analytics.health_trends import (
     HealthTrends,
     HrvBaseline,
@@ -24,12 +26,62 @@ from app.services.analytics.training_trends import (
     get_training_timeline,
     get_weekly_training_trend,
 )
+from app.services.planning.workout_definition import workout_metrics
 
 
 @dataclass(frozen=True)
 class PeriodTrainingSummary:
     period: str
     summary: TrainingSummary
+
+
+@dataclass(frozen=True)
+class HealthDaySummary:
+    day: date
+    sleep_seconds: int | None
+    sleep_score: int | None
+    sleep_start_at: datetime | None
+    sleep_end_at: datetime | None
+    deep_sleep_seconds: int | None
+    light_sleep_seconds: int | None
+    rem_sleep_seconds: int | None
+    awake_sleep_seconds: int | None
+    nap_seconds: int | None
+    sleep_need_seconds: int | None
+    resting_hr: int | None
+    min_hr: int | None
+    max_hr: int | None
+    hrv_average: float | None
+    hrv_weekly_average: float | None
+    hrv_status: str | None
+    steps: int | None
+    distance_m: float | None
+    total_calories: int | None
+    active_calories: int | None
+    stress_average: int | None
+    stress_max: int | None
+    body_battery_high: int | None
+    body_battery_low: int | None
+    body_battery_charged: int | None
+    body_battery_drained: int | None
+    waking_respiration_average: float | None
+    sleep_respiration_average: float | None
+    spo2_average: float | None
+    sleep_spo2_average: float | None
+    spo2_lowest: float | None
+    moderate_intensity_minutes: int | None
+    vigorous_intensity_minutes: int | None
+
+
+@dataclass(frozen=True)
+class UpcomingWorkout:
+    workout_id: int
+    name: str
+    sport: str
+    scheduled_for: date
+    status: str
+    duration_seconds: float | None
+    distance_meters: float | None
 
 
 class AthleteDataService:
@@ -92,3 +144,64 @@ class AthleteDataService:
 
     def get_activity_details(self, activity_id: int) -> ActivityDetails | None:
         return get_activity_details(self.session, self.user_id, activity_id, as_of=self.as_of)
+
+    def get_health_day(self, day: date) -> HealthDaySummary | None:
+        health = find_health_day(self.session, self.user_id, day)
+        if health is None:
+            return None
+        return HealthDaySummary(
+            day=health.day,
+            sleep_seconds=health.sleep_seconds,
+            sleep_score=health.sleep_score,
+            sleep_start_at=health.sleep_start_at,
+            sleep_end_at=health.sleep_end_at,
+            deep_sleep_seconds=health.deep_sleep_seconds,
+            light_sleep_seconds=health.light_sleep_seconds,
+            rem_sleep_seconds=health.rem_sleep_seconds,
+            awake_sleep_seconds=health.awake_sleep_seconds,
+            nap_seconds=health.nap_seconds,
+            sleep_need_seconds=health.sleep_need_seconds,
+            resting_hr=health.resting_hr,
+            min_hr=health.min_hr,
+            max_hr=health.max_hr,
+            hrv_average=health.hrv_average,
+            hrv_weekly_average=health.hrv_weekly_average,
+            hrv_status=health.hrv_status,
+            steps=health.steps,
+            distance_m=health.distance_m,
+            total_calories=health.total_calories,
+            active_calories=health.active_calories,
+            stress_average=health.stress_average,
+            stress_max=health.stress_max,
+            body_battery_high=health.body_battery_high,
+            body_battery_low=health.body_battery_low,
+            body_battery_charged=health.body_battery_charged,
+            body_battery_drained=health.body_battery_drained,
+            waking_respiration_average=health.waking_respiration_average,
+            sleep_respiration_average=health.sleep_respiration_average,
+            spo2_average=health.spo2_average,
+            sleep_spo2_average=health.sleep_spo2_average,
+            spo2_lowest=health.spo2_lowest,
+            moderate_intensity_minutes=health.moderate_intensity_minutes,
+            vigorous_intensity_minutes=health.vigorous_intensity_minutes,
+        )
+
+    def get_upcoming_workouts(self, days: int = 14) -> tuple[UpcomingWorkout, ...]:
+        end = self.as_of + timedelta(days=days)
+        upcoming: list[UpcomingWorkout] = []
+        for workout in workouts_between(self.session, self.user_id, self.as_of, end):
+            if workout.scheduled_for is None:
+                continue
+            metrics = workout_metrics(workout.definition_model)
+            upcoming.append(
+                UpcomingWorkout(
+                    workout_id=workout.id,
+                    name=workout.name,
+                    sport=workout.sport,
+                    scheduled_for=workout.scheduled_for,
+                    status=workout.status,
+                    duration_seconds=metrics.duration_seconds,
+                    distance_meters=metrics.distance_meters,
+                )
+            )
+        return tuple(upcoming)

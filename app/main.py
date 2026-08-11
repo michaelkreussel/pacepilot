@@ -1,3 +1,4 @@
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -12,6 +13,7 @@ from app.auth import AuthenticationRequired
 from app.config import get_settings
 from app.database import engine
 from app.jobs.scheduler import start_scheduler, stop_scheduler
+from app.logging import configure_logging
 from app.migrations import upgrade_database
 from app.onboarding import OnboardingAccessRequired
 from app.routes import (
@@ -37,6 +39,10 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     ):
         raise RuntimeError("SESSION_SECRET must be configured before enabling login")
     app_settings.data_dir.mkdir(parents=True, exist_ok=True)
+    configure_logging(
+        app_settings.data_dir / "logs" / "pacepilot.log",
+        level=getattr(logging, app_settings.log_level),
+    )
     app_settings.garmin_token_dir.mkdir(parents=True, exist_ok=True)
     upgrade_database()
     start_scheduler()

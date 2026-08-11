@@ -18,10 +18,12 @@ PacePilot ist ein kleiner, selbst gehosteter Trainingsbegleiter für Garmin Conn
 - explizite Kette `Entwurf -> Bestätigung -> Garmin -> Uhr`
 - regelmäßiger Garmin-Sync über APScheduler mit Prozess-Lock
 - live aktualisierter Sync-Fortschritt und Laufzeitmessungen pro Garmin-Endpunkt
-- zustandsloser KI-Coach mit Agno und OpenRouter auf einem begrenzten Trainings-Snapshot
+- gestreamter LangChain-KI-Coach mit persistenten Chats und lesenden Analysewerkzeugen
 - Alembic-Migrationen, SQLite-WAL und Docker-Deployment mit einem Uvicorn-Worker
 
-Der KI-Coach beantwortet Planungsfragen anhand der letzten Aktivitäten, Erholungswerte, Wochenlast und anstehenden Workouts. Der Agent arbeitet ausschließlich lesend und ohne Chat-Speicher. Seine Antwort bleibt Text: Sie wird weder als Workout gespeichert noch bestätigt oder zu Garmin übertragen.
+Der KI-Coach ordnet Gesundheits- und Trainingsfragen anhand persönlicher Trends, Baselines, Erholungswerte, Aktivitäten und anstehender Workouts ein. Chats und sichere Werkzeugaktivitäten werden gespeichert; der Agent greift ausschließlich lesend auf Athletendaten zu. Antworten werden weder als Workout gespeichert noch bestätigt oder zu Garmin übertragen.
+
+Anwendungslogs werden gleichzeitig in die Konsole und rotierend unter `DATA_DIR/logs/pacepilot.log` geschrieben. Coach-Logs enthalten keine Fragen, Antworten oder Gesundheitswerte.
 
 ## Lokal starten
 
@@ -100,14 +102,15 @@ PacePilot führt ausstehende Alembic-Migrationen bei jedem Programmstart vor dem
 | `GARMIN_ACTIVITY_ENRICHMENT_PER_SYNC` | `5` | Maximal vollständig ergänzte Altaktivitäten je Folgelauf |
 | `GARMIN_RATE_LIMIT_COOLDOWN_SECONDS` | `300` | Pause nach einem Garmin-HTTP-429 |
 | `SCHEDULER_ENABLED` | `true` | Hintergrundjobs aktivieren |
+| `LOG_LEVEL` | `INFO` | Globaler Log-Level für Konsole und rotierende Logdatei |
 | `SESSION_SECRET` | Development-Fallback ohne Login | Signatur der Session-Cookies; mit aktiviertem Login zwingend setzen |
 | `SESSION_HTTPS_ONLY` | `false` | Session-Cookie ausschließlich über HTTPS senden |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | leer | Google-OpenID-Connect-Anwendung |
 | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | leer | GitHub-OAuth2-Anwendung |
 | `GARMIN_EMAIL`, `GARMIN_PASSWORD` | leer | optionale unbeaufsichtigte Neuanmeldung |
 | `LLM_API_KEY` | leer | OpenRouter API-Key für den KI-Coach |
-| `LLM_BASE_URL` | `https://openrouter.ai/api/v1` | OpenRouter API-Basis-URL |
 | `LLM_MODEL` | leer | OpenRouter Modell-ID, zum Beispiel `openai/gpt-4o-mini` |
+| `LLM_TIMEOUT_SECONDS` | `60` | Zeitlimit je OpenRouter-Modellaufruf |
 
 SQLite muss auf einem lokalen Volume liegen, nicht auf SMB oder NFS. Mehrere Uvicorn-Worker sind wegen Scheduler und prozesslokaler Kontosperren nicht unterstützt.
 Für eine öffentliche HTTPS-Installation müssen `ENVIRONMENT=production`, `SESSION_SECRET` und `SESSION_HTTPS_ONLY=true` gesetzt sein.

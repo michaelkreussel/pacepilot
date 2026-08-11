@@ -17,7 +17,7 @@ from app.config import get_settings
 from app.models import GarminAccount
 from app.services.garmin.locks import GarminAccountBusyError, garmin_account_slot
 
-logger = logging.getLogger("uvicorn.error")
+logger = logging.getLogger(__name__)
 
 
 class GarminUnavailableError(RuntimeError):
