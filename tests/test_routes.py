@@ -100,7 +100,7 @@ def test_main_pages_render(client: TestClient) -> None:
 
     assert client.get("/api/health").json() == {"status": "ok"}
     assert "So entsteht deine Einheit" in client.get("/workouts/new").text
-    assert "Diese Funktion befindet sich noch in Entwicklung" in client.get("/coach").text
+    assert "Dein persönlicher Gesundheitscoach" in client.get("/coach").text
 
     openapi = client.get("/openapi.json").json()
     assert "303" in openapi["paths"]["/workouts/{workout_id}/publish"]["post"]["responses"]

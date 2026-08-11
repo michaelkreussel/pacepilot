@@ -5,7 +5,6 @@ description = "A small self-hosted Garmin training companion"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "agno[openai]>=2.8,<3",
     "alembic>=1.14,<2",
     "apscheduler>=3.11,<4",
     "authlib>=1.4,<2",
@@ -14,6 +13,8 @@ dependencies = [
     "httpx>=0.28,<1",
     "itsdangerous>=2.2,<3",
     "jinja2>=3.1,<4",
+    "langchain>=1.3.14,<2",
+    "langchain-openrouter>=0.2.7,<0.3",
     "pydantic>=2.7,<3",
     "pydantic-settings>=2.7,<3",
     "python-multipart>=0.0.20,<1",

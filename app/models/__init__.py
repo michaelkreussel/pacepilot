@@ -1,4 +1,5 @@
 from app.models.activity import Activity, ActivityExerciseSet, ActivitySplit, ActivityZone
+from app.models.coach import CoachConversation, CoachMessage, CoachToolCall
 from app.models.fitness import DailyFitness
 from app.models.health import DailyHealth, SleepStage
 from app.models.sync import DailyDataStatus, GarminSyncState, SyncEvent, SyncRun
@@ -10,6 +11,9 @@ __all__ = [
     "ActivityExerciseSet",
     "ActivitySplit",
     "ActivityZone",
+    "CoachConversation",
+    "CoachMessage",
+    "CoachToolCall",
     "DailyDataStatus",
     "DailyFitness",
     "DailyHealth",

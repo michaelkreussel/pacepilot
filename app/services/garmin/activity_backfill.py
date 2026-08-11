@@ -35,7 +35,7 @@ from app.services.garmin.activity_details import activity_details_path, write_ac
 from app.services.garmin.client import message_from_exception
 from app.services.garmin.health_backfill import GarminPacer
 
-logger = logging.getLogger("uvicorn.error")
+logger = logging.getLogger(__name__)
 
 ACTIVITY_RESOURCE = "activities"
 DEFAULT_PAGE_SIZE = 100

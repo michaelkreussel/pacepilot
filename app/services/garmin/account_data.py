@@ -22,7 +22,7 @@ from app.models import (
 from app.services.garmin.client import cancel_garmin_account_logins
 from app.services.garmin.locks import garmin_account_slot
 
-logger = logging.getLogger("uvicorn.error")
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)

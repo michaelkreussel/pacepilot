@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     garmin_activity_enrichment_per_sync: int = Field(default=5, ge=0, le=1000)
     garmin_rate_limit_cooldown_seconds: int = Field(default=300, ge=60, le=3600)
     scheduler_enabled: bool = True
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     session_secret: str | None = Field(default=None, min_length=32)
     session_https_only: bool = False
     public_base_url: str | None = None
@@ -32,8 +33,8 @@ class Settings(BaseSettings):
     github_client_id: str | None = None
     github_client_secret: str | None = None
     llm_api_key: str | None = None
-    llm_base_url: str = "https://openrouter.ai/api/v1"
     llm_model: str = ""
+    llm_timeout_seconds: float = Field(default=60, ge=5, le=180)
 
     @model_validator(mode="after")
     def validate_deployment(self) -> "Settings":

@@ -31,7 +31,7 @@ from app.web import context, templates
 
 router = APIRouter(prefix="/settings", dependencies=[Depends(require_notice_acknowledged)])
 GARMIN_MFA_SESSION_KEY = "garmin_mfa_challenge"
-logger = logging.getLogger("uvicorn.error")
+logger = logging.getLogger(__name__)
 
 
 def _latest_sync(session: SessionDep, user_id: int) -> SyncRun | None:

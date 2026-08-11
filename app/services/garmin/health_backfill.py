@@ -34,7 +34,7 @@ from app.repositories.sync_state import (
 )
 from app.services.garmin.client import message_from_exception
 
-logger = logging.getLogger("uvicorn.error")
+logger = logging.getLogger(__name__)
 
 MIN_HISTORY_DATE = date(2005, 1, 1)
 DEFAULT_OVERLAP_DAYS = 7

@@ -10,6 +10,7 @@ services:
       ENVIRONMENT: ${ENVIRONMENT:-development}
       DATABASE_URL: sqlite:////data/app.db
       DATA_DIR: /data
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
       GARMIN_TOKEN_DIR: /data/garmin-tokens
       SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET must be set}
       SESSION_HTTPS_ONLY: ${SESSION_HTTPS_ONLY:-false}
@@ -19,6 +20,6 @@ services:
       GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
       GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
       LLM_API_KEY: ${LLM_API_KEY:-}
-      LLM_BASE_URL: ${LLM_BASE_URL:-https://openrouter.ai/api/v1}
       LLM_MODEL: ${LLM_MODEL:-}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-60}
     restart: unless-stopped
