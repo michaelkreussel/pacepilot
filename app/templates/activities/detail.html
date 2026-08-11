@@ -52,10 +52,11 @@
 
 {% if has_charts %}
 {% set has_tempo_chart = (activity_data.is_running and activity_data.series.pace) or activity_data.series.speed %}
-{% set cadence_full_width = (activity_data.series.heart_rate and has_tempo_chart) or (not activity_data.series.heart_rate and not has_tempo_chart) %}
+{% set has_multiple_charts = (activity_data.series.heart_rate and (has_tempo_chart or activity_data.series.cadence)) or (has_tempo_chart and activity_data.series.cadence) %}
+{% set cadence_full_width = activity_data.series.heart_rate and has_tempo_chart %}
 <section class="mt-10">
   <div class="mb-5 flex flex-col items-start justify-between gap-2 sm:flex-row sm:items-end"><div><p class="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">Zeitverlauf</p><h2 class="mt-1 text-lg font-semibold">Leistung im Training</h2></div><span class="text-xs text-muted-foreground">Bewege den Mauszeiger über die Kurven</span></div>
-  <div class="grid gap-4 md:grid-cols-2">
+  <div class="grid gap-4{{ ' md:grid-cols-2' if has_multiple_charts else '' }}">
     {% if activity_data.series.heart_rate %}<article class="min-w-0 rounded-xl border border-border bg-surface p-4 sm:p-5"><span class="text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">Herzfrequenz</span><h3 class="mb-5 mt-2 text-lg font-semibold">Belastung</h3><div class="relative h-[250px]"><canvas id="heart-rate-chart"></canvas></div></article>{% endif %}
     {% if activity_data.is_running and activity_data.series.pace %}<article class="min-w-0 rounded-xl border border-border bg-surface p-4 sm:p-5"><span class="text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">Tempo</span><h3 class="mb-5 mt-2 text-lg font-semibold">Pace</h3><div class="relative h-[250px]"><canvas id="pace-chart"></canvas></div></article>{% elif activity_data.series.speed %}<article class="min-w-0 rounded-xl border border-border bg-surface p-4 sm:p-5"><span class="text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">Geschwindigkeit</span><h3 class="mb-5 mt-2 text-lg font-semibold">Tempo</h3><div class="relative h-[250px]"><canvas id="speed-chart"></canvas></div></article>{% endif %}
     {% if activity_data.series.cadence %}<article class="min-w-0 rounded-xl border border-border bg-surface p-4 sm:p-5{{ ' md:col-span-2' if cadence_full_width else '' }}"><span class="text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">{% if activity_data.is_running %}Schrittfrequenz{% else %}Trittfrequenz{% endif %}</span><h3 class="mb-5 mt-2 text-lg font-semibold">Rhythmus</h3><div class="relative h-[250px]"><canvas id="cadence-chart"></canvas></div></article>{% endif %}

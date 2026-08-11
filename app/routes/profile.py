@@ -133,6 +133,7 @@ def _health_chart(
         "title": title,
         "unit": unit,
         "type": "line",
+        "span_gaps": True,
         "labels": labels,
         "links": links,
         "datasets": datasets,
@@ -523,10 +524,20 @@ def _zone_chart(summary: Any) -> dict[str, Any] | None:
 
 
 def _recent_workout(item: RecentWorkout) -> dict[str, Any]:
-    hard = (
-        (item.aerobic_training_effect or 0) >= 3.5
-        or (item.anaerobic_training_effect or 0) >= 2.5
-        or (item.workout_rpe or 0) >= 7
+    hard_reasons = []
+    if (item.aerobic_training_effect or 0) >= 3.5:
+        hard_reasons.append("aerober TE ≥ 3,5")
+    if (item.anaerobic_training_effect or 0) >= 2.5:
+        hard_reasons.append("anaerober TE ≥ 2,5")
+    if (item.workout_rpe or 0) >= 7:
+        hard_reasons.append("RPE ≥ 7")
+    has_load_data = any(
+        value is not None
+        for value in (
+            item.aerobic_training_effect,
+            item.anaerobic_training_effect,
+            item.workout_rpe,
+        )
     )
     return {
         "id": item.activity_id,
@@ -535,8 +546,20 @@ def _recent_workout(item: RecentWorkout) -> dict[str, Any]:
         "started_at": item.started_at,
         "duration": format_duration(item.duration_s),
         "distance": format_distance(item.distance_m) if item.distance_m is not None else None,
-        "training_effect": item.aerobic_training_effect,
-        "hard": hard,
+        "aerobic_training_effect": (
+            _display_number(item.aerobic_training_effect, 1)
+            if item.aerobic_training_effect is not None
+            else None
+        ),
+        "anaerobic_training_effect": (
+            _display_number(item.anaerobic_training_effect, 1)
+            if item.anaerobic_training_effect is not None
+            else None
+        ),
+        "rpe": str(item.workout_rpe) if item.workout_rpe is not None else None,
+        "has_load_data": has_load_data,
+        "hard": bool(hard_reasons),
+        "hard_reasons": hard_reasons,
     }
 
 

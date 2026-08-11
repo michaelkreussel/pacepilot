@@ -79,8 +79,60 @@ def test_activity_detail_renders_charts_and_map(
     assert '<details class="group ' in response.text
     assert "Garmin-Metriken" in response.text
     assert 'id="activity-map"' in response.text
+    assert '<div class="grid gap-4 md:grid-cols-2">' in response.text
     assert "sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" in response.text
     assert str(details_path) not in response.text
+
+
+def test_activity_detail_expands_a_single_chart(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(get_settings(), "data_dir", tmp_path)
+    client.get("/")
+    with session_factory() as session:
+        user = session.scalar(select(User))
+        assert user is not None
+        activity = Activity(
+            user_id=user.id,
+            garmin_activity_id="67890",
+            name="Herzfrequenztraining",
+            activity_type="other",
+            started_at=datetime(2026, 8, 8, 8, 0),
+            duration_s=1800,
+            details_complete=True,
+        )
+        session.add(activity)
+        session.commit()
+        activity_id = activity.id
+        details_path = activity_details_path(
+            activity.started_at, activity.garmin_activity_id, user.id
+        )
+        activity.details_file = str(details_path)
+        session.commit()
+
+    write_activity_details(
+        details_path,
+        {
+            "metricDescriptors": [
+                {"key": "sumElapsedDuration", "metricsIndex": 0},
+                {"key": "directHeartRate", "metricsIndex": 1},
+            ],
+            "activityDetailMetrics": [
+                {"metrics": [0, 120]},
+                {"metrics": [1800, 145]},
+            ],
+        },
+    )
+
+    response = client.get(f"/activities/{activity_id}")
+
+    assert response.status_code == 200
+    assert 'id="heart-rate-chart"' in response.text
+    assert '<div class="grid gap-4">' in response.text
+    assert '<div class="grid gap-4 md:grid-cols-2">' not in response.text
 
 
 def test_activity_detail_ignores_stale_file_when_enrichment_is_incomplete(

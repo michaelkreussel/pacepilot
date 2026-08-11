@@ -69,7 +69,7 @@
       tension: .25,
       pointRadius: config.labels.length === 1 ? 4 : 1.5,
       pointHoverRadius: 5,
-      spanGaps: false,
+      spanGaps: Boolean(config.span_gaps),
       borderRadius: dataset.type === "bar" || config.type === "bar" ? 5 : undefined,
       maxBarThickness: 44,
     }));

@@ -54,6 +54,38 @@ def test_application_migration_uses_absolute_project_paths(tmp_path: Path, monke
     }
 
 
+def test_workout_rpe_migration_normalizes_garmin_scale(tmp_path: Path) -> None:
+    database_path = tmp_path / "rpe.db"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    config = Config("alembic.ini")
+    config.attributes["database_url"] = database_url
+    command.upgrade(config, "20260809_08")
+
+    engine = create_engine(database_url)
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "INSERT INTO users (id, display_name, created_at) VALUES (1, 'Runner', '2026-08-11')"
+        )
+        for activity_id, rpe in ((1, 30), (2, 70), (3, 8)):
+            connection.exec_driver_sql(
+                "INSERT INTO activities "
+                "(id, user_id, garmin_activity_id, name, activity_type, started_at, "
+                "workout_rpe, details_complete, splits_complete, synced_at) "
+                "VALUES (?, 1, ?, 'Run', 'running', '2026-08-11', ?, 0, 0, '2026-08-11')",
+                (activity_id, str(activity_id), rpe),
+            )
+
+    command.upgrade(config, "head")
+
+    with engine.connect() as connection:
+        values = (
+            connection.exec_driver_sql("SELECT workout_rpe FROM activities ORDER BY id")
+            .scalars()
+            .all()
+        )
+    assert values == [3, 7, 8]
+
+
 def test_workout_definition_migration_preserves_repeat_semantics(tmp_path: Path) -> None:
     database_path = tmp_path / "legacy-workout.db"
     database_url = f"sqlite:///{database_path.as_posix()}"

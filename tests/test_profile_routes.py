@@ -174,6 +174,13 @@ def test_profile_renders_real_metrics_gaps_charts_and_user_scoped_drilldown(
     assert "Schlaf" in response.text
     assert "VO2max" in response.text
     assert "Progressiver Dauerlauf" in response.text
+    assert "TE bedeutet Garmin Training Effect" in response.text
+    assert "RPE beschreibt deine subjektiv empfundene Anstrengung von 1 bis 10" in response.text
+    assert "TE aerob" in response.text
+    assert "4,1" in response.text
+    assert "TE anaerob" in response.text
+    assert "0,8" in response.text
+    assert "Auslöser: aerober TE ≥ 3,5, RPE ≥ 7" in response.text
     assert "Volumen bleibt getrennt" not in response.text
     assert f'href="/activities/{run_id}"' in response.text
     assert "Geheime Einheit" not in response.text
@@ -189,7 +196,9 @@ def test_profile_renders_real_metrics_gaps_charts_and_user_scoped_drilldown(
     hrv = next(chart for chart in payload["charts"] if chart["id"] == "hrv-chart")
     assert len(hrv["labels"]) == 365
     assert hrv["datasets"][0]["data"].count(None) == 363
+    assert hrv["span_gaps"] is True
     training = next(chart for chart in payload["charts"] if chart["id"] == "running-volume-chart")
+    assert "span_gaps" not in training
     assert training["links"][0] == "/activities?from=2025-07-01&to=2025-07-07"
     assert sum(value or 0 for value in training["datasets"][0]["data"]) == 10
 
@@ -225,6 +234,10 @@ def test_profile_preserves_one_sided_intensity_and_anaerobic_effect(client, sess
 
     assert response.status_code == 200
     assert 'id="training-effect-chart"' in response.text
+    assert "Hoher Reiz" in response.text
+    assert "TE anaerob" in response.text
+    assert "3,2" in response.text
+    assert "Auslöser: anaerober TE ≥ 2,5" in response.text
     payload = _chart_payload(response.text)
     intensity = next(chart for chart in payload["charts"] if chart["id"] == "intensity-chart")
     assert intensity["datasets"][0]["data"] == [None, 12]

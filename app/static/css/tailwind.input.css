@@ -200,11 +200,11 @@
   }
 }
 
-@layer components {
-  .sidebar.is-open {
-    left: 0;
-  }
+.sidebar.is-open {
+  left: 0;
+}
 
+@layer components {
   .sync-state.ok,
   .sync-state.connected,
   .connection-status.ok,

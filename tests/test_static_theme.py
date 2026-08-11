@@ -65,3 +65,8 @@ def test_templates_use_the_bundled_stylesheet() -> None:
 
 def test_profile_chart_colors_allow_multi_color_datasets() -> None:
     assert "if (!color) return undefined;" in PROFILE_JS
+
+
+def test_profile_charts_can_span_configured_data_gaps() -> None:
+    assert "spanGaps: Boolean(config.span_gaps)" in PROFILE_JS
+    assert "spanGaps: false" not in PROFILE_JS

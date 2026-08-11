@@ -86,7 +86,7 @@ class FakeActivityGarmin:
         running = str(activity_id) == "3"
         return {
             "summaryDTO": {
-                "directWorkoutRpe": 5 if running else None,
+                "directWorkoutRpe": 50 if running else None,
                 "directWorkoutFeel": 75 if running else None,
             },
             "metadataDTO": {

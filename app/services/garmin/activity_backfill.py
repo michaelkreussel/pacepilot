@@ -128,6 +128,14 @@ def _integer(data: Any, *keys: str) -> int | None:
     return round(value) if value is not None else None
 
 
+def _workout_rpe(data: Any) -> int | None:
+    value = _integer(data, "directWorkoutRpe")
+    if value is None:
+        return None
+    # Garmin usually exposes perceived effort as 10-100 despite presenting it as 1-10.
+    return round(value / 10) if value > 10 else value
+
+
 def _parse_datetime(value: object) -> datetime | None:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         try:
@@ -258,7 +266,7 @@ def _map_activity_summary(activity: Activity, item: dict[str, Any]) -> None:
         item, "avgVerticalOscillation", "verticalOscillation"
     )
     activity.vertical_ratio = _number(item, "avgVerticalRatio", "verticalRatio")
-    activity.workout_rpe = _integer(item, "directWorkoutRpe")
+    activity.workout_rpe = _workout_rpe(item)
     activity.workout_feel = _integer(item, "directWorkoutFeel")
     activity.moderate_intensity_minutes = _integer(item, "moderateIntensityMinutes")
     activity.vigorous_intensity_minutes = _integer(item, "vigorousIntensityMinutes")
@@ -271,7 +279,6 @@ def _map_detail_summary(session: Session, activity: Activity, payload: Any) -> d
     summary = payload.get("summaryDTO")
     if isinstance(summary, dict):
         for attribute, keys, integer in (
-            ("workout_rpe", ("directWorkoutRpe",), True),
             ("workout_feel", ("directWorkoutFeel",), True),
             ("aerobic_training_effect", ("trainingEffect",), False),
             ("anaerobic_training_effect", ("anaerobicTrainingEffect",), False),
@@ -282,6 +289,9 @@ def _map_detail_summary(session: Session, activity: Activity, payload: Any) -> d
             value = _integer(summary, *keys) if integer else _number(summary, *keys)
             if value is not None:
                 setattr(activity, attribute, value)
+        workout_rpe = _workout_rpe(summary)
+        if workout_rpe is not None:
+            activity.workout_rpe = workout_rpe
     metadata = payload.get("metadataDTO")
     if not isinstance(metadata, dict):
         metadata = {}
