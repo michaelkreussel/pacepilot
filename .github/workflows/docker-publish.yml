@@ -72,9 +72,10 @@ jobs:
           images: ghcr.io/${{ github.repository }}
           tags: |
             type=raw,value=main,enable=${{ github.event_name == 'push' }}
+            type=sha,format=short,prefix=,enable=${{ github.event_name == 'push' }}
             type=semver,pattern={{version}},value=${{ github.event.release.tag_name }},enable=${{ github.event_name == 'release' }}
             type=raw,value=latest,enable=${{ github.event_name == 'release' }}
-
+            
       - name: Build and push image
         uses: docker/build-push-action@v6
         with:
