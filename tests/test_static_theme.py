@@ -19,6 +19,7 @@ def test_generated_tailwind_contains_semantic_themes() -> None:
     assert ".text-muted-foreground{" in CSS
     assert "@apply" not in CSS
     assert "@keyframes readiness-fill" in CSS
+    assert "@keyframes coach-activity-wave" in CSS
     assert "prefers-reduced-motion:reduce" in CSS
 
 
@@ -77,3 +78,9 @@ def test_coach_stream_renders_model_text_safely() -> None:
     assert 'headers: { Accept: "text/event-stream" }' in COACH_JS
     assert "createTextNode(data.text)" in COACH_JS
     assert "innerHTML" not in COACH_JS
+
+
+def test_coach_stream_replaces_live_activity_and_keeps_tool_history() -> None:
+    assert "assistant.activitySummary.textContent = label" in COACH_JS
+    assert "assistant.activityLog.append(item)" in COACH_JS
+    assert "coach-activity-wave" in COACH_JS

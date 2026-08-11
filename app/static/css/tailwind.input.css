@@ -499,14 +499,51 @@
   }
 }
 
+@keyframes coach-activity-wave {
+  from {
+    background-position: 180% 50%;
+  }
+
+  to {
+    background-position: -80% 50%;
+  }
+}
+
+@keyframes coach-activity-pulse {
+  50% {
+    opacity: 0.35;
+    transform: scale(0.7);
+  }
+}
+
+.coach-activity-wave {
+  background-image: linear-gradient(100deg, var(--muted-foreground) 20%, var(--foreground) 45%, var(--muted-foreground) 70%);
+  background-position: 180% 50%;
+  background-size: 220% 100%;
+  background-clip: text;
+  color: transparent;
+  animation: coach-activity-wave 1.7s linear infinite;
+}
+
+.coach-activity-pulse {
+  animation: coach-activity-pulse 1.2s ease-in-out infinite;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .readiness-score-value,
   .readiness-score-number,
   .readiness-component,
   .readiness-component-bar,
   .profile-metric,
-  .profile-stat {
+  .profile-stat,
+  .coach-activity-wave,
+  .coach-activity-pulse {
     animation: none;
+  }
+
+  .coach-activity-wave {
+    background: none;
+    color: var(--muted-foreground);
   }
 }
 

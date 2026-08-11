@@ -12,7 +12,7 @@
   <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js" defer></script>
   <script src="{{ url_for('static', path='/js/local-time.js') }}?v=20260809-1" defer></script>
   {% block head %}{% endblock %}
-  <link rel="stylesheet" href="{{ url_for('static', path='/css/tailwind.css') }}?v=20260811-1">
+  <link rel="stylesheet" href="{{ url_for('static', path='/css/tailwind.css') }}?v=20260811-2">
 </head>
 <body class="m-0 min-h-screen bg-background font-sans text-sm text-foreground">
   <div class="min-h-screen min-[1051px]:grid min-[1051px]:grid-cols-[248px_minmax(0,1fr)]" x-data="{ menuOpen: false }">
@@ -51,7 +51,7 @@
         </div>
       </div>
     </aside>
-    <main class="min-w-0">
+    <main class="min-w-0 {% block main_class %}{% endblock %}">
       <header class="flex items-center justify-between border-b border-border bg-surface px-4 py-3 sm:px-6 min-[1051px]:hidden">
         <a class="flex items-center gap-2.5 font-display text-base font-bold tracking-tight" href="{{ '/' if onboarding.complete else '/onboarding' }}"><span class="grid size-8 place-items-center rounded-lg bg-secondary text-sm text-secondary-foreground">P</span><span>PacePilot</span></a>
         <div class="flex items-center gap-2">
@@ -59,7 +59,7 @@
           <button class="inline-flex items-center justify-center rounded-lg border border-border bg-surface px-3 py-2 text-sm font-semibold text-foreground transition hover:bg-secondary focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" @click="menuOpen = !menuOpen" :aria-expanded="menuOpen" aria-label="Navigation öffnen">Menü</button>
         </div>
       </header>
-      <div class="mx-auto w-full max-w-7xl px-4 py-8 sm:px-6 sm:py-10 lg:px-8 min-[1051px]:py-12">
+      <div class="{% block content_class %}mx-auto w-full max-w-7xl px-4 py-8 sm:px-6 sm:py-10 lg:px-8 min-[1051px]:py-12{% endblock %}">
         {% if not onboarding.complete and active_page not in ['onboarding'] %}
         <a class="mb-8 flex flex-col gap-1 rounded-xl border border-info/25 bg-info-subtle p-4 text-sm text-info-emphasis sm:flex-row sm:items-center sm:gap-3" href="/onboarding"><strong class="text-xs font-semibold uppercase tracking-wide">Einrichtung {{ onboarding.step_number }} von 2</strong><span>{% if onboarding.phase == 'welcome' %}Einführung starten{% elif onboarding.phase == 'connect' %}Garmin verbinden{% else %}Erste Synchronisierung abschließen{% endif %}</span></a>
         {% endif %}

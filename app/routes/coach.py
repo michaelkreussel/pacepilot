@@ -43,6 +43,15 @@ MAX_HISTORY_MESSAGES = 20
 MAX_HISTORY_CHARACTERS = 12_000
 
 
+def _has_active_response(session: Session, messages: Sequence[CoachMessage]) -> bool:
+    stale_before = utcnow() - timedelta(minutes=10)
+    for message in messages:
+        if message.status == "streaming" and message.created_at < stale_before:
+            fail_message(session, message.id, interrupted=True)
+    session.flush()
+    return any(message.status == "streaming" for message in messages)
+
+
 def _bounded_history(messages: Sequence[CoachMessage]) -> list[CoachHistoryMessage]:
     history: list[CoachHistoryMessage] = []
     characters = 0
@@ -120,6 +129,35 @@ def new_conversation(session: SessionDep, user: CurrentUser) -> RedirectResponse
     conversation = create_conversation(session, user.id)
     session.commit()
     return RedirectResponse(f"/coach/{conversation.id}", status_code=303)
+
+
+@router.post("/{conversation_id}/delete")
+def delete_conversation(
+    conversation_id: int,
+    session: SessionDep,
+    user: CurrentUser,
+    selected_conversation_id: Annotated[int | None, Form()] = None,
+) -> RedirectResponse:
+    conversation = find_conversation(session, user.id, conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Chat nicht gefunden")
+
+    messages = conversation_messages(session, user.id, conversation_id) or []
+    if _has_active_response(session, messages):
+        raise HTTPException(
+            status_code=409,
+            detail="Dieser Chat kann während einer laufenden Antwort nicht gelöscht werden.",
+        )
+
+    redirect_id = None
+    if selected_conversation_id is not None and selected_conversation_id != conversation_id:
+        selected = find_conversation(session, user.id, selected_conversation_id)
+        redirect_id = selected.id if selected is not None else None
+
+    session.delete(conversation)
+    session.commit()
+    location = f"/coach/{redirect_id}" if redirect_id is not None else "/coach"
+    return RedirectResponse(location, status_code=303)
 
 
 def _event(event: str, payload: dict[str, object]) -> str:
@@ -253,12 +291,7 @@ async def ask_coach(
             detail="Konfiguriere zuerst OpenRouter, bevor du den Coach fragst.",
         )
     existing_messages = conversation_messages(session, user.id, conversation_id) or []
-    stale_before = utcnow() - timedelta(minutes=10)
-    for item in existing_messages:
-        if item.status == "streaming" and item.created_at < stale_before:
-            fail_message(session, item.id, interrupted=True)
-    session.flush()
-    if any(item.status == "streaming" for item in existing_messages):
+    if _has_active_response(session, existing_messages):
         raise HTTPException(status_code=409, detail="In diesem Chat läuft bereits eine Antwort.")
 
     if conversation.title == "Neuer Chat":

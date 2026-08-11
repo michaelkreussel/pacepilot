@@ -153,6 +153,14 @@ def test_coach_streams_and_persists_conversation(
         assert tool_call.status == "completed"
         assert session.scalar(select(Workout)) is None
 
+    page = client.get(f"/coach/{conversation_id}").text
+    assert 'aria-label="Neuen Chat starten"' in page
+    assert 'aria-label="Chat löschen"' in page
+    assert "data-coach-activity" in page
+    assert page.index("Aktuelle Erholung prüfen") < page.index(
+        "Du wirkst heute etwas weniger erholt"
+    )
+
 
 def test_follow_up_includes_bounded_conversation_history(client: TestClient) -> None:
     fake = FakeCoachAgent()
@@ -217,7 +225,85 @@ def test_conversations_are_user_scoped(
         ).status_code
         == 404
     )
+    assert client.post(f"/coach/{conversation_id}/delete").status_code == 404
     assert "Privater Chat" not in client.get("/coach").text
+
+
+def test_delete_conversation_cascades_and_preserves_selection(
+    client: TestClient, session_factory: sessionmaker[Session]
+) -> None:
+    selected_id = _new_chat(client)
+    deleted_id = _new_chat(client)
+    with session_factory() as session:
+        conversation = session.get(CoachConversation, deleted_id)
+        assert conversation is not None
+        assistant = CoachMessage(
+            conversation=conversation,
+            role="assistant",
+            content="Gespeicherte Antwort",
+            status="completed",
+            completed_at=utcnow(),
+        )
+        session.add(assistant)
+        session.flush()
+        tool_call = CoachToolCall(
+            message=assistant,
+            call_id="delete-test",
+            tool_name="get_health_day",
+            label="Gesundheitstag geprüft",
+            status="completed",
+            completed_at=utcnow(),
+        )
+        session.add(tool_call)
+        session.commit()
+        message_id = assistant.id
+        tool_call_id = tool_call.id
+
+    response = client.post(
+        f"/coach/{deleted_id}/delete",
+        data={"selected_conversation_id": str(selected_id)},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == f"/coach/{selected_id}"
+    with session_factory() as session:
+        assert session.get(CoachConversation, deleted_id) is None
+        assert session.get(CoachMessage, message_id) is None
+        assert session.get(CoachToolCall, tool_call_id) is None
+
+    response = client.post(
+        f"/coach/{selected_id}/delete",
+        data={"selected_conversation_id": str(selected_id)},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert response.headers["location"] == "/coach"
+    assert "Dein persönlicher Gesundheitscoach" in client.get("/coach").text
+
+
+def test_active_conversation_cannot_be_deleted(
+    client: TestClient, session_factory: sessionmaker[Session]
+) -> None:
+    conversation_id = _new_chat(client)
+    with session_factory() as session:
+        conversation = session.get(CoachConversation, conversation_id)
+        assert conversation is not None
+        session.add(
+            CoachMessage(
+                conversation=conversation,
+                role="assistant",
+                status="streaming",
+            )
+        )
+        session.commit()
+
+    response = client.post(f"/coach/{conversation_id}/delete")
+
+    assert response.status_code == 409
+    assert "laufenden Antwort" in response.json()["detail"]
+    with session_factory() as session:
+        assert session.get(CoachConversation, conversation_id) is not None
 
 
 def test_health_day_tool_uses_runtime_user_scope(
