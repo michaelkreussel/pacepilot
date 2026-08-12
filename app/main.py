@@ -18,6 +18,7 @@ from app.migrations import upgrade_database
 from app.onboarding import OnboardingAccessRequired
 from app.routes import (
     activities,
+    athlete_profile,
     auth,
     coach,
     dashboard,
@@ -71,6 +72,7 @@ app.include_router(auth.router)
 app.include_router(onboarding.router)
 app.include_router(dashboard.router)
 app.include_router(profile.router)
+app.include_router(athlete_profile.router)
 app.include_router(activities.router)
 app.include_router(plans.router)
 app.include_router(workouts.router)

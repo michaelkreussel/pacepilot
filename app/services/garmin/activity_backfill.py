@@ -11,8 +11,9 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+from garminconnect import Garmin
 from garminconnect.exceptions import GarminConnectNotFoundError
-from sqlalchemy import or_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -32,6 +33,13 @@ from app.repositories.sync_state import (
     mark_sync_success,
 )
 from app.services.garmin.activity_details import activity_details_path, write_activity_details
+from app.services.garmin.activity_fit import (
+    FIT_RUNNING_TYPES,
+    activity_fit_path,
+    extract_original_fit,
+    fit_eligible_activity_type,
+    write_activity_fit,
+)
 from app.services.garmin.client import message_from_exception
 from app.services.garmin.health_backfill import GarminPacer
 
@@ -409,7 +417,67 @@ def _exercise_rows(payload: Any) -> list[ActivityExerciseSet]:
 def _files_complete(activity: Activity) -> bool:
     if activity.raw_file is None or not Path(activity.raw_file).is_file():
         return False
-    return activity.details_file is None or Path(activity.details_file).is_file()
+    if activity.details_file is not None and not Path(activity.details_file).is_file():
+        return False
+    return activity.fit_file is None or Path(activity.fit_file).is_file()
+
+
+def _fit_eligible(activity: Activity) -> bool:
+    return (
+        fit_eligible_activity_type(activity.activity_type)
+        and (activity.distance_m or 0) >= 1_000
+        and (activity.duration_s or 0) >= 600
+    )
+
+
+def _fit_complete(activity: Activity) -> bool:
+    if not _fit_eligible(activity):
+        return True
+    if activity.fit_import_status == "available":
+        return activity.fit_file is not None and Path(activity.fit_file).is_file()
+    return activity.fit_import_status == "unavailable"
+
+
+def _import_original_fit(
+    client: Any,
+    activity: Activity,
+    pacer: GarminPacer,
+    result: ActivitySyncResult,
+) -> None:
+    if not _fit_eligible(activity) or _fit_complete(activity):
+        return
+    download = getattr(client, "download_activity", None)
+    payload = (
+        _optional_call(
+            pacer,
+            result,
+            f"activity original {activity.garmin_activity_id}",
+            partial(
+                download,
+                activity.garmin_activity_id,
+                Garmin.ActivityDownloadFormat.ORIGINAL,
+            ),
+            b"",
+        )
+        if callable(download)
+        else b""
+    )
+    fit_data = extract_original_fit(payload) if isinstance(payload, bytes) else None
+    path = activity_fit_path(
+        activity.started_at,
+        activity.garmin_activity_id,
+        activity.user_id,
+        get_settings().data_dir,
+    )
+    if fit_data is None:
+        path.unlink(missing_ok=True)
+        activity.fit_file = None
+        activity.fit_import_status = "unavailable"
+    else:
+        write_activity_fit(path, fit_data)
+        activity.fit_file = str(path)
+        activity.fit_import_status = "available"
+    activity.fit_synced_at = utcnow()
 
 
 def _process_activity(
@@ -446,6 +514,7 @@ def _process_activity(
         existing is not None
         and existing.details_complete
         and existing.splits_complete
+        and _fit_complete(existing)
         and _files_complete(existing)
     )
     if summary_unchanged:
@@ -473,7 +542,12 @@ def _process_activity(
     activity.synced_at = utcnow()
     if not enrich:
         if existing is not None and not summary_unchanged:
+            if activity.fit_file is not None:
+                Path(activity.fit_file).unlink(missing_ok=True)
             activity.details_file = None
+            activity.fit_file = None
+            activity.fit_import_status = None
+            activity.fit_synced_at = None
             activity.details_complete = False
             activity.splits_complete = False
             replace_activity_splits(session, activity, [])
@@ -561,6 +635,7 @@ def _process_activity(
             {},
         )
     replace_activity_exercise_sets(session, activity, _exercise_rows(exercise_payload))
+    _import_original_fit(client, activity, pacer, result)
 
     activity.details_synced_at = utcnow()
     activity.details_complete = True
@@ -616,6 +691,12 @@ def sync_activity_history(
                     or_(
                         Activity.details_complete.is_(False),
                         Activity.splits_complete.is_(False),
+                        and_(
+                            Activity.fit_import_status.is_(None),
+                            Activity.activity_type.in_(FIT_RUNNING_TYPES),
+                            Activity.distance_m >= 1_000,
+                            Activity.duration_s >= 600,
+                        ),
                     ),
                 )
                 .limit(1)

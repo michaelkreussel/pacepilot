@@ -9,6 +9,7 @@ dependencies = [
     "apscheduler>=3.11,<4",
     "authlib>=1.4,<2",
     "fastapi>=0.115,<1",
+    "fitdecode>=0.11,<0.12",
     "garminconnect[workout]>=0.3.7,<0.4",
     "httpx>=0.28,<1",
     "itsdangerous>=2.2,<3",

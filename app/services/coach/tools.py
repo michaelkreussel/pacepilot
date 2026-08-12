@@ -75,6 +75,28 @@ def get_current_recovery_state(runtime: ToolRuntime[CoachRuntimeContext]) -> str
 
 
 @tool
+def get_athlete_planning_context(runtime: ToolRuntime[CoachRuntimeContext]) -> str:
+    """Get the athlete's versioned planning context and current recovery state.
+
+    Use this for training goals, availability, plan feasibility, weekly structure, training
+    ranges, capacity, or deterministic planning limits. It excludes raw activity, FIT, and GPS
+    data and cannot create or change workouts.
+    """
+    with runtime.context.session_factory() as session:
+        service = AthleteDataService(session, runtime.context.user_id, as_of=runtime.context.as_of)
+        planning = service.get_planning_context(include_detail_evidence=False)
+        recovery = service.get_current_recovery_state()
+    return _json(
+        {
+            "schema_version": "athlete-planning-context.v1",
+            "as_of": runtime.context.as_of,
+            "planning_context": asdict(planning),
+            "recovery_state": asdict(recovery),
+        }
+    )
+
+
+@tool
 def get_health_trends(
     runtime: ToolRuntime[CoachRuntimeContext],
     days: Annotated[int, Field(ge=7, le=365)] = 28,
@@ -185,6 +207,7 @@ def get_upcoming_workouts(
 
 COACH_TOOLS = (
     get_current_recovery_state,
+    get_athlete_planning_context,
     get_health_trends,
     get_training_summary,
     get_recent_activities,
@@ -195,6 +218,7 @@ COACH_TOOLS = (
 
 TOOL_LABELS = {
     "get_current_recovery_state": "Aktuelle Erholung prüfen",
+    "get_athlete_planning_context": "Planungsgrundlage prüfen",
     "get_health_trends": "Gesundheitstrends vergleichen",
     "get_training_summary": "Trainingsbelastung auswerten",
     "get_recent_activities": "Letzte Trainingseinheiten ansehen",

@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.config import get_settings
 from app.models import (
     Activity,
+    AthleteProfile,
     DailyDataStatus,
     DailyFitness,
     DailyHealth,
@@ -437,6 +438,7 @@ def test_delete_garmin_data_preserves_connection_user_and_local_workout(
         session.add_all(
             [
                 activity,
+                AthleteProfile(user_id=user_id, primary_sport="running"),
                 DailyHealth(user_id=user_id, day=date(2026, 8, 2), steps=8000),
                 DailyFitness(user_id=user_id, day=date(2026, 8, 2), vo2max=50),
                 GarminSyncState(user_id=user_id, resource="activities"),
@@ -489,6 +491,7 @@ def test_delete_garmin_data_preserves_connection_user_and_local_workout(
         assert session.scalar(select(func.count()).select_from(Activity)) == 0
         assert session.scalar(select(func.count()).select_from(DailyHealth)) == 0
         assert session.scalar(select(func.count()).select_from(DailyFitness)) == 0
+        assert session.scalar(select(func.count()).select_from(AthleteProfile)) == 1
         assert session.scalar(select(func.count()).select_from(GarminSyncState)) == 0
         assert session.scalar(select(func.count()).select_from(DailyDataStatus)) == 0
         assert session.scalar(select(func.count()).select_from(GarminDevice)) == 0

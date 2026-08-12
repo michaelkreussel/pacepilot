@@ -237,7 +237,12 @@ def _recent_workout(activity: Activity) -> RecentWorkout:
 
 
 def get_training_summary(
-    session: Session, user_id: int, *, days: int = 28, as_of: date | None = None
+    session: Session,
+    user_id: int,
+    *,
+    days: int = 28,
+    as_of: date | None = None,
+    include_zones: bool = True,
 ) -> TrainingSummary:
     if days < 1:
         raise ValueError("days must be at least 1")
@@ -248,7 +253,7 @@ def get_training_summary(
         user_id,
         datetime.combine(start, time.min),
         datetime.combine(end + timedelta(days=1), time.min),
-        include_zones=True,
+        include_zones=include_zones,
     )
     sync_states = {state.resource: state for state in sync_states_for_user(session, user_id)}
     activity_state = sync_states.get("activities")
@@ -266,10 +271,13 @@ def get_training_summary(
         for sport, items in sorted(by_sport.items())
     )
     zones: dict[tuple[str, str, int], float] = defaultdict(float)
-    for activity in activities:
-        for zone in activity.zones:
-            if zone.seconds is not None:
-                zones[(activity.activity_type, zone.zone_type, zone.zone_number)] += zone.seconds
+    if include_zones:
+        for activity in activities:
+            for zone in activity.zones:
+                if zone.seconds is not None:
+                    zones[(activity.activity_type, zone.zone_type, zone.zone_number)] += (
+                        zone.seconds
+                    )
     weeks_in_window = (days + 6) // 7
     active_weeks = len({(activity.started_at.date() - start).days // 7 for activity in activities})
     hard_workouts = sum(_is_hard(activity) for activity in activities)

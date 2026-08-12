@@ -1,7 +1,7 @@
 import json
 import logging
 from collections.abc import AsyncIterator, Sequence
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -18,6 +18,10 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.logging import FILE_HANDLER, configure_logging
 from app.main import app
 from app.models import (
+    Activity,
+    AthleteGoal,
+    AthleteManualAnchor,
+    AthleteProfile,
     CoachConversation,
     CoachMessage,
     CoachToolCall,
@@ -35,7 +39,9 @@ from app.services.coach.agent import (
 )
 from app.services.coach.dependencies import get_coach_agent
 from app.services.coach.tools import (
+    COACH_TOOLS,
     CoachRuntimeContext,
+    get_athlete_planning_context,
     get_current_recovery_state,
     get_health_day,
 )
@@ -333,6 +339,170 @@ def test_health_day_tool_uses_runtime_user_scope(
     assert payload["resting_hr"] == 48
     assert payload["hrv_average"] == 55
     assert payload["day"] == "2026-08-11"
+
+
+def test_planning_context_tool_is_registered_without_model_arguments() -> None:
+    assert get_athlete_planning_context in COACH_TOOLS
+    tool_schema: Any = get_athlete_planning_context.tool_call_schema
+    schema = tool_schema.model_json_schema()
+    assert schema["properties"] == {}
+    assert "runtime" not in schema
+    assert "user_id" not in schema
+    assert "as_of" not in schema
+
+
+def test_planning_context_tool_is_user_scoped_as_of_bound_and_read_only(
+    session_factory: sessionmaker[Session],
+) -> None:
+    as_of = date(2026, 8, 11)
+    with session_factory() as session:
+        first = User(display_name="Planung Eins")
+        second = User(display_name="Planung Zwei")
+        session.add_all((first, second))
+        session.flush()
+        session.add_all(
+            (
+                AthleteProfile(user_id=first.id, primary_sport="running"),
+                AthleteGoal(
+                    user_id=first.id,
+                    sport="running",
+                    event_name="Erstes Ziel",
+                    target_date=date(2026, 10, 4),
+                    distance_m=10_000,
+                    target_duration_s=2_400,
+                ),
+                AthleteManualAnchor(
+                    user_id=first.id,
+                    sport="running",
+                    metric="threshold_hr",
+                    value=171,
+                    observed_on=as_of,
+                ),
+                AthleteGoal(
+                    user_id=second.id,
+                    sport="running",
+                    event_name="Privates zweites Ziel",
+                    target_date=date(2026, 11, 1),
+                    distance_m=21_097.5,
+                ),
+                AthleteManualAnchor(
+                    user_id=second.id,
+                    sport="running",
+                    metric="max_hr",
+                    value=233,
+                    observed_on=as_of,
+                ),
+                Activity(
+                    user_id=first.id,
+                    garmin_activity_id="planning-past",
+                    name="Vergangener Lauf",
+                    activity_type="running",
+                    started_at=datetime(2026, 8, 10, 9),
+                    distance_m=8_000,
+                    duration_s=2_800,
+                ),
+                Activity(
+                    user_id=first.id,
+                    garmin_activity_id="planning-future",
+                    name="Zukünftiger Lauf",
+                    activity_type="running",
+                    started_at=datetime(2026, 8, 12, 9),
+                    distance_m=30_000,
+                    duration_s=10_000,
+                ),
+                Workout(
+                    user_id=first.id,
+                    name="Unveränderter Entwurf",
+                    sport="running",
+                    scheduled_for=date(2026, 8, 12),
+                ),
+            )
+        )
+        session.commit()
+        first_id = first.id
+
+    runtime: Any = SimpleNamespace(context=CoachRuntimeContext(first_id, as_of, session_factory))
+    tool_function: Any = cast(Any, get_athlete_planning_context).func
+
+    payload = json.loads(tool_function(runtime=runtime))
+
+    assert payload["schema_version"] == "athlete-planning-context.v1"
+    assert payload["as_of"] == "2026-08-11"
+    planning = payload["planning_context"]
+    assert planning["schema_version"] == "planning-context.v2"
+    assert planning["as_of"] == "2026-08-11"
+    assert planning["goal"]["event_name"] == "Erstes Ziel"
+    assert planning["training_capacity"]["running_distance_28d_m"] == 8_000
+    assert planning["planning_limits"]["schema_version"] == "running-planning-limits.v1"
+    threshold = next(item for item in planning["performance"] if item["key"] == "threshold_hr")
+    assert threshold["value"] == 171
+    assert payload["recovery_state"]["as_of"] == "2026-08-11"
+    serialized = json.dumps(payload)
+    assert "Privates zweites Ziel" not in serialized
+    assert "233" not in serialized
+
+    with session_factory() as session:
+        workouts = list(session.scalars(select(Workout)))
+        assert len(workouts) == 1
+        assert workouts[0].name == "Unveränderter Entwurf"
+        assert workouts[0].status == "draft"
+
+
+def test_planning_context_tool_does_not_read_or_expose_activity_source_data(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    as_of = date(2026, 8, 11)
+    sentinels = (
+        "raw-private-sentinel.json.gz",
+        "details-private-sentinel.json.gz",
+        "fit-private-sentinel.fit",
+    )
+    with session_factory() as session:
+        user = User(display_name="Datenschutz")
+        session.add(user)
+        session.flush()
+        session.add(
+            Activity(
+                user_id=user.id,
+                garmin_activity_id="private-source-files",
+                name="Lauf",
+                activity_type="running",
+                started_at=datetime(2026, 8, 10, 9),
+                distance_m=10_000,
+                duration_s=3_600,
+                raw_file=sentinels[0],
+                details_file=sentinels[1],
+                fit_file=sentinels[2],
+            )
+        )
+        session.commit()
+        user_id = user.id
+
+    def fail_if_detail_data_is_read(*_: object, **__: object) -> object:
+        raise AssertionError("planning context tool must not read detail evidence")
+
+    monkeypatch.setattr(
+        "app.services.analytics.detail_evidence._fit_samples", fail_if_detail_data_is_read
+    )
+    monkeypatch.setattr(
+        "app.services.analytics.detail_evidence._sampled_detail_samples",
+        fail_if_detail_data_is_read,
+    )
+    runtime: Any = SimpleNamespace(context=CoachRuntimeContext(user_id, as_of, session_factory))
+    tool_function: Any = cast(Any, get_athlete_planning_context).func
+
+    serialized = tool_function(runtime=runtime)
+
+    assert all(sentinel not in serialized for sentinel in sentinels)
+    for private_field in (
+        '"raw_file"',
+        '"details_file"',
+        '"fit_file"',
+        '"latitude"',
+        '"longitude"',
+        '"polyline"',
+    ):
+        assert private_field not in serialized
 
 
 def test_langgraph_injects_runtime_context_into_coach_tools(

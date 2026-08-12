@@ -204,23 +204,34 @@ def empty_activity_details(activity_type: str) -> dict[str, Any]:
     return normalize_activity_details({}, activity_type)
 
 
+def load_activity_detail_payload(
+    started_at: datetime,
+    activity_id: str,
+    user_id: int,
+) -> dict[str, Any] | None:
+    try:
+        path = activity_details_path(started_at, activity_id, user_id)
+        if not path.is_file() or path.stat().st_size > MAX_DETAIL_BYTES:
+            return None
+        with gzip.open(path, "rb") as raw_file:
+            payload = raw_file.read(MAX_DETAIL_BYTES + 1)
+        if len(payload) > MAX_DETAIL_BYTES:
+            return None
+        details = json.loads(payload)
+        return details if isinstance(details, dict) else None
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+
+
 def load_activity_details(
     started_at: datetime,
     activity_id: str,
     activity_type: str,
     user_id: int,
 ) -> dict[str, Any]:
-    try:
-        path = activity_details_path(started_at, activity_id, user_id)
-        if not path.is_file() or path.stat().st_size > MAX_DETAIL_BYTES:
-            return empty_activity_details(activity_type)
-        with gzip.open(path, "rb") as raw_file:
-            payload = raw_file.read(MAX_DETAIL_BYTES + 1)
-        if len(payload) > MAX_DETAIL_BYTES:
-            return empty_activity_details(activity_type)
-        details = json.loads(payload)
-        if not isinstance(details, dict):
-            return empty_activity_details(activity_type)
-        return normalize_activity_details(details, activity_type)
-    except (OSError, ValueError, json.JSONDecodeError):
-        return empty_activity_details(activity_type)
+    details = load_activity_detail_payload(started_at, activity_id, user_id)
+    return (
+        normalize_activity_details(details, activity_type)
+        if details is not None
+        else empty_activity_details(activity_type)
+    )

@@ -175,3 +175,23 @@ def activities_between(
     if include_zones:
         query = query.options(selectinload(Activity.zones))
     return list(session.scalars(query.order_by(Activity.started_at, Activity.id)))
+
+
+def activities_with_history_between(
+    session: Session,
+    user_id: int,
+    start: datetime,
+    end: datetime,
+) -> list[Activity]:
+    return list(
+        session.scalars(
+            select(Activity)
+            .options(selectinload(Activity.splits), selectinload(Activity.zones))
+            .where(
+                Activity.user_id == user_id,
+                Activity.started_at >= start,
+                Activity.started_at < end,
+            )
+            .order_by(Activity.started_at, Activity.id)
+        )
+    )

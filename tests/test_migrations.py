@@ -23,6 +23,10 @@ def test_initial_migration_matches_models(tmp_path: Path) -> None:
         "activity_splits",
         "activity_zones",
         "alembic_version",
+        "athlete_availability",
+        "athlete_goals",
+        "athlete_manual_anchors",
+        "athlete_profiles",
         "coach_conversations",
         "coach_messages",
         "coach_tool_calls",
@@ -40,6 +44,9 @@ def test_initial_migration_matches_models(tmp_path: Path) -> None:
         "workout_steps",
         "workouts",
     } == set(inspector.get_table_names())
+    assert {"fit_file", "fit_import_status", "fit_synced_at"} <= {
+        column["name"] for column in inspector.get_columns("activities")
+    }
 
 
 def test_application_migration_uses_absolute_project_paths(tmp_path: Path, monkeypatch) -> None:
@@ -131,3 +138,53 @@ def test_workout_definition_migration_preserves_repeat_semantics(tmp_path: Path)
         "recovery",
     ]
     assert len({block["id"] for block in definition["blocks"]}) == 3
+
+
+def test_performance_snapshot_migration_preserves_legacy_data(tmp_path: Path) -> None:
+    database_path = tmp_path / "legacy-performance.db"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    config = Config("alembic.ini")
+    config.attributes["database_url"] = database_url
+    command.upgrade(config, "20260811_12")
+
+    engine = create_engine(database_url)
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "INSERT INTO users (id, display_name, created_at) VALUES (1, 'Runner', '2026-08-11')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO athlete_imported_metrics "
+            "(user_id, sport, metric, resource, value, source_day, fetched_at) VALUES "
+            "(1, 'running', 'threshold_hr', 'lactate_threshold', 171, "
+            "'2026-08-10', '2026-08-11 07:00:00'), "
+            "(1, 'running', 'reference_5k_seconds', 'personal_records', 1195, "
+            "'2026-08-10', '2026-08-11 07:00:00')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO athlete_zone_settings "
+            "(user_id, sport, zone_type, zone_number, lower_boundary, upper_boundary, "
+            "resource, fetched_at) VALUES "
+            "(1, 'running', 'heart_rate', 1, 100, 130, 'zones', "
+            "'2026-08-11 07:00:00'), "
+            "(1, 'running', 'heart_rate', 2, 130, 150, 'zones', "
+            "'2026-08-11 07:00:00')"
+        )
+
+    command.upgrade(config, "head")
+
+    inspector = inspect(engine)
+    assert "athlete_imported_metrics" not in inspector.get_table_names()
+    assert "athlete_zone_settings" not in inspector.get_table_names()
+    with engine.connect() as connection:
+        metrics = connection.exec_driver_sql(
+            "SELECT lactate_threshold_hr, personal_record_5k_seconds "
+            "FROM daily_fitness WHERE user_id = 1 AND day = '2026-08-10'"
+        ).one()
+        zones = connection.exec_driver_sql(
+            "SELECT heart_rate_zones FROM daily_fitness WHERE user_id = 1 AND day = '2026-08-11'"
+        ).scalar_one()
+    assert metrics == (171, 1195)
+    assert json.loads(zones) == [
+        {"sport": "running", "zone": 1, "lower": 100.0, "upper": 130.0},
+        {"sport": "running", "zone": 2, "lower": 130.0, "upper": 150.0},
+    ]

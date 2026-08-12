@@ -1,7 +1,7 @@
 from datetime import date, datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Date, DateTime, Float, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import JSON, Date, DateTime, Float, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -38,6 +38,14 @@ class DailyFitness(Base):
     race_prediction_10k_seconds: Mapped[int | None] = mapped_column(Integer)
     race_prediction_half_seconds: Mapped[int | None] = mapped_column(Integer)
     race_prediction_marathon_seconds: Mapped[int | None] = mapped_column(Integer)
+    personal_record_1k_seconds: Mapped[int | None] = mapped_column(Integer)
+    personal_record_5k_seconds: Mapped[int | None] = mapped_column(Integer)
+    personal_record_10k_seconds: Mapped[int | None] = mapped_column(Integer)
+    personal_record_half_seconds: Mapped[int | None] = mapped_column(Integer)
+    personal_record_marathon_seconds: Mapped[int | None] = mapped_column(Integer)
+    configured_max_hr: Mapped[int | None] = mapped_column(Integer)
+    heart_rate_zones: Mapped[list[dict[str, object]] | None] = mapped_column(JSON)
+    power_zones: Mapped[list[dict[str, object]] | None] = mapped_column(JSON)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
     user: Mapped["User"] = relationship()
