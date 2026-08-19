@@ -7,7 +7,7 @@
 - Match CI with `uv run pytest`, `uv run ruff check .`, `uv run ruff format --check .`, then `uv run ty check`.
 - Focus pytest with a node ID, for example `uv run pytest tests/test_routes.py::test_create_and_confirm_workout`.
 - For model or migration changes, run `uv run pytest tests/test_migrations.py`; it upgrades a fresh database and runs Alembic's schema check.
-- Templates use Tailwind utilities, but the standalone Tailwind CLI is not a project dependency. After changing templates or `app/static/css/tailwind.input.css`, rebuild the committed output with `tailwindcss -i ./app/static/css/tailwind.input.css -o ./app/static/css/tailwind.css --minify` (currently Tailwind 4.3.3).
+- Templates use Tailwind utilities, but the standalone Tailwind CLI is not a project dependency. After changing templates or `app/static/css/tailwind.input.css`, rebuild the committed output with `tailwindcss -i ./app/static/css/tailwind.input.css -o ./app/static/css/tailwind.css --minify` (currently Tailwind 4.3.3), then bump the stylesheet cache key in `base.html` and `login.html`.
 
 ## Runtime Wiring
 

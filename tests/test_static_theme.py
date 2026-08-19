@@ -11,7 +11,7 @@ def test_generated_tailwind_contains_semantic_themes() -> None:
     assert "tailwindcss v4.3.3" in CSS
     assert "--color-brand-500:#2f9979" in CSS
     assert "--background:#f7faf9" in CSS
-    assert "--background:#171d1b" in CSS
+    assert "--background:#0f1413" in CSS
     assert "--info-emphasis:#1d4ed8" in CSS
     assert "--chart-violet:#6757a8" in CSS
     assert ".bg-primary{" in CSS
