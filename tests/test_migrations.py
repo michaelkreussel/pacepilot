@@ -57,6 +57,33 @@ def test_application_migration_uses_absolute_project_paths(tmp_path: Path, monke
     }
 
 
+def test_reverted_athlete_profile_revision_upgrades_to_head(tmp_path: Path) -> None:
+    database_path = tmp_path / "revision-14.db"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    config = Config("alembic.ini")
+    config.attributes["database_url"] = database_url
+    command.upgrade(config, "20260812_14")
+
+    upgrade_database(database_url)
+
+    engine = create_engine(database_url)
+    inspector = inspect(engine)
+    assert not {
+        "athlete_profiles",
+        "athlete_goals",
+        "athlete_availability",
+        "athlete_manual_anchors",
+    } & set(inspector.get_table_names())
+    assert not {"fit_file", "fit_import_status", "fit_synced_at"} & {
+        column["name"] for column in inspector.get_columns("activities")
+    }
+    with engine.connect() as connection:
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+    assert revision == "20260819_15"
+
+
 def test_workout_rpe_migration_normalizes_garmin_scale(tmp_path: Path) -> None:
     database_path = tmp_path / "rpe.db"
     database_url = f"sqlite:///{database_path.as_posix()}"
