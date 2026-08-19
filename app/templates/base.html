@@ -12,7 +12,7 @@
   <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js" defer></script>
   <script src="{{ url_for('static', path='/js/local-time.js') }}?v=20260809-1" defer></script>
   {% block head %}{% endblock %}
-  <link rel="stylesheet" href="{{ url_for('static', path='/css/tailwind.css') }}?v=20260819-1">
+  <link rel="stylesheet" href="{{ url_for('static', path='/css/tailwind.css') }}?v=20260819-5">
 </head>
 <body class="m-0 min-h-screen bg-background font-sans text-sm text-foreground">
   <div class="min-h-screen min-[1051px]:grid min-[1051px]:grid-cols-[248px_minmax(0,1fr)]" x-data="{ menuOpen: false }">
@@ -26,7 +26,7 @@
           <p class="px-2 pb-2 pt-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground" id="nav-training-title">Training</p>
           <div class="flex flex-col gap-1">
             <a class="nav-item{{ ' active' if active_page in ['dashboard', 'onboarding'] else '' }} block rounded-lg border px-3 py-2.5 text-sm font-medium shadow-none transition{{ ' border-primary/30 bg-primary-subtle text-primary-emphasis' if active_page in ['dashboard', 'onboarding'] else ' border-transparent bg-surface text-muted-foreground hover:border-border hover:bg-secondary hover:text-secondary-foreground' }}" href="{{ '/' if onboarding.complete else '/onboarding' }}">Übersicht</a>
-            <a class="nav-item{{ ' active' if active_page == 'profile' else '' }}{{ ' locked' if not onboarding.data_unlocked else '' }} block rounded-lg border px-3 py-2.5 text-sm font-medium shadow-none transition{{ ' border-primary/30 bg-primary-subtle text-primary-emphasis' if active_page == 'profile' else ' border-transparent bg-surface text-muted-foreground hover:border-border hover:bg-secondary hover:text-secondary-foreground' }}{{ ' opacity-60' if not onboarding.data_unlocked else '' }}" href="{{ '/profile' if onboarding.data_unlocked else '/onboarding?blocked=data' }}">Profil{% if not onboarding.data_unlocked %}<span class="float-right text-[0.625rem] uppercase tracking-wide">Gesperrt</span>{% endif %}</a>
+            <a class="nav-item{{ ' active' if active_page == 'profile' else '' }}{{ ' locked' if not onboarding.data_unlocked else '' }} block rounded-lg border px-3 py-2.5 text-sm font-medium shadow-none transition{{ ' border-primary/30 bg-primary-subtle text-primary-emphasis' if active_page == 'profile' else ' border-transparent bg-surface text-muted-foreground hover:border-border hover:bg-secondary hover:text-secondary-foreground' }}{{ ' opacity-60' if not onboarding.data_unlocked else '' }}" href="{{ '/profile' if onboarding.data_unlocked else '/onboarding?blocked=data' }}">Analyse{% if not onboarding.data_unlocked %}<span class="float-right text-[0.625rem] uppercase tracking-wide">Gesperrt</span>{% endif %}</a>
             <a class="nav-item{{ ' active' if active_page == 'activities' else '' }}{{ ' locked' if not onboarding.data_unlocked else '' }} block rounded-lg border px-3 py-2.5 text-sm font-medium shadow-none transition{{ ' border-primary/30 bg-primary-subtle text-primary-emphasis' if active_page == 'activities' else ' border-transparent bg-surface text-muted-foreground hover:border-border hover:bg-secondary hover:text-secondary-foreground' }}{{ ' opacity-60' if not onboarding.data_unlocked else '' }}" href="{{ '/activities' if onboarding.data_unlocked else '/onboarding?blocked=data' }}">Aktivitäten{% if not onboarding.data_unlocked %}<span class="float-right text-[0.625rem] uppercase tracking-wide">Gesperrt</span>{% endif %}</a>
           </div>
         </section>

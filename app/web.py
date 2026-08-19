@@ -50,6 +50,12 @@ def format_pace(seconds: float | int | None) -> str:
     return f"{minutes}:{remainder:02d} min/km"
 
 
+def format_speed_as_pace(speed_mps: float | int | None) -> str:
+    if speed_mps is None or speed_mps <= 0:
+        return "–"
+    return format_pace(1000 / speed_mps)
+
+
 def format_activity_type(value: str) -> str:
     return ACTIVITY_TYPE_LABELS.get(value, value.replace("_", " ").title())
 
@@ -67,6 +73,7 @@ templates.env.filters.update(
     precise_duration=format_precise_duration,
     distance=format_distance,
     pace=format_pace,
+    speed_as_pace=format_speed_as_pace,
     activity_type=format_activity_type,
     date=format_date,
     datetime=lambda value: format_date(value, include_time=True),

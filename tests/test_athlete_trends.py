@@ -13,6 +13,7 @@ from app.models import (
     User,
 )
 from app.services.analytics import AthleteDataService
+from app.services.analytics.health_trends import preferred_readiness
 from app.services.analytics.training_trends import get_training_summary
 
 
@@ -125,16 +126,18 @@ def test_health_trends_use_calendar_windows_and_prior_baseline(session_factory):
         assert recovery.fitness_day == as_of
         assert recovery.sleep_seconds == 27_000
         assert recovery.garmin_training_readiness_score == 74
-        assert recovery.garmin_training_readiness_level == "LOW"
+        assert recovery.garmin_training_readiness_level == "HIGH"
         assert recovery.garmin_training_readiness_day == date(2026, 6, 29)
         assert recovery.recovery_time_day == date(2026, 6, 29)
         assert recovery.vo2max == 52.4
         assert recovery.vo2max_day == as_of
         assert recovery.training_status == "PRODUCTIVE"
         assert recovery.training_status_day == date(2026, 6, 29)
-        assert recovery.pacepilot_readiness_score == 77.1
+        assert recovery.pacepilot_readiness_formula_version == "2.0"
+        assert recovery.pacepilot_readiness_limiter is None
+        assert recovery.pacepilot_readiness_score == 77.7
         assert recovery.pacepilot_readiness_label == "good"
-        assert recovery.pacepilot_readiness_confidence == 71.4
+        assert recovery.pacepilot_readiness_confidence == 78.8
         assert {item.component for item in recovery.pacepilot_readiness_components} == {
             "sleep_duration",
             "garmin_sleep_score",
@@ -467,12 +470,12 @@ def test_readiness_uses_garmin_hrv_baseline_when_personal_history_is_missing(ses
         ).get_current_recovery_state()
 
         assert recovery.pacepilot_readiness_score == 75
-        assert recovery.pacepilot_readiness_confidence == 25
+        assert recovery.pacepilot_readiness_confidence == 20
         assert recovery.pacepilot_readiness_components[0].component == "hrv"
         assert recovery.pacepilot_readiness_components[0].baseline == 60
 
 
-def test_readiness_includes_recovery_after_an_inactive_week(session_factory):
+def test_readiness_does_not_reward_an_inactive_week(session_factory):
     with session_factory() as session:
         user = _user(session)
         session.add(
@@ -489,11 +492,190 @@ def test_readiness_includes_recovery_after_an_inactive_week(session_factory):
             session, user.id, as_of=date(2026, 6, 30)
         ).get_current_recovery_state()
 
-        assert recovery.pacepilot_readiness_score == 95
-        assert len(recovery.pacepilot_readiness_components) == 1
-        assert (
-            recovery.pacepilot_readiness_components[0].component == "recent_hard_training_recovery"
+        assert recovery.pacepilot_readiness_score is None
+        assert recovery.pacepilot_readiness_components == ()
+
+
+def test_garmin_fitness_metrics_select_sparse_values_independently(session_factory):
+    as_of = date(2026, 6, 30)
+    with session_factory() as session:
+        user = _user(session)
+        other = _user(session, "Other performance")
+        session.add_all(
+            [
+                DailyFitness(
+                    user_id=user.id,
+                    day=date(2026, 5, 1),
+                    cycling_ftp_watts=270,
+                ),
+                DailyFitness(
+                    user_id=user.id,
+                    day=date(2026, 6, 28),
+                    lactate_threshold_speed_mps=4.0,
+                    race_prediction_5k_seconds=1_245,
+                ),
+                DailyFitness(
+                    user_id=user.id,
+                    day=as_of,
+                    running_ftp_watts=315,
+                    fitness_age=34.5,
+                ),
+                DailyFitness(
+                    user_id=user.id,
+                    day=date(2026, 7, 1),
+                    running_ftp_watts=999,
+                ),
+                DailyFitness(
+                    user_id=other.id,
+                    day=as_of,
+                    hill_score=100,
+                ),
+            ]
         )
+        session.commit()
+
+        fitness = AthleteDataService(session, user.id, as_of=as_of).get_garmin_fitness_metrics(
+            days=7
+        )
+
+        cycling_ftp = fitness.get("cycling_ftp")
+        threshold_speed = fitness.get("threshold_speed")
+        running_ftp = fitness.get("running_ftp")
+        fitness_age = fitness.get("fitness_age")
+        assert cycling_ftp is not None
+        assert threshold_speed is not None
+        assert running_ftp is not None
+        assert fitness_age is not None
+        assert cycling_ftp.latest.value == 270
+        assert cycling_ftp.points == ()
+        assert threshold_speed.latest.day == date(2026, 6, 28)
+        assert [point.value for point in running_ftp.points] == [315]
+        assert running_ftp.latest.value == 315
+        assert fitness_age.latest.value == 34.5
+        assert fitness.get("hill_score") is None
+
+
+def test_readiness_v2_caps_severely_poor_sleep_and_neutralizes_easy_training(
+    session_factory,
+):
+    as_of = date(2026, 6, 30)
+    with session_factory() as session:
+        user = _user(session)
+        session.add(
+            DailyHealth(
+                user_id=user.id,
+                day=as_of,
+                sleep_seconds=14_400,
+                sleep_need_seconds=28_800,
+                sleep_score=35,
+                hrv_average=90,
+                hrv_baseline_balanced_low=50,
+                hrv_baseline_balanced_high=70,
+                stress_average=0,
+                body_battery_high=100,
+            )
+        )
+        session.add_all(
+            [
+                _activity(
+                    user.id,
+                    "easy",
+                    "running",
+                    datetime(2026, 6, 29),
+                    aerobic_training_effect=1,
+                ),
+                GarminSyncState(
+                    user_id=user.id,
+                    resource="activities",
+                    status="ok",
+                    backfill_complete=True,
+                ),
+            ]
+        )
+        session.commit()
+
+        recovery = AthleteDataService(session, user.id, as_of=as_of).get_current_recovery_state()
+
+        assert recovery.pacepilot_readiness_formula_version == "2.0"
+        assert recovery.pacepilot_readiness_score == 44
+        assert recovery.pacepilot_readiness_label == "low"
+        assert recovery.pacepilot_readiness_limiter == "sleep_duration"
+        training = next(
+            item
+            for item in recovery.pacepilot_readiness_components
+            if item.component == "recent_hard_training_recovery"
+        )
+        assert training.score == 75
+        assert training.normalized_weight == pytest.approx(0.05 / 0.85)
+
+
+def test_readiness_v2_carries_recent_sleep_debt_and_prefers_current_garmin_score(
+    session_factory,
+):
+    as_of = date(2026, 6, 30)
+    with session_factory() as session:
+        user = _user(session)
+        session.add_all(
+            [
+                DailyHealth(
+                    user_id=user.id,
+                    day=date(2026, 6, 28),
+                    sleep_seconds=14_400,
+                    sleep_need_seconds=28_800,
+                ),
+                DailyHealth(
+                    user_id=user.id,
+                    day=date(2026, 6, 29),
+                    sleep_seconds=18_000,
+                    sleep_need_seconds=28_800,
+                ),
+                DailyHealth(
+                    user_id=user.id,
+                    day=as_of,
+                    sleep_seconds=28_800,
+                    sleep_need_seconds=28_800,
+                    sleep_score=90,
+                    hrv_average=60,
+                    hrv_baseline_balanced_low=50,
+                    hrv_baseline_balanced_high=70,
+                    stress_average=20,
+                    body_battery_high=90,
+                ),
+            ]
+        )
+        session.commit()
+
+        fallback_recovery = AthleteDataService(
+            session, user.id, as_of=as_of
+        ).get_current_recovery_state()
+        assert fallback_recovery.pacepilot_readiness_score == 64
+        assert fallback_recovery.pacepilot_readiness_limiter == "recent_sleep_debt"
+
+        session.add(
+            DailyFitness(
+                user_id=user.id,
+                day=as_of,
+                garmin_training_readiness_score=72,
+                garmin_training_readiness_level="GOOD",
+            )
+        )
+        session.commit()
+        recovery = AthleteDataService(session, user.id, as_of=as_of).get_current_recovery_state()
+        selected = preferred_readiness(recovery)
+
+        assert recovery.pacepilot_readiness_score is None
+        assert recovery.pacepilot_readiness_components == ()
+        assert selected is not None
+        assert selected.source == "garmin"
+        assert selected.score == 72
+        assert selected.label == "GOOD"
+
+        next_day = AthleteDataService(
+            session, user.id, as_of=date(2026, 7, 1)
+        ).get_current_recovery_state()
+        fallback = preferred_readiness(next_day)
+        assert fallback is not None
+        assert fallback.source == "pacepilot"
 
 
 def test_empty_summaries_preserve_unavailable_metrics(session_factory):
@@ -527,3 +709,5 @@ def test_invalid_windows_are_rejected(session_factory, days):
             service.get_health_trends(days)
         with pytest.raises(ValueError, match="days must be at least 1"):
             service.get_training_summary(days)
+        with pytest.raises(ValueError, match="days must be at least 1"):
+            service.get_garmin_fitness_metrics(days)

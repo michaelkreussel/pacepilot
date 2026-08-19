@@ -31,6 +31,7 @@ from app.services.garmin.locks import (
     garmin_account_active,
     garmin_account_slot,
 )
+from app.services.garmin.performance_sync import sync_performance_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,12 @@ METRIC_LABELS = {
     "vo2max": "VO₂max",
     "training_readiness": "Trainingsbereitschaft",
     "training_status": "Trainingsstatus",
+    "fitness_age": "Fitnessalter",
+    "endurance_score": "Ausdauerwert",
+    "hill_score": "Anstiegswert",
+    "running_thresholds": "Laufschwellen",
+    "cycling_ftp": "Cycling FTP",
+    "race_predictions": "Rennprognosen",
     "activities": "Aktivitäten",
     "devices": "Geräte",
     "login": "Anmeldung",
@@ -710,6 +717,60 @@ def sync_garmin(
             run.health_days_synced = run.days_completed
             session.commit()
 
+            run.stage = "performance"
+            run.message = "Garmin-Leistungswerte werden aktualisiert"
+            run.current_day = date.today()
+            run.current_operation = "Leistung und Schwellen"
+            session.commit()
+            performance_result = sync_performance_metrics(
+                session,
+                client,
+                account.user_id,
+                delay=settings.garmin_call_delay_seconds,
+                pacer=pacer,
+                log_context={"sync_run_id": run.id, "sync_user_id": account.user_id},
+            )
+            attempted_performance = sum(
+                not item.skipped for item in performance_result.resources.values()
+            )
+            run.operations_total += attempted_performance
+            run.operations_completed += attempted_performance
+            for resource, item in performance_result.resources.items():
+                label = METRIC_LABELS[resource]
+                _event(
+                    session,
+                    run,
+                    (
+                        f"{label}: {item.stored_values} Werte gespeichert"
+                        if item.status in {"ok", "partial"}
+                        else f"{label}: keine Daten"
+                        if item.status == "empty"
+                        else f"{label}: nicht unterstützt"
+                        if item.status == "unsupported"
+                        else f"{label}: {item.status}"
+                    ),
+                    category="metric",
+                    status=(
+                        "success"
+                        if item.status in {"ok", "partial"}
+                        else "skipped"
+                        if item.status in {"empty", "unsupported"} or item.skipped
+                        else "error"
+                    ),
+                    level=(
+                        "success"
+                        if item.status in {"ok", "partial"}
+                        else "info"
+                        if item.status in {"empty", "unsupported"} or item.skipped
+                        else "warning"
+                    ),
+                    resource=resource,
+                    day=date.today(),
+                    operation="sync_performance_metric",
+                    record_count=item.stored_values,
+                )
+            session.commit()
+
             run.stage = "devices"
             run.message = "Garmin-Geräte werden aktualisiert"
             run.current_operation = "Geräteliste"
@@ -736,7 +797,8 @@ def sync_garmin(
                 (
                     f"Sync abgeschlossen: {run.activities_synced} Aktivitäten, "
                     f"{run.days_completed} Health-Tage, "
-                    f"{health_result.api_calls} Health-API-Aufrufe"
+                    f"{health_result.api_calls} Health-API-Aufrufe, "
+                    f"{performance_result.stored_values} Leistungswerte"
                 ),
                 category="sync",
                 status="success",

@@ -60,6 +60,12 @@ def _sync_view(
             "vo2max",
             "training_readiness",
             "training_status",
+            "fitness_age",
+            "endurance_score",
+            "hill_score",
+            "running_thresholds",
+            "cycling_ftp",
+            "race_predictions",
         }
     ]
     if sync_run is not None:

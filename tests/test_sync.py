@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.config import get_settings
 from app.models import (
     Activity,
+    DailyFitness,
     DailyHealth,
     GarminAccount,
     GarminDevice,
@@ -133,6 +134,31 @@ class FakeGarmin:
     def get_training_status(self, _day: str) -> dict[str, Any]:
         return {}
 
+    def get_fitnessage_data(self, day: str) -> dict[str, Any]:
+        return {"calendarDate": day, "fitnessAge": 35}
+
+    def get_endurance_score(self, day: str) -> dict[str, Any]:
+        return {"calendarDate": day, "overallScore": 5_000}
+
+    def get_hill_score(self, day: str) -> dict[str, Any]:
+        return {"calendarDate": day, "overallScore": 40}
+
+    def get_lactate_threshold(self) -> dict[str, Any]:
+        return {
+            "speed_and_heart_rate": {
+                "calendarDate": date.today().isoformat(),
+                "speed": 4.0,
+                "heartRate": 170,
+            },
+            "power": {"functionalThresholdPower": 310},
+        }
+
+    def get_cycling_ftp(self) -> dict[str, Any]:
+        return {"functionalThresholdPower": 280}
+
+    def get_race_predictions(self) -> dict[str, Any]:
+        return {"calendarDate": date.today().isoformat(), "time5K": 1_200}
+
     def get_devices(self) -> list[dict[str, Any]]:
         return [{"deviceId": 77, "displayName": "Forerunner", "productType": "FR"}]
 
@@ -194,7 +220,7 @@ def test_sync_normalizes_and_stores_data(
         assert result.message == "Synchronisierung abgeschlossen"
         assert result.current_item == result.total_items == 2
         assert result.days_completed == result.days_total == 2
-        assert result.operations_completed == result.operations_total == 16
+        assert result.operations_completed == result.operations_total == 22
         assert result.activities_synced == 1
         assert result.health_days_synced == 2
         activity = session.scalar(select(Activity))
@@ -213,6 +239,12 @@ def test_sync_normalizes_and_stores_data(
         assert activity_data["route"] == [[50.0, 9.0]]
         health = session.scalar(select(DailyHealth))
         assert health is not None
+        fitness = session.scalar(select(DailyFitness).where(DailyFitness.day == date.today()))
+        assert fitness is not None
+        assert fitness.fitness_age == 35
+        assert fitness.lactate_threshold_hr == 170
+        assert fitness.cycling_ftp_watts == 280
+        assert fitness.race_prediction_5k_seconds == 1_200
         assert health.steps == 9000
         assert health.sleep_score == 82
         assert health.hrv_average == 54.0

@@ -25,7 +25,6 @@ from app.models import (
 from app.routes import plans as plans_module
 from app.routes import settings as settings_module
 from app.routes import workouts as workouts_module
-from app.services.garmin import sync as sync_module
 from app.services.garmin.locks import garmin_account_slot
 
 
@@ -105,6 +104,51 @@ def test_main_pages_render(client: TestClient) -> None:
     openapi = client.get("/openapi.json").json()
     assert "303" in openapi["paths"]["/workouts/{workout_id}/publish"]["post"]["responses"]
     assert "303" in openapi["paths"]["/settings/garmin/sync"]["post"]["responses"]
+
+
+def test_dashboard_prioritizes_today_without_rendering_charts(
+    client: TestClient, session_factory: sessionmaker[Session]
+) -> None:
+    client.get("/")
+    with session_factory() as session:
+        user = session.scalar(select(User))
+        assert user is not None
+        session.add_all(
+            [
+                DailyHealth(
+                    user_id=user.id,
+                    day=date.today(),
+                    sleep_seconds=27_000,
+                    sleep_score=82,
+                    resting_hr=49,
+                    hrv_average=61,
+                    steps=4_321,
+                ),
+                DailyFitness(
+                    user_id=user.id,
+                    day=date.today(),
+                    garmin_training_readiness_score=72,
+                    garmin_training_readiness_level="GOOD",
+                ),
+            ]
+        )
+        session.commit()
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert "Deine Tagesform" in response.text
+    assert "Nächste Einheit" in response.text
+    assert "Wichtige Signale" in response.text
+    assert "Deine Trainingswoche" in response.text
+    assert "Garmin Training Readiness" in response.text
+    assert "72 von 100" in response.text
+    assert 'href="/profile/hrv"' in response.text
+    assert "4321" in response.text
+    assert "healthChart" not in response.text
+    assert "chart.umd.min.js" not in response.text
+    assert "Aktualisieren" not in response.text
+    assert client.post("/health").status_code == 404
 
 
 def test_training_plan_month_view_shows_calendar_weeks_and_workouts(
@@ -541,36 +585,6 @@ def test_delete_garmin_data_is_blocked_during_account_operation(
         assert account.connected_at is not None
 
 
-def test_health_refresh_fetches_current_steps(
-    client: TestClient,
-    session_factory: sessionmaker[Session],
-    monkeypatch: Any,
-) -> None:
-    class FakeGarmin:
-        def get_user_summary(self, _day: str) -> dict[str, int]:
-            return {"totalSteps": 2559}
-
-    client.get("/")
-    with session_factory() as session:
-        account = session.scalar(select(GarminAccount))
-        assert account is not None
-        account.connected_at = datetime.now(UTC).replace(tzinfo=None)
-        session.commit()
-
-    monkeypatch.setattr(
-        sync_module, "connect_garmin_account", lambda _session, _account: FakeGarmin()
-    )
-
-    response = client.post("/health")
-
-    assert response.status_code == 200
-    assert "2559" in response.text
-    with session_factory() as session:
-        health = session.scalar(select(DailyHealth).where(DailyHealth.day == date.today()))
-        assert health is not None
-        assert health.steps == 2559
-
-
 def test_create_and_confirm_workout(client: TestClient) -> None:
     response = client.post(
         "/workouts",
@@ -679,7 +693,7 @@ def test_edit_draft_workout(client: TestClient, session_factory: sessionmaker[Se
     assert "startPaletteDrag('interval'" in form.text
     assert "/static/icons/workout.svg#pencil" in form.text
     assert "setDropTarget(null, index)" in form.text
-    assert "/static/css/tailwind.css?v=20260819-1" in form.text
+    assert "/static/css/tailwind.css?v=20260819-5" in form.text
     assert "/static/js/theme.js?v=20260809-3" in form.text
     assert "data-theme-toggle" in form.text
 

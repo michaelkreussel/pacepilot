@@ -5,6 +5,10 @@ from sqlalchemy.orm import Session
 
 from app.repositories.health import find_health_day
 from app.repositories.workouts import workouts_between
+from app.services.analytics.fitness_trends import (
+    GarminFitnessAnalytics,
+    get_garmin_fitness_metrics,
+)
 from app.services.analytics.health_trends import (
     HealthTrends,
     HrvBaseline,
@@ -141,6 +145,9 @@ class AthleteDataService:
 
     def get_vo2max_trend(self, days: int = 365) -> MetricTrend:
         return self.get_health_trends(days).vo2max
+
+    def get_garmin_fitness_metrics(self, days: int = 365) -> GarminFitnessAnalytics:
+        return get_garmin_fitness_metrics(self.session, self.user_id, days=days, as_of=self.as_of)
 
     def get_activity_details(self, activity_id: int) -> ActivityDetails | None:
         return get_activity_details(self.session, self.user_id, activity_id, as_of=self.as_of)

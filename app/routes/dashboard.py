@@ -1,4 +1,3 @@
-from contextlib import suppress
 from datetime import date
 
 from fastapi import APIRouter, Request
@@ -9,13 +8,30 @@ from app.auth import CurrentUser
 from app.database import SessionDep
 from app.models import Activity, DailyHealth, Workout
 from app.onboarding import onboarding_state
-from app.repositories.health import recent_health
 from app.repositories.users import get_or_create_garmin_account
+from app.services.analytics import AthleteDataService
+from app.services.analytics.health_trends import preferred_readiness
 from app.services.analytics.training_load import calculate_weekly_load
-from app.services.garmin.sync import SyncAlreadyRunningError, refresh_daily_summary
 from app.web import context, templates
 
 router = APIRouter()
+
+READINESS_LABELS = {"low": "Niedrig", "fair": "Solide", "good": "Gut", "high": "Hoch"}
+GARMIN_READINESS_LABELS = {
+    "LOW": "Niedrig",
+    "POOR": "Niedrig",
+    "FAIR": "Solide",
+    "MODERATE": "Solide",
+    "GOOD": "Gut",
+    "HIGH": "Hoch",
+    "PRIME": "Sehr hoch",
+}
+READINESS_GUIDANCE = {
+    "low": "Deine Signale sprechen heute eher für Erholung oder eine sehr lockere Einheit.",
+    "fair": "Trainiere bewusst und passe die Belastung an dein Körpergefühl an.",
+    "good": "Deine Erholung wirkt stabil. Du kannst dein Training wie geplant angehen.",
+    "high": "Deine Signale sprechen für eine hohe Belastbarkeit.",
+}
 
 
 def _today_health(session: SessionDep, user_id: int) -> DailyHealth | None:
@@ -42,7 +58,17 @@ def dashboard(request: Request, session: SessionDep, user: CurrentUser) -> Respo
         .order_by(Workout.scheduled_for)
         .limit(1)
     )
-    health = recent_health(session, user.id, 14)
+    recovery = AthleteDataService(session, user.id).get_current_recovery_state()
+    readiness = preferred_readiness(recovery)
+    readiness_tone = (
+        "high"
+        if readiness and readiness.score >= 80
+        else "good"
+        if readiness and readiness.score >= 65
+        else "fair"
+        if readiness and readiness.score >= 45
+        else "low"
+    )
     return templates.TemplateResponse(
         request,
         "dashboard.html",
@@ -54,38 +80,20 @@ def dashboard(request: Request, session: SessionDep, user: CurrentUser) -> Respo
             latest_activity=latest_activity,
             latest_health=latest_health,
             upcoming=upcoming,
-            health=health,
             weekly_load=calculate_weekly_load(session, user.id),
-        ),
-    )
-
-
-@router.get("/health", response_class=HTMLResponse)
-def health_cards(request: Request, session: SessionDep, user: CurrentUser) -> HTMLResponse:
-    latest_health = _today_health(session, user.id)
-    return templates.TemplateResponse(
-        request,
-        "partials/health_cards.html",
-        context(
-            request,
-            latest_health=latest_health,
-            weekly_load=calculate_weekly_load(session, user.id),
-        ),
-    )
-
-
-@router.post("/health", response_class=HTMLResponse)
-def refresh_health_cards(request: Request, session: SessionDep, user: CurrentUser) -> HTMLResponse:
-    account = get_or_create_garmin_account(session, user)
-    if account.connected_at is not None:
-        with suppress(SyncAlreadyRunningError):
-            refresh_daily_summary(session, user.id)
-    return templates.TemplateResponse(
-        request,
-        "partials/health_cards.html",
-        context(
-            request,
-            latest_health=_today_health(session, user.id),
-            weekly_load=calculate_weekly_load(session, user.id),
+            recovery=recovery,
+            readiness=readiness,
+            readiness_tone=readiness_tone,
+            readiness_label=(
+                GARMIN_READINESS_LABELS.get(readiness.label or "", readiness.label)
+                if readiness and readiness.source == "garmin"
+                else READINESS_LABELS.get(readiness.label or "")
+                if readiness
+                else None
+            ),
+            readiness_guidance=READINESS_GUIDANCE.get(
+                readiness_tone,
+                "Sobald genügend Gesundheitsdaten vorliegen, ordnet PacePilot deinen Tag ein.",
+            ),
         ),
     )

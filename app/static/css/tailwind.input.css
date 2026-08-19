@@ -378,23 +378,13 @@
     --readiness-color: var(--danger);
   }
 
-  .readiness-component,
-  .profile-metric,
-  .profile-stat {
+  .readiness-component {
     animation: profile-stat-enter 500ms cubic-bezier(0.22, 1, 0.36, 1) var(--stat-delay, 240ms) both;
   }
 
   .readiness-component-bar {
     transform-origin: left;
     animation: readiness-bar 700ms cubic-bezier(0.22, 1, 0.36, 1) var(--bar-delay, 300ms) both;
-  }
-
-  .profile-metric.positive {
-    border-left: 3px solid var(--success);
-  }
-
-  .profile-metric.caution {
-    border-left: 3px solid var(--warning);
   }
 
   .coverage-pill.complete {
@@ -534,8 +524,6 @@
   .readiness-score-number,
   .readiness-component,
   .readiness-component-bar,
-  .profile-metric,
-  .profile-stat,
   .coach-activity-wave,
   .coach-activity-pulse {
     animation: none;

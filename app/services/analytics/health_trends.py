@@ -1,6 +1,7 @@
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+from typing import Literal
 
 from sqlalchemy.orm import Session
 
@@ -116,10 +117,20 @@ class RecoveryState:
     load_ratio: float | None
     load_ratio_day: date | None
     pacepilot_readiness_formula_version: str
+    pacepilot_readiness_limiter: str | None
     pacepilot_readiness_score: float | None
     pacepilot_readiness_label: str | None
     pacepilot_readiness_confidence: float
     pacepilot_readiness_components: tuple[ReadinessComponent, ...]
+
+
+@dataclass(frozen=True)
+class PreferredReadiness:
+    source: Literal["garmin", "pacepilot"]
+    score: float
+    label: str | None
+    day: date
+    confidence: float | None
 
 
 def _average(values: Sequence[float]) -> float | None:
@@ -330,12 +341,13 @@ def get_current_recovery_state(
     health = latest_health_on_or_before(session, user_id, end)
     fitness_rows = fitness_between(session, user_id, end - timedelta(days=364), end)
     fitness = fitness_rows[-1] if fitness_rows else None
-    readiness, readiness_day = _latest_fitness_value(
-        fitness_rows, lambda row: row.garmin_training_readiness_score
+    readiness_row = next(
+        (row for row in reversed(fitness_rows) if row.garmin_training_readiness_score is not None),
+        None,
     )
-    readiness_level, _ = _latest_fitness_value(
-        fitness_rows, lambda row: row.garmin_training_readiness_level
-    )
+    readiness = readiness_row.garmin_training_readiness_score if readiness_row else None
+    readiness_level = readiness_row.garmin_training_readiness_level if readiness_row else None
+    readiness_day = readiness_row.day if readiness_row else None
     recovery_time, recovery_time_day = _latest_fitness_value(
         fitness_rows, lambda row: row.recovery_time_minutes
     )
@@ -351,10 +363,16 @@ def get_current_recovery_state(
         fitness_rows, lambda row: row.chronic_load
     )
     load_ratio, load_ratio_day = _latest_fitness_value(fitness_rows, lambda row: row.load_ratio)
-    trends = get_health_trends(session, user_id, days=28, as_of=end)
-    score, label, confidence, components = _pacepilot_readiness(
-        session, user_id, end, health, trends
+    has_current_garmin_readiness = (
+        readiness is not None and 0 <= readiness <= 100 and readiness_day == end
     )
+    if has_current_garmin_readiness:
+        score, label, confidence, components, limiter = None, None, 0.0, (), None
+    else:
+        trends = get_health_trends(session, user_id, days=28, as_of=end)
+        score, label, confidence, components, limiter = _pacepilot_readiness(
+            session, user_id, end, health, trends
+        )
     return RecoveryState(
         as_of=end,
         health_day=health.day if health else None,
@@ -385,12 +403,38 @@ def get_current_recovery_state(
         chronic_load_day=chronic_load_day,
         load_ratio=load_ratio,
         load_ratio_day=load_ratio_day,
-        pacepilot_readiness_formula_version="1.0",
+        pacepilot_readiness_formula_version="2.0",
+        pacepilot_readiness_limiter=limiter,
         pacepilot_readiness_score=score,
         pacepilot_readiness_label=label,
         pacepilot_readiness_confidence=confidence,
         pacepilot_readiness_components=components,
     )
+
+
+def preferred_readiness(recovery: RecoveryState) -> PreferredReadiness | None:
+    garmin_score = recovery.garmin_training_readiness_score
+    if (
+        garmin_score is not None
+        and 0 <= garmin_score <= 100
+        and recovery.garmin_training_readiness_day == recovery.as_of
+    ):
+        return PreferredReadiness(
+            source="garmin",
+            score=float(garmin_score),
+            label=recovery.garmin_training_readiness_level,
+            day=recovery.as_of,
+            confidence=None,
+        )
+    if recovery.pacepilot_readiness_score is not None:
+        return PreferredReadiness(
+            source="pacepilot",
+            score=recovery.pacepilot_readiness_score,
+            label=recovery.pacepilot_readiness_label,
+            day=recovery.as_of,
+            confidence=recovery.pacepilot_readiness_confidence,
+        )
+    return None
 
 
 def _latest_fitness_value[T](
@@ -407,13 +451,65 @@ def _clamp(value: float) -> float:
     return max(0.0, min(100.0, value))
 
 
+def _sleep_ratio_cap(ratio: float) -> float | None:
+    if ratio <= 0.65:
+        return 44.0
+    if ratio < 0.75:
+        return 64.0
+    if ratio < 0.85:
+        return 79.0
+    return None
+
+
+def _readiness_sleep_cap(
+    as_of: date, health: DailyHealth, trends: HealthTrends
+) -> tuple[float | None, str | None]:
+    caps: list[tuple[float, str]] = []
+    sleep_baseline = health.sleep_need_seconds or trends.sleep_duration.personal_baseline
+    if (
+        health.sleep_seconds is not None
+        and sleep_baseline
+        and (cap := _sleep_ratio_cap(health.sleep_seconds / sleep_baseline)) is not None
+    ):
+        caps.append((cap, "sleep_duration"))
+    if health.sleep_score is not None:
+        if health.sleep_score < 50:
+            caps.append((44.0, "garmin_sleep_score"))
+        elif health.sleep_score < 60:
+            caps.append((64.0, "garmin_sleep_score"))
+        elif health.sleep_score < 70:
+            caps.append((79.0, "garmin_sleep_score"))
+
+    recent_start = as_of - timedelta(days=2)
+    needs = {point.day: point.value for point in trends.sleep_need.points}
+    recent_pairs = [
+        (point.value, needs.get(point.day) or trends.sleep_duration.personal_baseline)
+        for point in trends.sleep_duration.points
+        if recent_start <= point.day <= as_of
+        and (needs.get(point.day) or trends.sleep_duration.personal_baseline)
+    ]
+    if len(recent_pairs) >= 2:
+        duration_total = sum(duration for duration, _ in recent_pairs)
+        need_total = sum(need for _, need in recent_pairs if need is not None)
+        if need_total and (cap := _sleep_ratio_cap(duration_total / need_total)) is not None:
+            caps.append((cap, "recent_sleep_debt"))
+
+    return min(caps, default=(None, None), key=lambda item: item[0])
+
+
 def _pacepilot_readiness(
     session: Session,
     user_id: int,
     as_of: date,
     health: DailyHealth | None,
     trends: HealthTrends,
-) -> tuple[float | None, str | None, float, tuple[ReadinessComponent, ...]]:
+) -> tuple[
+    float | None,
+    str | None,
+    float,
+    tuple[ReadinessComponent, ...],
+    str | None,
+]:
     weighted: list[tuple[str, float, float, float, float | None, str, float]] = []
     health_is_current = health is not None and (as_of - health.day).days <= 2
     if health_is_current and health is not None:
@@ -423,7 +519,7 @@ def _pacepilot_readiness(
                 (
                     "sleep_duration",
                     _clamp(health.sleep_seconds / sleep_baseline * 100),
-                    0.20,
+                    0.25,
                     float(health.sleep_seconds),
                     float(sleep_baseline),
                     "seconds",
@@ -439,7 +535,7 @@ def _pacepilot_readiness(
                 (
                     "garmin_sleep_score",
                     _clamp(health.sleep_score),
-                    0.10,
+                    0.15,
                     health.sleep_score,
                     None,
                     "garmin_score",
@@ -459,7 +555,7 @@ def _pacepilot_readiness(
                 (
                     "hrv",
                     _clamp(75 + 100 * (health.hrv_average / hrv_baseline - 1)),
-                    0.25,
+                    0.20,
                     health.hrv_average,
                     hrv_baseline,
                     "ms",
@@ -535,7 +631,7 @@ def _pacepilot_readiness(
         and activity_state.backfill_complete
         and len(measured) == len(recent)
     )
-    if training_data_complete:
+    if training_data_complete and measured:
         hard = [
             activity
             for activity in measured
@@ -546,12 +642,12 @@ def _pacepilot_readiness(
             )
         ]
         days_since_hard = (as_of - hard[-1].started_at.date()).days if hard else 7
-        training_score = (45, 60, 75, 85, 95)[min(days_since_hard, 4)]
+        training_score = (35, 50, 65, 70, 75)[min(days_since_hard, 4)]
         weighted.append(
             (
                 "recent_hard_training_recovery",
                 float(training_score),
-                0.10,
+                0.05,
                 float(days_since_hard),
                 None,
                 "days_since_hard_workout",
@@ -559,9 +655,10 @@ def _pacepilot_readiness(
             )
         )
 
+    health_weight = sum(item[2] for item in weighted if item[0] != "recent_hard_training_recovery")
+    if health_weight < 0.20:
+        return None, None, 0.0, (), None
     total_weight = sum(item[2] for item in weighted)
-    if not total_weight:
-        return None, None, 0.0, ()
     components = tuple(
         ReadinessComponent(
             component=name,
@@ -573,14 +670,20 @@ def _pacepilot_readiness(
         )
         for name, component_score, weight, current, baseline, unit, _ in weighted
     )
-    score = round(sum(item[1] * item[2] for item in weighted) / total_weight, 1)
+    raw_score = sum(item[1] * item[2] for item in weighted) / total_weight
+    sleep_cap, limiter = (
+        _readiness_sleep_cap(as_of, health, trends)
+        if health_is_current and health is not None
+        else (None, None)
+    )
+    score = round(min(raw_score, sleep_cap) if sleep_cap is not None else raw_score, 1)
     label = "high" if score >= 80 else "good" if score >= 65 else "fair" if score >= 45 else "low"
     history_factor = sum(item[2] * item[6] for item in weighted) / total_weight
     confidence = round(
         total_weight * (0.5 + 0.5 * history_factor) * 100,
         1,
     )
-    return score, label, confidence, components
+    return score, label, confidence, components, limiter
 
 
 def get_hrv_baseline(

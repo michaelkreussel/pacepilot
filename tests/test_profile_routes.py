@@ -27,12 +27,100 @@ def test_empty_profile_renders_without_zeroing_missing_metrics(client):
     response = client.get("/profile?period=month&end=2026-06-30")
 
     assert response.status_code == 200
-    assert "Athletenprofil" in response.text
+    assert "Analyse" in response.text
+    assert "Deine Entwicklung" in response.text
     assert "Noch keine belastbare Einschätzung" in response.text
     assert "Trainingshistorie noch nicht belastbar" in response.text
-    assert "Garmin Bereitschaft</span>\n        <strong>0" not in response.text
-    assert re.search(r'class="nav-item active[^"]*" href="/profile"', response.text)
-    assert _chart_payload(response.text) == {"charts": []}
+    assert "Garmin Bereitschaft" not in response.text
+    assert re.search(r'class="nav-item active[^"]*" href="/profile">Analyse', response.text)
+    assert '<script id="profile-data"' not in response.text
+    assert "chart.umd.min.js" not in response.text
+    assert "Leistung & Schwellen" not in response.text
+
+
+def test_profile_prefers_same_day_garmin_training_readiness(client, session_factory):
+    with session_factory() as session:
+        user = session.scalar(select(User).order_by(User.id))
+        assert user is not None
+        session.add(
+            DailyFitness(
+                user_id=user.id,
+                day=date(2026, 6, 30),
+                garmin_training_readiness_score=72,
+                garmin_training_readiness_level="GOOD",
+            )
+        )
+        session.commit()
+
+    response = client.get("/profile?period=month&end=2026-06-30")
+
+    assert response.status_code == 200
+    assert "Garmin Training Readiness" in response.text
+    assert "72 / 100" in response.text
+    assert "PacePilot berechnet keinen zusätzlichen Ersatz-Score" in response.text
+    assert "Datenvertrauen" not in response.text
+    assert "So entsteht die Einschätzung" not in response.text
+
+
+def test_profile_shows_only_available_device_performance_metrics(client, session_factory):
+    with session_factory() as session:
+        user = session.scalar(select(User).order_by(User.id))
+        assert user is not None
+        session.add_all(
+            [
+                DailyFitness(
+                    user_id=user.id,
+                    day=date(2026, 5, 1),
+                    cycling_ftp_watts=275,
+                ),
+                DailyFitness(
+                    user_id=user.id,
+                    day=date(2026, 6, 20),
+                    lactate_threshold_speed_mps=4.0,
+                    lactate_threshold_hr=170,
+                    running_ftp_watts=310,
+                    endurance_score=5_100,
+                    fitness_age=34.5,
+                ),
+                DailyFitness(
+                    user_id=user.id,
+                    day=date(2026, 6, 28),
+                    race_prediction_5k_seconds=1_245,
+                    race_prediction_10k_seconds=2_610,
+                ),
+            ]
+        )
+        session.commit()
+
+    overview = client.get("/profile?period=month&end=2026-06-30")
+
+    assert overview.status_code == 200
+    assert "Leistung & Schwellen" in overview.text
+    assert "Schwellenpace" in overview.text
+    assert "4:10 min/km" in overview.text
+    assert "Cycling FTP" in overview.text
+    assert "275 W" in overview.text
+    assert "5-km-Prognose" in overview.text
+    assert "20:45 min" in overview.text
+    assert "Garmin Anstiegswert" not in overview.text
+
+    pace_detail = client.get("/profile/threshold-pace?period=month&end=2026-06-30")
+    pace = _chart_payload(pace_detail.text)["charts"][0]
+    assert pace["id"] == "threshold-pace-chart"
+    assert pace["datasets"][0]["data"] == [250.0]
+    assert pace["value_format"] == "pace"
+    assert pace["reverse_y"] is True
+    assert "Stand 20.06.2026" in pace_detail.text
+
+    race_detail = client.get("/profile/race-predictions?period=month&end=2026-06-30")
+    race = _chart_payload(race_detail.text)["charts"][0]
+    assert race["value_format"] == "duration"
+    assert [dataset["label"] for dataset in race["datasets"]] == ["5 km", "10 km"]
+
+    old_detail = client.get("/profile/cycling-ftp?period=week&end=2026-06-30")
+    assert _chart_payload(old_detail.text) == {"charts": []}
+    assert "275 W" in old_detail.text
+    assert "Kein Verlauf im gewählten Zeitraum" in old_detail.text
 
 
 @pytest.mark.parametrize("period", ["day", "week", "month", "3m", "year"])
@@ -40,7 +128,7 @@ def test_profile_periods_render(client, period):
     response = client.get(f"/profile?period={period}&end=2026-06-30")
 
     assert response.status_code == 200
-    assert f'href="/profile?period={period}&end=2026-06-30"' in response.text
+    assert f'href="/profile?period={period}&amp;end=2026-06-30"' in response.text
 
 
 def test_profile_rejects_unknown_period_and_future_end(client):
@@ -49,6 +137,7 @@ def test_profile_rejects_unknown_period_and_future_end(client):
     assert response.status_code == 400
     assert response.json()["detail"] == "Das Enddatum darf nicht in der Zukunft liegen"
     assert client.get("/profile?period=year&end=0001-01-01").status_code == 400
+    assert client.get("/profile/unknown-metric").status_code == 404
 
 
 def test_profile_renders_real_metrics_gaps_charts_and_user_scoped_drilldown(
@@ -157,50 +246,80 @@ def test_profile_renders_real_metrics_gaps_charts_and_user_scoped_drilldown(
         )
         session.add_all([run, old_sparse, very_old, hidden])
         session.commit()
-        run_id = run.id
 
     response = client.get("/profile?period=year&end=2026-06-30")
 
     assert response.status_code == 200
     assert "PacePilot Readiness" in response.text
-    assert "Kein Garmin-Score" in response.text
-    assert "Stand 30.06.2026 · PacePilot Readiness" in response.text
-    assert 'class="readiness-score-ring"' in response.text
-    assert 'style="--readiness-offset: ' in response.text
-    assert 'data-count-to="' in response.text
-    assert "Historischer Zustand" in response.text
+    assert "für Geräte ohne Garmin Training Readiness" in response.text
+    assert "Formel 2.0" in response.text
+    assert "So entsteht die Einschätzung" in response.text
+    assert "Aktuelle Signale" in response.text
     assert "Ruhepuls" in response.text
     assert "HRV" in response.text
     assert "Schlaf" in response.text
     assert "VO2max" in response.text
-    assert "Progressiver Dauerlauf" in response.text
-    assert "TE bedeutet Garmin Training Effect" in response.text
-    assert "RPE beschreibt deine subjektiv empfundene Anstrengung von 1 bis 10" in response.text
-    assert "TE aerob" in response.text
-    assert "4,1" in response.text
-    assert "TE anaerob" in response.text
-    assert "0,8" in response.text
-    assert "Auslöser: aerober TE ≥ 3,5, RPE ≥ 7" in response.text
-    assert "Volumen bleibt getrennt" not in response.text
-    assert f'href="/activities/{run_id}"' in response.text
+    assert "Belastung & Routine" in response.text
+    assert 'href="/profile/hrv?period=year&amp;end=2026-06-30"' in response.text
+    assert 'href="/profile/running-volume?period=year&amp;end=2026-06-30"' in response.text
+    assert "Progressiver Dauerlauf" not in response.text
     assert "Geheime Einheit" not in response.text
     assert "secret/raw" not in response.text
-    assert 'id="hrv-chart"' in response.text
-    assert 'id="sleep-chart"' in response.text
-    assert 'id="running-volume-chart"' in response.text
-    assert 'id="zone-chart"' in response.text
-    assert 'id="garmin-training-load-chart"' in response.text
-    assert 'id="exercise-load-chart"' not in response.text
+    assert "<canvas" not in response.text
+    assert '<script id="profile-data"' not in response.text
 
-    payload = _chart_payload(response.text)
+    health_detail = client.get("/profile/hrv?period=year&end=2026-06-30")
+    assert health_detail.status_code == 200
+    assert 'id="hrv-chart"' in health_detail.text
+    assert 'id="sleep-chart"' not in health_detail.text
+    payload = _chart_payload(health_detail.text)
+    assert len(payload["charts"]) == 1
     hrv = next(chart for chart in payload["charts"] if chart["id"] == "hrv-chart")
     assert len(hrv["labels"]) == 365
     assert hrv["datasets"][0]["data"].count(None) == 363
     assert hrv["span_gaps"] is True
+    assert hrv["links"][-1] == "/profile/hrv?period=day&end=2026-06-30"
+    assert hrv["summary_title"] == "Letzte verfügbare Werte"
+    assert hrv["summary"][0] == {
+        "label": "HRV",
+        "value": 66.0,
+        "unit": "ms",
+        "context": "Stand 30.06.",
+    }
+
+    training_detail = client.get("/profile/running-volume?period=year&end=2026-06-30")
+    assert training_detail.status_code == 200
+    assert 'id="running-volume-chart"' in training_detail.text
+    assert 'id="zone-chart"' not in training_detail.text
+    payload = _chart_payload(training_detail.text)
+    assert len(payload["charts"]) == 1
     training = next(chart for chart in payload["charts"] if chart["id"] == "running-volume-chart")
     assert "span_gaps" not in training
     assert training["links"][0] == "/activities?from=2025-07-01&to=2025-07-07"
     assert sum(value or 0 for value in training["datasets"][0]["data"]) == 10
+    assert training["summary_title"] == "Zeitraum zusammengefasst"
+    assert training["summary"][0] == {
+        "label": "Laufumfang gesamt",
+        "value": 10.0,
+        "unit": "km",
+        "context": "Gewählter Zeitraum",
+    }
+    assert training["summary"][0]["value"] != training["datasets"][0]["data"][-1]
+
+    frequency_detail = client.get("/profile/workout-frequency?period=year&end=2026-06-30")
+    frequency = _chart_payload(frequency_detail.text)["charts"][0]
+    assert frequency["summary"][0]["label"] == "Einheiten gesamt"
+    assert frequency["summary"][0]["value"] == 2
+    assert frequency["summary"][1]["label"] == "Durchschnitt pro Woche"
+
+    populated_index = next(
+        index for index, value in enumerate(training["datasets"][0]["data"]) if value
+    )
+    drilldown = client.get(training["links"][populated_index])
+    assert drilldown.status_code == 200
+    assert "Progressiver Dauerlauf" in drilldown.text
+    assert "Geheime Einheit" not in drilldown.text
+    assert "secret/raw" not in drilldown.text
 
 
 def test_profile_preserves_one_sided_intensity_and_anaerobic_effect(client, session_factory):
@@ -230,28 +349,33 @@ def test_profile_preserves_one_sided_intensity_and_anaerobic_effect(client, sess
         )
         session.commit()
 
-    response = client.get("/profile?period=week&end=2026-06-30")
+    response = client.get("/profile/training-effect?period=week&end=2026-06-30")
 
     assert response.status_code == 200
     assert 'id="training-effect-chart"' in response.text
-    assert "Hoher Reiz" in response.text
-    assert "TE anaerob" in response.text
-    assert "3,2" in response.text
-    assert "Auslöser: anaerober TE ≥ 2,5" in response.text
     payload = _chart_payload(response.text)
-    intensity = next(chart for chart in payload["charts"] if chart["id"] == "intensity-chart")
-    assert intensity["datasets"][0]["data"] == [None, 12]
-    assert intensity["datasets"][0]["colors"] == ["#1d5a48", "#6757a8"]
     effect = next(chart for chart in payload["charts"] if chart["id"] == "training-effect-chart")
     assert [item["label"] for item in effect["datasets"]] == ["Anaerob"]
+    assert effect["summary_title"] == "Durchschnitt im Zeitraum"
+    assert effect["summary"] == [
+        {
+            "label": "Anaerober Training Effect",
+            "value": 3.2,
+            "unit": "/ 5",
+            "context": "Ø aller Einheiten mit Messwert",
+        }
+    ]
 
-    day_response = client.get("/profile?period=day&end=2026-06-30")
+    intensity_response = client.get("/profile/intensity?period=week&end=2026-06-30")
+    intensity = _chart_payload(intensity_response.text)["charts"][0]
+    assert intensity["datasets"][0]["data"] == [None, 12]
+    assert intensity["datasets"][0]["colors"] == ["#1d5a48", "#6757a8"]
+
+    day_response = client.get("/profile/training-effect?period=day&end=2026-06-30")
     assert day_response.status_code == 200
-    assert "30.06.2026 · Tagesaggregate" in day_response.text
-    assert "Persönliche Trends" not in day_response.text
+    assert "30.06.2026" in day_response.text
     day_chart_ids = {chart["id"] for chart in _chart_payload(day_response.text)["charts"]}
-    assert "intensity-chart" in day_chart_ids
-    assert "training-effect-chart" not in day_chart_ids
+    assert day_chart_ids == {"training-effect-chart"}
 
 
 def test_activity_range_drilldown_filters_results(client, session_factory):

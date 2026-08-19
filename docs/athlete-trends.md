@@ -51,37 +51,61 @@ unavailable history from a confirmed empty metric.
 
 `get_current_recovery_state()` returns the latest source values on or before `as_of`, including the
 original Garmin HRV status/bands, Training Readiness score/level, recovery time, VO2max, Training
-Status, and Garmin load fields. Sparse fitness metrics are selected independently and carry their
-source dates rather than being erased by a newer row for another resource. Garmin values are never
-reconstructed from other metrics.
+Status, and Garmin load fields. Training Readiness score and level are paired from the same row.
+Other sparse fitness metrics are selected independently and carry their source dates rather than
+being erased by a newer row for another resource. Garmin values are never reconstructed from other
+metrics.
 
 ## PacePilot Readiness
 
 The current recovery result also contains a separate **PacePilot Readiness** score, label, confidence,
-formula version `1.0`, and component breakdown. It is a transparent local heuristic, not Garmin
-Training Readiness.
+formula version `2.0`, limiter, and component breakdown. It is a transparent local fallback for
+athletes whose device does not provide a current Garmin Training Readiness score. A valid Garmin
+score from the selected day takes precedence in the UI; older Garmin values remain historical data.
 
 | Component | Base weight | Deterministic score |
 |---|---:|---|
-| Sleep duration | 20% | Sleep divided by Garmin sleep need, or personal sleep baseline, capped at 100 |
-| Garmin sleep score | 10% | Original score, capped to 0-100 |
-| HRV | 25% | 75 at personal or Garmin balanced-range midpoint, changing one point per percentage difference |
+| Sleep duration | 25% | Sleep divided by Garmin sleep need, or personal sleep baseline, capped at 100 |
+| Garmin sleep score | 15% | Original score, capped to 0-100 |
+| HRV | 20% | 75 at personal or Garmin balanced-range midpoint, changing one point per percentage difference |
 | Resting HR | 15% | 75 at personal baseline, minus five points per bpm above baseline |
 | Garmin stress | 10% | `100 - stress_average` |
 | Garmin Body Battery high | 10% | Original daily high, capped to 0-100 |
-| Hard-training recovery | 10% | 45/60/75/85/95 for 0/1/2/3/4+ days since a hard workout |
+| Hard-training recovery | 5% | 35/50/65/70/75 for 0/1/2/3/4+ days since a hard workout |
 
 A hard workout has aerobic Training Effect at least 3.5, anaerobic Training Effect at least 2.5,
-or RPE at least 7. The training component is included only when activity history is completely
-backfilled and every recent workout has Training Effect or RPE. Health inputs older than two days are
-omitted. Every other missing component is also omitted, and available base weights are normalized to
-100% rather than replacing missing values with zero.
+or RPE at least 7. The training component is included only when at least one recent activity exists,
+activity history is completely backfilled, and every recent workout has Training Effect or RPE. An
+inactive week therefore does not create a positive recovery bonus. At least 20% non-training base
+weight is required to publish a score. Health inputs older than two days are omitted. Every other
+missing component is also omitted, and available base weights are normalized to 100% rather than
+replacing missing values with zero.
+
+Observed poor sleep limits the final weighted score. Sleep at no more than 65%, below 75%, or below
+85% of need caps readiness at 44, 64, or 79. Garmin sleep scores below 50, 60, or 70 apply the same
+caps. The sleep-duration cap is also evaluated over the latest two or three available nights so one
+good night does not immediately erase a recent sleep deficit. Missing sleep never applies a penalty.
+The result exposes the active limiter so the UI can explain why the score was capped.
 
 Labels are `low` below 45, `fair` from 45, `good` from 65, and `high` from 80. Confidence combines
 available base-weight coverage with the history of each contributing baseline component, reaching
 full personal-history confidence at 28 baseline samples. Garmin sleep need and Garmin HRV baseline
 are treated as complete upstream baselines. The component list exposes each score, source value,
 baseline, unit, and normalized weight so callers can explain the result.
+
+## Device-dependent Garmin performance
+
+`get_garmin_fitness_metrics()` exposes only positive, finite values actually supplied by Garmin for
+the selected user. It independently selects the latest source date for threshold HR and pace,
+running/cycling FTP, race predictions, Endurance Score, Hill Score, and fitness age. Sparse fields on
+different `daily_fitness` rows are never treated as one shared snapshot, and missing values are not
+converted to zero. The latest known value remains available even when it predates the selected chart
+window; `points` contains only values inside that window.
+
+The Analyse page renders the entire section only when at least one such value exists. Every value
+shows its own Garmin source date. Threshold speed is converted from metres per second to min/km, and
+race predictions retain second-level precision. These metrics remain Garmin estimates; PacePilot
+does not synthesize classifications for devices that do not provide them.
 
 ## Training Trends
 

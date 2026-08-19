@@ -1,189 +1,116 @@
 {% extends "base.html" %}
-{% block title %}Athletenprofil · PacePilot{% endblock %}
-{% block head %}
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js" defer></script>
-  <script src="{{ url_for('static', path='/js/profile.js') }}?v=20260809-4" defer></script>
-{% endblock %}
+{% block title %}Analyse · PacePilot{% endblock %}
 {% block content %}
-<div class="space-y-8 text-sm">
-  <section class="{{ recovery.pacepilot_readiness_label or 'unavailable' }} grid grid-cols-1 gap-5 rounded-xl border border-border bg-surface p-5 sm:p-6 lg:grid-cols-[minmax(0,1.35fr)_minmax(16rem,0.65fr)] lg:items-center" aria-labelledby="readiness-title">
-    <header class="border-b border-border pb-5 lg:col-span-2">
-      <p class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Athletenprofil</p>
-      <h1 class="mt-1 font-display text-3xl font-semibold tracking-tight">{{ user.display_name }}</h1>
-      <p class="mt-1 text-sm text-muted-foreground">Gesundheit, Erholung und Training auf einen Blick.</p>
-    </header>
-    {% if recovery.pacepilot_readiness_score is not none %}
-      <div class="grid grid-cols-1 items-center gap-4 sm:grid-cols-[auto_minmax(0,1fr)]">
-        <div class="readiness-score size-28 sm:size-32" style="--readiness-offset: {{ 100 - recovery.pacepilot_readiness_score }}" role="img" aria-label="Readiness-Score {{ recovery.pacepilot_readiness_score|round|int }} von 100">
-          <svg class="readiness-score-ring" viewBox="0 0 120 120" aria-hidden="true">
-            <circle class="readiness-score-track" cx="60" cy="60" r="52" pathLength="100"></circle>
-            <circle class="readiness-score-value" cx="60" cy="60" r="52" pathLength="100"></circle>
-          </svg>
-          <div class="readiness-score-number flex items-baseline gap-1 text-foreground"><strong class="font-display text-3xl font-semibold tracking-tight" data-count-to="{{ recovery.pacepilot_readiness_score|round|int }}">{{ recovery.pacepilot_readiness_score|round|int }}</strong><span class="text-xs text-muted-foreground">/ 100</span></div>
-        </div>
-        <div class="space-y-2">
-          <p class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{% if is_today %}Heute{% else %}Stand {{ end|date }}{% endif %} · PacePilot Readiness</p>
-          <h2 class="text-lg font-semibold" id="readiness-title">{{ readiness_label }}</h2>
-          <p class="max-w-2xl text-sm leading-6 text-muted-foreground">Eine transparente PacePilot-Einschätzung aus deinen verfügbaren Gesundheits- und Belastungsdaten. Kein Garmin-Score.</p>
-          <div class="flex flex-wrap gap-2 pt-1 text-xs text-muted-foreground">
-            <span class="rounded-full border border-border px-2.5 py-1">{{ recovery.pacepilot_readiness_confidence|round|int }}% Datenvertrauen</span>
-            <span class="rounded-full border border-border px-2.5 py-1">Formel {{ recovery.pacepilot_readiness_formula_version }}</span>
+<div class="space-y-6 text-sm">
+  <header class="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+    <div>
+      <p class="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">Analyse</p>
+      <h1 class="mt-2 font-display text-3xl font-semibold tracking-tight">Deine Entwicklung</h1>
+      <p class="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">Aktuelle Signale und Trainingsmuster im persönlichen Kontext. Öffne eine Kennzahl nur dann, wenn du ihren Verlauf sehen möchtest.</p>
+    </div>
+    <div class="text-xs text-muted-foreground">{% if period == 'day' %}{{ end|date }}{% else %}{{ start|date }} – {{ end|date }}{% endif %}</div>
+  </header>
+
+  <nav class="flex max-w-full flex-wrap gap-1 rounded-xl border border-border bg-surface p-1" aria-label="Analysezeitraum">
+    {% for option in period_options %}
+      <a class="rounded-lg px-3 py-2 text-xs font-semibold transition-colors {% if option.key == period %}bg-primary text-primary-foreground{% else %}text-muted-foreground hover:bg-surface-muted hover:text-foreground{% endif %}" href="/profile?period={{ option.key }}&amp;end={{ end.isoformat() }}"{% if option.key == period %} aria-current="page"{% endif %}>{{ option.label }}</a>
+    {% endfor %}
+  </nav>
+
+  <section class="rounded-xl border border-border bg-surface" id="readiness" aria-labelledby="readiness-title">
+    <div class="grid gap-5 p-5 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center sm:p-6">
+      <div>
+        <p class="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">{% if readiness and readiness.source == 'garmin' %}Garmin Training Readiness{% else %}PacePilot Readiness{% endif %}</p>
+        {% if readiness %}
+          <div class="mt-2 flex flex-wrap items-baseline gap-x-3 gap-y-1">
+            <h2 class="font-display text-2xl font-semibold tracking-tight" id="readiness-title">{{ readiness_label }}</h2>
+            <span class="text-sm font-semibold text-primary">{{ readiness.score|round|int }} / 100</span>
           </div>
+          {% if readiness.source == 'garmin' %}<p class="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">Die Trainingsbereitschaft deiner kompatiblen Garmin-Uhr. PacePilot berechnet keinen zusätzlichen Ersatz-Score.</p><a class="mt-3 inline-flex text-xs font-semibold text-primary transition hover:text-primary-hover" href="/profile/garmin-readiness?period={{ period }}&amp;end={{ end.isoformat() }}">Garmin-Verlauf ansehen →</a>{% else %}<p class="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">Eine transparente PacePilot-Einschätzung für Geräte ohne Garmin Training Readiness.</p>{% if readiness_limiter %}<p class="mt-3 max-w-2xl rounded-lg bg-warning-subtle px-3 py-2 text-xs font-medium text-warning-emphasis">{{ readiness_limiter }}</p>{% endif %}{% endif %}
+        {% else %}
+          <h2 class="mt-2 text-lg font-semibold" id="readiness-title">Noch keine belastbare Einschätzung</h2>
+          <p class="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">Sobald Garmin Training Readiness oder genügend Gesundheitsdaten synchronisiert sind, entsteht hier dein persönlicher Erholungszustand.</p>
+        {% endif %}
+      </div>
+      {% if readiness and readiness.source == 'pacepilot' %}
+        <div class="rounded-xl bg-surface-muted px-4 py-3 text-right"><span class="block text-xs text-muted-foreground">Datenvertrauen</span><strong class="mt-1 block text-base font-semibold">{{ readiness.confidence|round|int }} %</strong></div>
+      {% endif %}
+    </div>
+    {% if readiness and readiness.source == 'pacepilot' and readiness_components %}
+      <details class="border-t border-border px-5 py-4 sm:px-6">
+        <summary class="cursor-pointer text-xs font-semibold text-primary">So entsteht die Einschätzung</summary>
+        <div class="mt-4 grid gap-x-8 gap-y-4 sm:grid-cols-2" role="group" aria-label="Readiness-Komponenten">
+          {% for component in readiness_components %}
+            <div class="readiness-component space-y-1.5" style="--stat-delay: {{ loop.index0 * 60 }}ms; --bar-delay: {{ loop.index0 * 70 }}ms">
+              <div class="flex items-center justify-between gap-3 text-xs"><span class="text-muted-foreground">{{ component.label }} · {{ component.weight }} %</span><strong>{{ component.score|round|int }}</strong></div>
+              <div class="h-1.5 overflow-hidden rounded-full bg-border"><span class="readiness-component-bar block h-full rounded-full bg-primary" style="width: {{ component.score }}%"></span></div>
+            </div>
+          {% endfor %}
         </div>
-      </div>
-      <div class="space-y-3 rounded-xl bg-surface-muted p-4" role="group" aria-label="Readiness-Komponenten">
-        {% for component in readiness_components %}
-          <div class="readiness-component space-y-1.5" style="--stat-delay: {{ 240 + loop.index0 * 80 }}ms; --bar-delay: {{ 300 + loop.index0 * 90 }}ms">
-            <div class="flex items-center justify-between gap-3 text-xs"><span class="text-muted-foreground">{{ component.label }} · {{ component.weight }}%</span><strong class="font-semibold text-foreground" data-count-to="{{ component.score|round|int }}" data-count-delay="{{ 240 + loop.index0 * 90 }}">{{ component.score|round|int }}</strong></div>
-            <div class="h-1.5 overflow-hidden rounded-full bg-border"><span class="readiness-component-bar block h-full rounded-full bg-primary" style="width: {{ component.score }}%"></span></div>
-          </div>
-        {% endfor %}
-      </div>
-    {% else %}
-      <div class="space-y-3 lg:col-span-2">
-        <p class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{% if is_today %}Heute{% else %}Stand {{ end|date }}{% endif %} · PacePilot Readiness</p>
-        <h2 class="text-lg font-semibold" id="readiness-title">Noch keine belastbare Einschätzung</h2>
-        <p class="max-w-2xl text-sm leading-6 text-muted-foreground">Sobald Schlaf, HRV oder Ruhepuls synchronisiert sind, entsteht hier dein persönlicher Erholungszustand.</p>
-        <a class="inline-flex w-fit items-center rounded-lg bg-primary px-3 py-2 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary-hover" href="/settings">Garmin-Sync prüfen</a>
-      </div>
+        <p class="mt-4 text-xs text-muted-foreground">Formel {{ recovery.pacepilot_readiness_formula_version }} · Stand {{ end|date }}</p>
+      </details>
     {% endif %}
   </section>
 
-  {% if metric_cards %}
-  <section class="space-y-4" aria-labelledby="current-state-title">
-    <div class="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
-      <div><p class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{% if is_today %}Aktueller Zustand{% else %}Historischer Zustand{% endif %}</p><h2 class="text-lg font-semibold" id="current-state-title">Was am {{ end|date }} verfügbar ist</h2></div>
-      {% if recovery.health_day %}<span class="text-xs text-muted-foreground">Health-Stand {{ recovery.health_day|date }}</span>{% endif %}
+  {% if health_notices %}
+    <div class="grid gap-2">{% for notice in health_notices %}<p class="rounded-lg border border-warning/25 bg-warning-subtle px-3 py-2 text-xs text-warning-emphasis">{{ notice }}</p>{% endfor %}</div>
+  {% endif %}
+
+  <div class="grid gap-6 lg:grid-cols-2">
+    <section class="rounded-xl border border-border bg-surface" aria-labelledby="signals-title">
+      <div class="border-b border-border px-5 py-4">
+        <p class="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">Gesundheit & Erholung</p>
+        <h2 class="mt-1 text-lg font-semibold" id="signals-title">Aktuelle Signale</h2>
+      </div>
+      {% if metric_cards %}
+        <div class="divide-y divide-border">
+          {% for card in metric_cards %}
+            {% if card.detail_url %}<a class="group grid grid-cols-[minmax(0,1fr)_auto] items-center gap-4 px-5 py-3.5 transition hover:bg-surface-muted" href="{{ card.detail_url }}">{% else %}<div class="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-4 px-5 py-3.5">{% endif %}
+              <span><span class="block text-xs font-medium text-muted-foreground">{{ card.label }}</span>{% if card.note %}<small class="mt-0.5 block text-xs {% if card.tone == 'caution' %}text-warning-emphasis{% elif card.tone == 'positive' %}text-success-emphasis{% else %}text-muted-foreground{% endif %}">{{ card.note }}</small>{% endif %}</span>
+              <span class="flex items-center gap-3"><strong class="text-sm font-semibold {% if card.detail_url %}group-hover:text-primary{% endif %}">{{ card.value }}</strong>{% if card.detail_url %}<span class="text-muted-foreground" aria-hidden="true">›</span>{% endif %}</span>
+            {% if card.detail_url %}</a>{% else %}</div>{% endif %}
+          {% endfor %}
+        </div>
+      {% else %}
+        <div class="p-5"><p class="text-sm font-semibold">Noch keine aktuellen Gesundheitswerte</p><p class="mt-1 text-sm leading-6 text-muted-foreground">Prüfe den Garmin-Sync oder wähle einen anderen Stichtag.</p></div>
+      {% endif %}
+    </section>
+
+    <section class="rounded-xl border border-border bg-surface" aria-labelledby="training-title">
+      <div class="flex items-start justify-between gap-4 border-b border-border px-5 py-4">
+        <div><p class="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">Training · {{ period_label }}</p><h2 class="mt-1 text-lg font-semibold" id="training-title">Belastung & Routine</h2></div>
+        {% if training.history_complete %}<span class="coverage-pill complete rounded-full border border-border px-2.5 py-1 text-xs font-semibold">Vollständig</span>{% elif training.data_status == 'not_synced' %}<span class="coverage-pill rounded-full border border-border px-2.5 py-1 text-xs text-muted-foreground">Nicht synchronisiert</span>{% else %}<span class="coverage-pill partial rounded-full border border-border px-2.5 py-1 text-xs font-semibold">Teilweise</span>{% endif %}
+      </div>
+      {% if training_show_data %}
+        <div class="divide-y divide-border">
+          <a class="group grid grid-cols-[minmax(0,1fr)_auto] items-center gap-4 px-5 py-3.5 transition hover:bg-surface-muted" href="/profile/workout-frequency?period={{ period }}&amp;end={{ end.isoformat() }}"><span><span class="block text-xs font-medium text-muted-foreground">Routine</span><small class="mt-0.5 block text-xs text-muted-foreground">{{ training.active_days }} aktive Tage{% if period != 'day' %} · {{ training.training_frequency_per_week|string|replace('.', ',') }} pro Woche{% endif %}</small></span><span class="flex items-center gap-3"><strong class="text-sm font-semibold group-hover:text-primary">{{ training.workouts }} Einheiten</strong><span class="text-muted-foreground" aria-hidden="true">›</span></span></a>
+          {% if training.total_duration_s is not none %}<a class="group grid grid-cols-[minmax(0,1fr)_auto] items-center gap-4 px-5 py-3.5 transition hover:bg-surface-muted" href="/profile/training-duration?period={{ period }}&amp;end={{ end.isoformat() }}"><span><span class="block text-xs font-medium text-muted-foreground">Trainingszeit</span><small class="mt-0.5 block text-xs text-muted-foreground">Gesamter Zeitraum</small></span><span class="flex items-center gap-3"><strong class="text-sm font-semibold group-hover:text-primary">{{ training.total_duration_s|duration }}</strong><span class="text-muted-foreground" aria-hidden="true">›</span></span></a>{% endif %}
+          {% if training.running_distance_m not in (none, 0) %}<a class="group grid grid-cols-[minmax(0,1fr)_auto] items-center gap-4 px-5 py-3.5 transition hover:bg-surface-muted" href="/profile/running-volume?period={{ period }}&amp;end={{ end.isoformat() }}"><span><span class="block text-xs font-medium text-muted-foreground">Laufumfang</span><small class="mt-0.5 block text-xs text-muted-foreground">Laufen bleibt von anderen Sportarten getrennt</small></span><span class="flex items-center gap-3"><strong class="text-sm font-semibold group-hover:text-primary">{{ training.running_distance_m|distance }}</strong><span class="text-muted-foreground" aria-hidden="true">›</span></span></a>{% endif %}
+          {% if training.average_aerobic_training_effect is not none or training.average_anaerobic_training_effect is not none %}<a class="group grid grid-cols-[minmax(0,1fr)_auto] items-center gap-4 px-5 py-3.5 transition hover:bg-surface-muted" href="/profile/training-effect?period={{ period }}&amp;end={{ end.isoformat() }}"><span><span class="block text-xs font-medium text-muted-foreground">Training Effect</span><small class="mt-0.5 block text-xs text-muted-foreground">{{ training.hard_workouts }} Einheiten mit hohem Reiz</small></span><span class="flex items-center gap-3"><strong class="text-sm font-semibold group-hover:text-primary">Details</strong><span class="text-muted-foreground" aria-hidden="true">›</span></span></a>{% endif %}
+          {% if training.exercise_load is not none %}<a class="group grid grid-cols-[minmax(0,1fr)_auto] items-center gap-4 px-5 py-3.5 transition hover:bg-surface-muted" href="/profile/exercise-load?period={{ period }}&amp;end={{ end.isoformat() }}"><span><span class="block text-xs font-medium text-muted-foreground">Exercise Load</span><small class="mt-0.5 block text-xs text-muted-foreground">Aktivitätsbasierte Garmin-Belastung</small></span><span class="flex items-center gap-3"><strong class="text-sm font-semibold group-hover:text-primary">{{ training.exercise_load|round|int }}</strong><span class="text-muted-foreground" aria-hidden="true">›</span></span></a>{% endif %}
+          {% if training.zone_distribution %}<a class="group grid grid-cols-[minmax(0,1fr)_auto] items-center gap-4 px-5 py-3.5 transition hover:bg-surface-muted" href="/profile/zones?period={{ period }}&amp;end={{ end.isoformat() }}"><span><span class="block text-xs font-medium text-muted-foreground">Trainingszonen</span><small class="mt-0.5 block text-xs text-muted-foreground">Zeit nach Intensitätsbereich</small></span><span class="flex items-center gap-3"><strong class="text-sm font-semibold group-hover:text-primary">Öffnen</strong><span class="text-muted-foreground" aria-hidden="true">›</span></span></a>{% endif %}
+          {% if training.moderate_intensity_minutes is not none or training.vigorous_intensity_minutes is not none %}<a class="group grid grid-cols-[minmax(0,1fr)_auto] items-center gap-4 px-5 py-3.5 transition hover:bg-surface-muted" href="/profile/intensity?period={{ period }}&amp;end={{ end.isoformat() }}"><span><span class="block text-xs font-medium text-muted-foreground">Intensitätsminuten</span><small class="mt-0.5 block text-xs text-muted-foreground">Moderat und intensiv</small></span><span class="flex items-center gap-3"><strong class="text-sm font-semibold group-hover:text-primary">Öffnen</strong><span class="text-muted-foreground" aria-hidden="true">›</span></span></a>{% endif %}
+        </div>
+        <div class="border-t border-border px-5 py-4"><a class="text-xs font-semibold text-primary transition hover:text-primary-hover" href="/activities">Aktivitäten öffnen →</a></div>
+      {% else %}
+        <div class="p-5"><p class="text-sm font-semibold">Trainingshistorie noch nicht belastbar</p><p class="mt-1 text-sm leading-6 text-muted-foreground">Die Synchronisierung ist nicht vollständig. Verfügbare Lücken werden deshalb nicht als null Workouts gewertet.</p><a class="mt-3 inline-flex text-xs font-semibold text-primary" href="/settings">Synchronisierung öffnen →</a></div>
+      {% endif %}
+    </section>
+  </div>
+
+  {% if performance_cards %}
+  <section class="rounded-xl border border-border bg-surface" aria-labelledby="performance-title">
+    <div class="border-b border-border px-5 py-4">
+      <p class="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">Geräteabhängige Garmin-Werte</p>
+      <h2 class="mt-1 text-lg font-semibold" id="performance-title">Leistung & Schwellen</h2>
+      <p class="mt-1 text-xs leading-5 text-muted-foreground">Es erscheinen nur Werte, die Garmin für dein Konto und deine Geräte tatsächlich bereitstellt.</p>
     </div>
-    <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-      {% for card in metric_cards %}
-        <article class="profile-metric {{ card.tone }} flex min-h-32 flex-col rounded-xl border border-border bg-surface p-4" style="--stat-delay: {{ 240 + loop.index0 * 80 }}ms">
-          <span class="text-xs font-medium text-muted-foreground">{{ card.label }}</span>
-          <strong class="mt-2 font-display text-lg font-semibold tracking-tight text-foreground">{{ card.value }}</strong>
-          {% if card.note %}<p class="mt-1 text-sm leading-5 text-muted-foreground">{{ card.note }}</p>{% endif %}
-          {% if card.source_day %}<small class="mt-auto pt-3 text-xs text-muted-foreground">Stand {{ card.source_day|date }}</small>{% endif %}
-        </article>
+    <div class="grid gap-px bg-border sm:grid-cols-2">
+      {% for card in performance_cards %}
+        <a class="group grid grid-cols-[minmax(0,1fr)_auto] items-center gap-4 bg-surface px-5 py-3.5 transition hover:bg-surface-muted" href="{{ card.detail_url }}"><span><span class="block text-xs font-medium text-muted-foreground">{{ card.label }}</span><small class="mt-0.5 block text-xs text-muted-foreground">Stand {{ card.source_day|date }}</small></span><span class="flex items-center gap-3"><strong class="text-sm font-semibold group-hover:text-primary">{{ card.value }}</strong><span class="text-muted-foreground" aria-hidden="true">›</span></span></a>
       {% endfor %}
     </div>
   </section>
   {% endif %}
-
-  <section class="flex flex-col gap-4 rounded-xl border border-border bg-surface p-4 sm:flex-row sm:items-center sm:justify-between" aria-labelledby="period-title">
-    <div>
-      <p class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Zeitbasierte Ansicht</p>
-      <h2 class="mt-1 text-lg font-semibold" id="period-title">{{ period_label }}</h2>
-      <p class="mt-0.5 text-xs text-muted-foreground">{% if period == 'day' %}{{ end|date }} · Tagesaggregate{% else %}{{ start|date }} – {{ end|date }}{% endif %}</p>
-    </div>
-    <nav class="inline-flex max-w-full flex-wrap gap-1 rounded-xl bg-surface-muted p-1" aria-label="Zeitraum">
-      {% for option in period_options %}
-        <a class="rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors {% if option.key == period %}bg-primary text-primary-foreground{% else %}text-muted-foreground hover:bg-surface hover:text-foreground{% endif %}" href="/profile?period={{ option.key }}&end={{ end.isoformat() }}"{% if option.key == period %} aria-current="page"{% endif %}>{{ option.label }}</a>
-      {% endfor %}
-    </nav>
-  </section>
-
-  {% if period != 'day' %}<section class="space-y-4" id="gesundheit" aria-labelledby="health-title">
-    <div><p class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Persönliche Trends</p><h2 class="text-lg font-semibold" id="health-title">Gesundheit & Erholung</h2></div>
-    {% if health_notices %}<div class="grid grid-cols-1 gap-2">{% for notice in health_notices %}<p class="rounded-lg border border-warning/25 bg-warning-subtle px-3 py-2 text-xs text-warning-emphasis">{{ notice }}</p>{% endfor %}</div>{% endif %}
-    {% if health_charts %}
-      <div class="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        {% for chart in health_charts %}
-          <article class="rounded-xl border border-border bg-surface p-4 sm:p-5">
-            <div class="flex items-start justify-between gap-4"><div><p class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{{ chart.kicker }}</p><h3 class="text-lg font-semibold">{{ chart.title }}</h3></div><span class="text-xs text-muted-foreground">{{ chart.unit }}</span></div>
-            <div class="relative mt-4 h-64 w-full sm:h-72"><canvas id="{{ chart.id }}" aria-label="{{ chart.title }}" role="img">Diagramm für {{ chart.title }} ist ohne JavaScript nicht verfügbar.</canvas></div>
-            {% if chart.summary %}<div class="mt-4 flex flex-wrap gap-x-4 gap-y-1 rounded-lg bg-surface-muted p-3 text-xs text-muted-foreground" role="group" aria-label="Letzte verfügbare Werte">{% for item in chart.summary %}<span>{{ item.label }} <strong class="font-semibold text-foreground">{{ item.value|string|replace('.', ',') }} {{ item.unit }}</strong></span>{% endfor %}</div>{% endif %}
-            {% if chart.drilldown_url %}<a class="mt-3 inline-block text-xs font-semibold text-primary transition-colors hover:text-primary-hover" href="{{ chart.drilldown_url }}">Datenpunkt öffnen →</a>{% endif %}
-          </article>
-        {% endfor %}
-      </div>
-    {% else %}
-      <div class="rounded-xl border border-border bg-surface p-5"><span class="text-sm font-semibold">Keine Gesundheitswerte im gewählten Zeitraum.</span><p class="mt-1 text-sm text-muted-foreground">Prüfe den Garmin-Sync oder wähle einen längeren Zeitraum.</p></div>
-    {% endif %}
-  </section>{% endif %}
-
-  <section class="space-y-4" id="training" aria-labelledby="training-title">
-    <div class="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
-      <div><p class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Trainingstrends</p><h2 class="text-lg font-semibold" id="training-title">Belastung mit Kontext</h2></div>
-      {% if training.history_complete %}<span class="coverage-pill complete w-fit rounded-full border border-border bg-surface px-2.5 py-1 text-xs font-semibold">Historie vollständig</span>{% elif training.data_status == 'not_synced' %}<span class="coverage-pill w-fit rounded-full border border-border bg-surface px-2.5 py-1 text-xs font-semibold text-muted-foreground">Nicht synchronisiert</span>{% else %}<span class="coverage-pill partial w-fit rounded-full border border-border bg-surface px-2.5 py-1 text-xs font-semibold">Historie teilweise</span>{% endif %}
-    </div>
-    {% if not training_show_data %}
-      <div class="rounded-xl border border-border bg-surface p-5"><span class="text-sm font-semibold">Trainingshistorie noch nicht belastbar</span><p class="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground">Die Synchronisierung ist nicht vollständig. Verfügbare Lücken werden deshalb nicht als null Workouts gewertet.</p><a class="mt-3 inline-flex items-center rounded-lg bg-primary px-3 py-2 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary-hover" href="/settings">Synchronisierung öffnen</a></div>
-    {% else %}
-      <div class="grid grid-cols-[repeat(auto-fit,minmax(min(100%,11rem),1fr))] gap-3">
-        {% for label, value in training_stats %}<article class="profile-stat min-h-28 rounded-xl border border-border bg-surface p-4" style="--stat-delay: {{ 240 + loop.index0 * 80 }}ms"><div class="flex items-center gap-2"><span class="size-1.5 shrink-0 rounded-full bg-primary" aria-hidden="true"></span><span class="text-xs font-medium text-muted-foreground">{{ label }}</span></div><strong class="mt-4 block font-display text-2xl font-semibold tracking-tight text-foreground">{{ value }}</strong></article>{% endfor %}
-      </div>
-      {% if training_charts %}
-        <div class="grid grid-cols-1 gap-4 lg:grid-cols-2">
-          {% for chart in training_charts %}
-            <article class="rounded-xl border border-border bg-surface p-4 sm:p-5">
-              <div class="flex items-start justify-between gap-4"><div><p class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{{ chart.kicker }}</p><h3 class="text-lg font-semibold">{{ chart.title }}</h3></div><span class="text-xs text-muted-foreground">{{ chart.unit }}</span></div>
-              <div class="relative mt-4 h-64 w-full sm:h-72"><canvas id="{{ chart.id }}" aria-label="{{ chart.title }}" role="img">Diagramm für {{ chart.title }} ist ohne JavaScript nicht verfügbar.</canvas></div>
-              {% if chart.summary %}<div class="mt-4 flex flex-wrap gap-x-4 gap-y-1 rounded-lg bg-surface-muted p-3 text-xs text-muted-foreground" role="group" aria-label="Letzte verfügbare Werte">{% for item in chart.summary %}<span>{{ item.label }} <strong class="font-semibold text-foreground">{{ item.value|string|replace('.', ',') }} {{ item.unit }}</strong></span>{% endfor %}</div>{% endif %}
-              {% if chart.drilldown_url %}<a class="mt-3 inline-block text-xs font-semibold text-primary transition-colors hover:text-primary-hover" href="{{ chart.drilldown_url }}">Aktivitäten im Zeitraum öffnen →</a>{% endif %}
-            </article>
-          {% endfor %}
-        </div>
-      {% elif training.workouts == 0 %}
-        <div class="rounded-xl border border-border bg-surface p-5"><span class="text-sm font-semibold">Keine Workouts in diesem Zeitraum</span><p class="mt-1 text-sm text-muted-foreground">Die synchronisierte Historie enthält hier keine Einheit.</p></div>
-      {% endif %}
-
-      {% if sport_volumes %}
-        <article class="rounded-xl border border-border bg-surface p-4 sm:p-5">
-          <h3 class="text-lg font-semibold">Sportarten</h3>
-          <div class="mt-4 grid grid-cols-[repeat(auto-fit,minmax(min(100%,16rem),1fr))] gap-3">
-            {% for sport in sport_volumes %}
-              <section class="rounded-xl border border-border bg-surface-muted p-4" aria-label="{{ sport.sport }}">
-                <div class="flex items-center justify-between gap-3"><strong class="text-base font-semibold text-foreground">{{ sport.sport }}</strong><span class="rounded-full bg-surface px-2.5 py-1 text-xs font-semibold text-muted-foreground">{{ sport.workouts }} Workouts</span></div>
-                <dl class="mt-4 flex flex-wrap gap-x-6 gap-y-3 text-xs">
-                  <div><dt class="text-muted-foreground">Dauer</dt><dd class="mt-1 font-semibold text-foreground">{{ sport.duration }}</dd></div>
-                  {% if sport.distance %}<div><dt class="text-muted-foreground">Distanz</dt><dd class="mt-1 font-semibold text-foreground">{{ sport.distance }}</dd></div>{% endif %}
-                  {% if sport.elevation %}<div><dt class="text-muted-foreground">Höhenmeter</dt><dd class="mt-1 font-semibold text-foreground">{{ sport.elevation }}</dd></div>{% endif %}
-                </dl>
-              </section>
-            {% endfor %}
-          </div>
-        </article>
-      {% endif %}
-    {% endif %}
-  </section>
-
-  <section class="space-y-4" aria-labelledby="recent-title">
-    <div class="flex items-end justify-between gap-4">
-      <div><p class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Drill-down</p><h2 class="text-lg font-semibold" id="recent-title">Jüngste Einheiten</h2><p class="mt-1 max-w-2xl text-xs leading-5 text-muted-foreground">TE bedeutet Garmin Training Effect auf einer Skala von 0 bis 5. RPE beschreibt deine subjektiv empfundene Anstrengung von 1 bis 10. „Hoher Reiz“ gilt ab aerob 3,5, anaerob 2,5 oder RPE 7.</p></div>
-      <a class="shrink-0 text-xs font-semibold text-primary transition-colors hover:text-primary-hover" href="/activities">Alle Aktivitäten →</a>
-    </div>
-    <div class="flex flex-wrap gap-2 text-xs" role="group" aria-label="Einordnung des Garmin Training Effect">
-      <span class="rounded-full border border-border bg-surface px-2.5 py-1 text-muted-foreground"><strong class="text-foreground">0–1</strong> kaum Effekt</span>
-      <span class="rounded-full border border-border bg-surface px-2.5 py-1 text-muted-foreground"><strong class="text-foreground">2</strong> erhaltend</span>
-      <span class="rounded-full border border-border bg-surface px-2.5 py-1 text-muted-foreground"><strong class="text-foreground">3</strong> verbessernd</span>
-      <span class="rounded-full border border-border bg-surface px-2.5 py-1 text-muted-foreground"><strong class="text-foreground">4–5</strong> stark bis überlastend</span>
-    </div>
-    {% if recent_workouts %}
-      <div class="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3">
-        {% for workout in recent_workouts %}
-          <a class="group flex flex-col rounded-xl border border-border bg-surface p-4 transition-colors hover:border-primary" href="/activities/{{ workout.id }}">
-            <div class="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground"><span>{{ workout.started_at|date }} · {{ workout.sport }}</span>{% if workout.hard %}<b class="rounded-full bg-warning-subtle px-2 py-0.5 font-semibold text-warning-emphasis">Hoher Reiz</b>{% elif workout.has_load_data %}<b class="rounded-full border border-border px-2 py-0.5 font-semibold text-muted-foreground">Unter Schwelle</b>{% endif %}</div>
-            <h3 class="mt-3 text-lg font-semibold">{{ workout.name }}</h3>
-            <p class="mt-1 text-sm text-muted-foreground">{{ workout.duration }}{% if workout.distance %} · {{ workout.distance }}{% endif %}</p>
-            {% if workout.has_load_data %}
-              <div class="mt-4 rounded-lg bg-surface-muted p-3">
-                <p class="text-[0.6875rem] font-semibold uppercase tracking-wider text-muted-foreground">Belastungswerte</p>
-                <dl class="mt-2 flex flex-wrap gap-x-5 gap-y-2 text-xs">
-                  {% if workout.aerobic_training_effect is not none %}<div><dt class="text-muted-foreground">TE aerob</dt><dd class="mt-0.5 font-semibold text-foreground">{{ workout.aerobic_training_effect }} <span class="font-normal text-muted-foreground">/ 5</span></dd></div>{% endif %}
-                  {% if workout.anaerobic_training_effect is not none %}<div><dt class="text-muted-foreground">TE anaerob</dt><dd class="mt-0.5 font-semibold text-foreground">{{ workout.anaerobic_training_effect }} <span class="font-normal text-muted-foreground">/ 5</span></dd></div>{% endif %}
-                  {% if workout.rpe is not none %}<div><dt class="text-muted-foreground">RPE</dt><dd class="mt-0.5 font-semibold text-foreground">{{ workout.rpe }} <span class="font-normal text-muted-foreground">/ 10</span></dd></div>{% endif %}
-                </dl>
-                {% if workout.hard_reasons %}<p class="mt-2 border-t border-border pt-2 text-xs font-medium text-warning-emphasis">Auslöser: {{ workout.hard_reasons|join(', ') }}</p>{% endif %}
-              </div>
-            {% endif %}
-            <strong class="mt-auto block pt-4 text-xs font-semibold text-primary transition-colors group-hover:text-primary-hover">Analysieren →</strong>
-          </a>
-        {% endfor %}
-      </div>
-    {% else %}
-      <div class="rounded-xl border border-border bg-surface p-5"><span class="text-sm font-semibold">Noch keine Aktivität zum Öffnen</span></div>
-    {% endif %}
-  </section>
 </div>
-
-<script id="profile-data" type="application/json">{{ chart_data|tojson }}</script>
 {% endblock %}

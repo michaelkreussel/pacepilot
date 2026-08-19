@@ -27,14 +27,24 @@ The synchronized resources are:
 - Garmin Training Readiness/recovery time when supported;
 - Garmin Training Status/load when supported.
 
+A separate once-daily sparse performance sync checks device-dependent Garmin capabilities without
+creating placeholder rows. Fitness age, Endurance Score, Hill Score, running threshold pace/HR/power,
+cycling FTP, and race predictions each keep an independent sync state. Populated snapshots are stored
+on Garmin's source date when supplied. Partial threshold or prediction payloads preserve the values
+that exist, while empty, unsupported, schema-error, authentication, and rate-limit outcomes remain
+distinct. Empty and unsupported capabilities are re-probed after 28 days so a device change can add
+them later.
+
 Successful no-data responses remain null and receive an `empty` completeness state. Unsupported
 endpoints, authentication failures, rate limiting, and other API failures are recorded separately.
 An empty or unsupported resource is re-probed after 28 days so a new watch or changed sensor setting
 can add it later without creating hourly empty requests.
 
-All activity, health, and device calls in a normal synchronization share a strict start-to-start
-limiter. Jitter can only increase the configured delay. A 429 stops the run, records a cooldown, and
-leaves committed resource cursors ready for the next scheduled or manual continuation.
+All normal activity, health, performance-resource, and device calls share a start-to-start limiter.
+The Garmin library's combined latest-running-threshold helper performs two internal HTTP requests
+inside one paced resource call; all other current resources map one paced call to one HTTP request.
+Jitter can only increase the configured delay. A 429 stops the run, records a cooldown, and leaves
+committed resource cursors ready for the next scheduled or manual continuation.
 
 ## Multi-account Isolation
 

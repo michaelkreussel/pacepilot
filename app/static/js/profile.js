@@ -1,29 +1,4 @@
 (() => {
-  const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-  const counters = [...document.querySelectorAll("[data-count-to]")]
-    .map((element) => ({
-      element,
-      target: Number(element.dataset.countTo),
-      delay: Number(element.dataset.countDelay || 100),
-    }))
-    .filter(({ target }) => Number.isFinite(target));
-
-  if (!reducedMotion && counters.length) {
-    const startedAt = performance.now();
-    counters.forEach(({ element }) => { element.textContent = "0"; });
-    const updateCounters = (now) => {
-      let complete = true;
-      counters.forEach(({ element, target, delay }) => {
-        const progress = Math.max(0, Math.min(1, (now - startedAt - delay) / 1000));
-        const eased = 1 - ((1 - progress) ** 3);
-        element.textContent = String(Math.round(target * eased));
-        if (progress < 1) complete = false;
-      });
-      if (!complete) requestAnimationFrame(updateCounters);
-    };
-    requestAnimationFrame(updateCounters);
-  }
-
   const source = document.getElementById("profile-data");
   if (!source || !window.Chart) return;
   const payload = JSON.parse(source.textContent);
@@ -49,8 +24,27 @@
   };
   Chart.defaults.color = cssValue("--muted-foreground");
 
-  const number = new Intl.NumberFormat("de-DE", { maximumFractionDigits: 1 });
-  const tooltipValue = (value, unit) => `${number.format(value)} ${unit}`;
+  const clock = (seconds) => {
+    const rounded = Math.round(seconds);
+    const hours = Math.floor(rounded / 3600);
+    const minutes = Math.floor((rounded % 3600) / 60);
+    const remainder = rounded % 60;
+    return hours
+      ? `${hours}:${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")} h`
+      : `${minutes}:${String(remainder).padStart(2, "0")} min`;
+  };
+  const pace = (seconds) => {
+    const rounded = Math.round(seconds);
+    return `${Math.floor(rounded / 60)}:${String(rounded % 60).padStart(2, "0")} min/km`;
+  };
+  const formattedValue = (value, config) => {
+    if (config.value_format === "pace") return pace(value);
+    if (config.value_format === "duration") return clock(value);
+    const formatted = new Intl.NumberFormat("de-DE", {
+      maximumFractionDigits: config.decimals ?? 1,
+    }).format(value);
+    return config.unit ? `${formatted} ${config.unit}` : formatted;
+  };
 
   payload.charts.forEach((config) => {
     const canvas = document.getElementById(config.id);
@@ -98,7 +92,7 @@
           tooltip: {
             displayColors: datasets.length > 1 || doughnut,
             callbacks: {
-              label: (item) => `${item.dataset.label}: ${tooltipValue(item.parsed.y ?? item.parsed, config.unit)}`,
+              label: (item) => `${item.dataset.label}: ${formattedValue(item.parsed.y ?? item.parsed, config)}`,
             },
           },
         },
@@ -106,9 +100,10 @@
           x: { grid: { display: false }, ticks: { maxTicksLimit: 8, maxRotation: 0 } },
           y: {
             beginAtZero: config.type === "bar",
+            reverse: Boolean(config.reverse_y),
             border: { display: false },
             grid: { color: cssValue("--chart-grid") },
-            ticks: { maxTicksLimit: 6, callback: (value) => number.format(value) },
+            ticks: { maxTicksLimit: 6, callback: (value) => formattedValue(value, config) },
           },
         },
         cutout: doughnut ? "64%" : undefined,

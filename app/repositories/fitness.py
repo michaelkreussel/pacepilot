@@ -34,6 +34,16 @@ def fitness_between(session: Session, user_id: int, start: date, end: date) -> l
     )
 
 
+def fitness_on_or_before(session: Session, user_id: int, end: date) -> list[DailyFitness]:
+    return list(
+        session.scalars(
+            select(DailyFitness)
+            .where(DailyFitness.user_id == user_id, DailyFitness.day <= end)
+            .order_by(DailyFitness.day)
+        )
+    )
+
+
 def latest_fitness_on_or_before(session: Session, user_id: int, day: date) -> DailyFitness | None:
     return session.scalar(
         select(DailyFitness)
