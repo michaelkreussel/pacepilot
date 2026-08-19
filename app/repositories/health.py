@@ -1,11 +1,17 @@
 from collections.abc import Iterable
 from datetime import date
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.models import DailyDataStatus, DailyHealth, SleepStage
 from app.models.user import utcnow
+
+_HEALTH_DATA_COLUMNS = tuple(
+    column
+    for column in DailyHealth.__table__.c
+    if column.name not in {"id", "user_id", "day", "updated_at"}
+)
 
 
 def recent_health(session: Session, user_id: int, days: int = 14) -> list[DailyHealth]:
@@ -72,7 +78,11 @@ def health_metrics_between(
 def latest_health_on_or_before(session: Session, user_id: int, day: date) -> DailyHealth | None:
     return session.scalar(
         select(DailyHealth)
-        .where(DailyHealth.user_id == user_id, DailyHealth.day <= day)
+        .where(
+            DailyHealth.user_id == user_id,
+            DailyHealth.day <= day,
+            or_(*(column.is_not(None) for column in _HEALTH_DATA_COLUMNS)),
+        )
         .order_by(DailyHealth.day.desc())
         .limit(1)
     )

@@ -6,8 +6,9 @@ from sqlalchemy import select
 
 from app.auth import CurrentUser
 from app.database import SessionDep
-from app.models import Activity, DailyHealth, Workout
+from app.models import Activity, Workout
 from app.onboarding import onboarding_state
+from app.repositories.health import latest_health_on_or_before
 from app.repositories.users import get_or_create_garmin_account
 from app.services.analytics import AthleteDataService
 from app.services.analytics.health_trends import preferred_readiness
@@ -34,12 +35,6 @@ READINESS_GUIDANCE = {
 }
 
 
-def _today_health(session: SessionDep, user_id: int) -> DailyHealth | None:
-    return session.scalar(
-        select(DailyHealth).where(DailyHealth.user_id == user_id, DailyHealth.day == date.today())
-    )
-
-
 @router.get("/", response_class=HTMLResponse)
 def dashboard(request: Request, session: SessionDep, user: CurrentUser) -> Response:
     if not onboarding_state(user).complete:
@@ -51,7 +46,8 @@ def dashboard(request: Request, session: SessionDep, user: CurrentUser) -> Respo
         .order_by(Activity.started_at.desc())
         .limit(1)
     )
-    latest_health = _today_health(session, user.id)
+    today = date.today()
+    latest_health = latest_health_on_or_before(session, user.id, today)
     upcoming = session.scalar(
         select(Workout)
         .where(Workout.user_id == user.id, Workout.scheduled_for >= date.today())
@@ -79,6 +75,7 @@ def dashboard(request: Request, session: SessionDep, user: CurrentUser) -> Respo
             account=account,
             latest_activity=latest_activity,
             latest_health=latest_health,
+            latest_health_is_today=latest_health is not None and latest_health.day == today,
             upcoming=upcoming,
             weekly_load=calculate_weekly_load(session, user.id),
             recovery=recovery,

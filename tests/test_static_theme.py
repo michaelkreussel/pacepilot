@@ -5,6 +5,7 @@ CSS = (ROOT / "app/static/css/tailwind.css").read_text(encoding="utf-8")
 SOURCE = (ROOT / "app/static/css/tailwind.input.css").read_text(encoding="utf-8")
 PROFILE_JS = (ROOT / "app/static/js/profile.js").read_text(encoding="utf-8")
 COACH_JS = (ROOT / "app/static/js/coach.js").read_text(encoding="utf-8")
+ACTIVITY_DETAIL_JS = (ROOT / "app/static/js/activity-detail.js").read_text(encoding="utf-8")
 
 
 def test_generated_tailwind_contains_semantic_themes() -> None:
@@ -14,6 +15,8 @@ def test_generated_tailwind_contains_semantic_themes() -> None:
     assert "--background:#0f1413" in CSS
     assert "--info-emphasis:#1d4ed8" in CSS
     assert "--chart-violet:#6757a8" in CSS
+    assert "--map-route:#4f46e5" in CSS
+    assert "--map-start:#f59e0b" in CSS
     assert ".bg-primary{" in CSS
     assert ".border-border{" in CSS
     assert ".text-muted-foreground{" in CSS
@@ -72,6 +75,10 @@ def test_profile_chart_colors_allow_multi_color_datasets() -> None:
 def test_profile_charts_can_span_configured_data_gaps() -> None:
     assert "spanGaps: Boolean(config.span_gaps)" in PROFILE_JS
     assert "spanGaps: false" not in PROFILE_JS
+
+
+def test_activity_charts_end_at_the_last_data_point() -> None:
+    assert 'bounds: "data"' in ACTIVITY_DETAIL_JS
 
 
 def test_coach_stream_renders_model_text_safely() -> None:

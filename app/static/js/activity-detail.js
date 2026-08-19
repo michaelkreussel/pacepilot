@@ -58,6 +58,7 @@
         scales: {
           x: {
             type: "linear",
+            bounds: "data",
             grid: { display: false },
             ticks: { callback: formatElapsed, maxTicksLimit: 7 },
             title: { display: true, text: data.time_axis_label },

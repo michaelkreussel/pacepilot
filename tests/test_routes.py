@@ -1,6 +1,6 @@
 import json
 from collections.abc import Callable
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -149,6 +149,37 @@ def test_dashboard_prioritizes_today_without_rendering_charts(
     assert "chart.umd.min.js" not in response.text
     assert "Aktualisieren" not in response.text
     assert client.post("/health").status_code == 404
+
+
+def test_dashboard_skips_an_empty_current_health_day(
+    client: TestClient, session_factory: sessionmaker[Session]
+) -> None:
+    client.get("/")
+    yesterday = date.today() - timedelta(days=1)
+    with session_factory() as session:
+        user = session.scalar(select(User))
+        assert user is not None
+        session.add_all(
+            [
+                DailyHealth(
+                    user_id=user.id,
+                    day=yesterday,
+                    sleep_seconds=28_800,
+                    resting_hr=49,
+                    hrv_average=80,
+                    steps=7_321,
+                ),
+                DailyHealth(user_id=user.id, day=date.today()),
+            ]
+        )
+        session.commit()
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert "49" in response.text
+    assert "7321" in response.text
+    assert f"Stand {yesterday:%d.%m.%Y}" in response.text
 
 
 def test_training_plan_month_view_shows_calendar_weeks_and_workouts(
@@ -693,7 +724,7 @@ def test_edit_draft_workout(client: TestClient, session_factory: sessionmaker[Se
     assert "startPaletteDrag('interval'" in form.text
     assert "/static/icons/workout.svg#pencil" in form.text
     assert "setDropTarget(null, index)" in form.text
-    assert "/static/css/tailwind.css?v=20260819-5" in form.text
+    assert "/static/css/tailwind.css?v=20260819-6" in form.text
     assert "/static/js/theme.js?v=20260809-3" in form.text
     assert "data-theme-toggle" in form.text
 
