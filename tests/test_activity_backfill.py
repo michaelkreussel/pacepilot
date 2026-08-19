@@ -1,8 +1,6 @@
 from datetime import date, datetime
-from io import BytesIO
 from pathlib import Path
 from typing import Any
-from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
 from sqlalchemy import func, select
@@ -74,14 +72,6 @@ class FakeActivityGarmin:
         ]
         self.fail_details_once = fail_details_once
         self.calls: list[tuple[str, str]] = []
-
-    def download_activity(self, activity_id: str, download_format: object) -> bytes:
-        self.calls.append(("original", str(activity_id)))
-        assert str(download_format) == "ActivityDownloadFormat.ORIGINAL"
-        archive = BytesIO()
-        with ZipFile(archive, "w", ZIP_DEFLATED) as output:
-            output.writestr(f"{activity_id}.fit", b"synthetic-fit")
-        return archive.getvalue()
 
     def count_activities(self) -> int:
         self.calls.append(("count", ""))
@@ -217,12 +207,6 @@ def test_activity_backfill_imports_details_and_skips_unchanged(
         assert recent.splits_complete is True
         assert recent.raw_file is not None and f"user-{user.id}" in recent.raw_file
         assert recent.details_file is not None and Path(recent.details_file).is_file()
-        assert recent.fit_import_status == "available"
-        assert (
-            recent.fit_file is not None and Path(recent.fit_file).read_bytes() == b"synthetic-fit"
-        )
-        assert ("original", "3") in client.calls
-        assert not any(call == ("original", "2") for call in client.calls)
         normalized = load_activity_details(
             recent.started_at,
             recent.garmin_activity_id,

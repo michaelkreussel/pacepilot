@@ -12,13 +12,7 @@ from app.repositories.users import get_or_create_garmin_account
 from app.services.analytics import AthleteDataService
 from app.services.analytics.health_trends import MetricTrend
 from app.services.analytics.training_trends import RecentWorkout, TrainingTimelinePoint
-from app.web import (
-    context,
-    format_activity_type,
-    format_distance,
-    format_duration,
-    templates,
-)
+from app.web import context, format_activity_type, format_distance, format_duration, templates
 
 router = APIRouter(prefix="/profile", dependencies=[Depends(require_data_access)])
 
@@ -615,7 +609,6 @@ def profile(
     health = analytics.get_health_trends(days)
     training = analytics.get_training_summary(days)
     timeline = analytics.get_training_timeline(days, bucket_days=1 if days <= 7 else 7)
-    planning = analytics.get_planning_context(include_detail_evidence=False)
 
     cards: list[dict[str, Any]] = []
     health_is_fresh = _fresh(recovery.health_day, end_date, 2)
@@ -901,10 +894,5 @@ def profile(
                 _recent_workout(item) for item in analytics.get_recent_workouts(limit=6)
             ],
             chart_data=chart_data,
-            planning_summary={
-                "metric_count": len(planning.performance),
-                "zone_count": len(planning.zones),
-                "goal": planning.goal is not None,
-            },
         ),
     )

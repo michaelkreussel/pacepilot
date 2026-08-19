@@ -31,7 +31,6 @@ from app.services.garmin.locks import (
     garmin_account_active,
     garmin_account_slot,
 )
-from app.services.garmin.performance_profile import sync_performance_profile
 
 logger = logging.getLogger(__name__)
 
@@ -44,12 +43,6 @@ METRIC_LABELS = {
     "vo2max": "VO₂max",
     "training_readiness": "Trainingsbereitschaft",
     "training_status": "Trainingsstatus",
-    "lactate_threshold": "Laktatschwelle",
-    "cycling_ftp": "Cycling FTP",
-    "race_predictions": "Rennprognosen",
-    "personal_records": "Persönliche Rekorde",
-    "heart_rate_zones": "Herzfrequenzzonen",
-    "power_zones": "Leistungszonen",
     "activities": "Aktivitäten",
     "devices": "Geräte",
     "login": "Anmeldung",
@@ -715,13 +708,6 @@ def sync_garmin(
                 log_context={"sync_run_id": run.id, "sync_user_id": account.user_id},
             )
             run.health_days_synced = run.days_completed
-            session.commit()
-
-            run.stage = "performance_profile"
-            run.message = "Leistungsprofil wird aktualisiert"
-            run.current_operation = "Leistungswerte"
-            session.commit()
-            sync_performance_profile(session, client, account.user_id, pacer=pacer)
             session.commit()
 
             run.stage = "devices"

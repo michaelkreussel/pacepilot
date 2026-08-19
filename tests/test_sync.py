@@ -10,7 +10,6 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.config import get_settings
 from app.models import (
     Activity,
-    DailyFitness,
     DailyHealth,
     GarminAccount,
     GarminDevice,
@@ -22,8 +21,6 @@ from app.models import (
 from app.services.garmin import sync as sync_module
 from app.services.garmin.activity_details import load_activity_details
 from app.services.garmin.client import GarminUnavailableError
-from app.services.garmin.health_backfill import GarminPacer
-from app.services.garmin.performance_profile import sync_performance_profile
 from app.services.garmin.sync import rate_limit_cooldown_remaining
 
 
@@ -136,57 +133,6 @@ class FakeGarmin:
     def get_training_status(self, _day: str) -> dict[str, Any]:
         return {}
 
-    def get_lactate_threshold(self) -> dict[str, Any]:
-        return {
-            "speed_and_heart_rate": {
-                "calendarDate": date.today().isoformat(),
-                "speed": 4.0,
-                "heartRate": 171,
-            },
-            "power": {"functionalThresholdPower": 315},
-        }
-
-    def get_cycling_ftp(self) -> dict[str, Any]:
-        return {"functionalThresholdPower": 280}
-
-    def get_race_predictions(self) -> dict[str, Any]:
-        return {
-            "calendarDate": date.today().isoformat(),
-            "raceTime5K": 1_200,
-            "raceTime10K": 2_520,
-            "raceTimeHalf": 5_700,
-            "raceTimeMarathon": 12_000,
-        }
-
-    def get_personal_record(self) -> list[dict[str, Any]]:
-        return [{"type": "10K", "recordValueInSeconds": 2_600, "recordDate": "2026-07-01"}]
-
-    def get_heart_rate_zones(self) -> list[dict[str, Any]]:
-        return [
-            {
-                "sport": "RUNNING",
-                "maxHeartRate": 190,
-                "lactateThresholdHeartRate": 171,
-                "zone1Floor": 95,
-                "zone2Floor": 114,
-                "zone3Floor": 133,
-                "zone4Floor": 152,
-                "zone5Floor": 171,
-            }
-        ]
-
-    def get_power_zones(self) -> list[dict[str, Any]]:
-        return [
-            {
-                "sport": "CYCLING",
-                "zone1Floor": 100,
-                "zone2Floor": 150,
-                "zone3Floor": 200,
-                "zone4Floor": 250,
-                "zone5Floor": 300,
-            }
-        ]
-
     def get_devices(self) -> list[dict[str, Any]]:
         return [{"deviceId": 77, "displayName": "Forerunner", "productType": "FR"}]
 
@@ -194,14 +140,6 @@ class FakeGarmin:
 class RateLimitedGarmin(FakeGarmin):
     def count_activities(self) -> int:
         raise GarminConnectTooManyRequestsError("slow down")
-
-
-class DynamicPerformanceGarmin(FakeGarmin):
-    def __init__(self) -> None:
-        self.ftp = 280
-
-    def get_cycling_ftp(self) -> dict[str, Any]:
-        return {"functionalThresholdPower": self.ftp}
 
 
 def test_sync_normalizes_and_stores_data(
@@ -278,60 +216,10 @@ def test_sync_normalizes_and_stores_data(
         assert health.steps == 9000
         assert health.sleep_score == 82
         assert health.hrv_average == 54.0
-        fitness = session.scalar(select(DailyFitness).where(DailyFitness.day == date.today()))
-        assert fitness is not None
-        assert fitness.lactate_threshold_hr == 171
-        assert fitness.lactate_threshold_speed_mps == 4
-        assert fitness.running_ftp_watts == 315
-        assert fitness.cycling_ftp_watts == 280
-        assert fitness.race_prediction_10k_seconds == 2_520
-        assert fitness.personal_record_10k_seconds == 2_600
-        assert fitness.configured_max_hr == 190
-        assert fitness.heart_rate_zones is not None and len(fitness.heart_rate_zones) == 5
-        assert fitness.power_zones is not None and len(fitness.power_zones) == 5
         assert session.scalar(select(GarminDevice)) is not None
         assert session.scalar(select(SyncEvent).where(SyncEvent.status == "success")) is not None
         assert user.onboarding_completed_at is not None
         assert user.onboarding_completed_version == 1
-
-
-def test_performance_profile_refreshes_daily_and_not_on_every_sync(session_factory) -> None:
-    client = DynamicPerformanceGarmin()
-    pacer = GarminPacer(0)
-    first_sync = datetime(2026, 8, 11, 8)
-    with session_factory() as session:
-        user = User(display_name="Dynamisch")
-        session.add(user)
-        session.flush()
-        sync_performance_profile(session, client, user.id, pacer=pacer, now=first_sync)
-        session.commit()
-        ftp = session.scalar(
-            select(DailyFitness).where(
-                DailyFitness.user_id == user.id,
-                DailyFitness.day == first_sync.date(),
-            )
-        )
-        assert ftp is not None and ftp.cycling_ftp_watts == 280
-
-        client.ftp = 300
-        sync_performance_profile(
-            session, client, user.id, pacer=pacer, now=first_sync + timedelta(hours=1)
-        )
-        session.commit()
-        assert ftp.cycling_ftp_watts == 280
-
-        sync_performance_profile(
-            session, client, user.id, pacer=pacer, now=first_sync + timedelta(hours=25)
-        )
-        session.commit()
-        session.expire_all()
-        refreshed = session.scalar(
-            select(DailyFitness).where(
-                DailyFitness.user_id == user.id,
-                DailyFitness.day == (first_sync + timedelta(hours=25)).date(),
-            )
-        )
-        assert refreshed is not None and refreshed.cycling_ftp_watts == 300
 
 
 def test_sync_releases_lock_when_initial_commit_fails(

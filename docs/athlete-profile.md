@@ -2,10 +2,8 @@
 
 ## Route and Ranges
 
-The server-rendered Profile is available at `/profile`; the separate dynamic performance profile is
-available at `/performance`, with athlete-owned inputs under `/performance/edit`. Both use
-`AthleteDataService` as their data boundary. The Profile route accepts an optional inclusive `end`
-date and one of these rolling periods:
+The server-rendered Profile is available at `/profile` and uses `AthleteDataService` as its data
+boundary. The route accepts an optional inclusive `end` date and one of these rolling periods:
 
 | Key | UI label | Days | Training buckets |
 |---|---|---:|---|
@@ -24,33 +22,16 @@ days, but selected-period bars never include activities outside the selected ran
 1. A PacePilot Readiness hero shows score, German label, confidence, formula version, and component
    bars. It explicitly says that the value is not Garmin Training Readiness.
 2. Current-state cards show only available metrics and retain their source dates.
-3. A compact card links to the separate performance profile instead of embedding planning data in
-   the already dense trend page.
-4. Health and recovery charts show available personal trends and baselines.
-5. Training cards summarize the selected period without combining incompatible sport volume.
-6. Training charts show exact-range volume, frequency, intensity, Training Effect, and Garmin load
+3. Health and recovery charts show available personal trends and baselines.
+4. Training cards summarize the selected period without combining incompatible sport volume.
+5. Training charts show exact-range volume, frequency, intensity, Training Effect, and Garmin load
    only where source metrics exist.
-7. Per-sport volume remains separated by Garmin activity type.
-8. Six recent workouts provide bounded drill-down into the existing activity analysis pages.
+6. Per-sport volume remains separated by Garmin activity type.
+7. Six recent workouts provide bounded drill-down into the existing activity analysis pages.
 
 The page uses the existing PacePilot shell, colors, typography, card language, Chart.js dependency,
 and responsive breakpoints. A dedicated `profile.css` handles the readiness composition and dense
 chart grids. No frontend framework or build step was added.
-
-## Dynamic Performance Profile
-
-`/performance` combines three deliberately separate sources:
-
-- Garmin values refreshed at most once every 24 hours: lactate threshold, running threshold power,
-  cycling FTP, race predictions, personal records, and configured HR/power zones;
-- PacePilot values calculated on every request from current history: resting-HR baseline and
-  28/84-day training capacity;
-- athlete-owned goals, availability, experience, constraints, and optional verified overrides.
-
-Imported values are stored in the existing dated `DailyFitness` history. A successful refresh writes
-only the relevant columns in today's snapshot; it does not introduce a parallel performance table.
-The computed performance profile remains a read-time DTO in `AthleteDataService`. Manual anchors
-remain separate planning evidence and are never deleted with Garmin data.
 
 ## Metrics and Charts
 
@@ -110,4 +91,6 @@ It does not aggregate Garmin data or infer metric meaning.
   breakdown. Stored stage timestamps are naive Garmin GMT values, so local clock presentation first
   needs explicit timezone semantics.
 - Add activity-index sport and zone controls to complement the implemented date drill-down.
+- Add editable athlete goals, thresholds, and profile attributes when those concepts exist in the
+  domain model.
 - Consider server-side weekly health downsampling if ranges longer than one year are introduced.
