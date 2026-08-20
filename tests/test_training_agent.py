@@ -156,6 +156,8 @@ def test_coach_streams_and_persists_conversation(
     page = client.get(f"/coach/{conversation_id}").text
     assert 'aria-label="Neuen Chat starten"' in page
     assert 'aria-label="Chat löschen"' in page
+    assert "data-coach-message-list" in page
+    assert "Nur lesend" in page
     assert "data-coach-activity" in page
     assert page.index("Aktuelle Erholung prüfen") < page.index(
         "Du wirkst heute etwas weniger erholt"

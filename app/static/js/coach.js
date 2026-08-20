@@ -4,9 +4,10 @@
 
   const form = chat.querySelector("[data-coach-form]");
   const messages = chat.querySelector("[data-coach-messages]");
+  const messageList = messages?.querySelector("[data-coach-message-list]");
   const textarea = form?.querySelector("textarea");
   const submit = form?.querySelector("button[type='submit']");
-  if (!form || !messages || !textarea || !submit) return;
+  if (!form || !messages || !messageList || !textarea || !submit) return;
 
   const conversationId = chat.dataset.conversationId;
   const deleteButton = document.querySelector(`[data-delete-chat="${CSS.escape(conversationId)}"]`);
@@ -20,7 +21,7 @@
     const svg = document.createElementNS(namespace, "svg");
     svg.setAttribute("viewBox", "0 0 24 24");
     svg.setAttribute("aria-hidden", "true");
-    svg.classList.add("size-3.5", "fill-none", "stroke-current", "stroke-2", "transition-transform", "group-open:rotate-180");
+    svg.classList.add("size-3", "fill-none", "stroke-current", "stroke-2", "transition-transform", "group-open:rotate-180");
     const path = document.createElementNS(namespace, "path");
     path.setAttribute("d", pathData);
     path.setAttribute("stroke-linecap", "round");
@@ -31,8 +32,11 @@
 
   const createUserMessage = (text) => {
     const article = document.createElement("article");
-    article.className = "ml-auto max-w-[88%] rounded-2xl rounded-br-md bg-primary px-4 py-3 text-sm leading-6 text-primary-foreground sm:max-w-[72%]";
-    article.textContent = text;
+    article.className = "flex justify-end";
+    const bubble = document.createElement("div");
+    bubble.className = "max-w-[88%] rounded-xl rounded-br-sm border border-primary/20 bg-primary-subtle px-3 py-2 text-sm leading-6 text-primary-emphasis sm:max-w-[78%]";
+    bubble.textContent = text;
+    article.append(bubble);
     return article;
   };
 
@@ -75,23 +79,22 @@
 
   const createAssistantMessage = () => {
     const article = document.createElement("article");
-    article.className = "max-w-3xl";
 
     const row = document.createElement("div");
-    row.className = "flex items-start gap-3";
+    row.className = "flex items-start gap-2.5";
     const avatar = document.createElement("div");
-    avatar.className = "grid size-8 shrink-0 place-items-center rounded-xl bg-secondary font-display text-xs font-bold text-secondary-foreground";
+    avatar.className = "grid size-7 shrink-0 place-items-center rounded-lg bg-secondary font-display text-[0.6875rem] font-bold text-secondary-foreground";
     avatar.textContent = "P";
 
     const body = document.createElement("div");
     body.className = "min-w-0 flex-1";
     const activity = document.createElement("details");
-    activity.className = "group mb-3 text-xs text-muted-foreground";
+    activity.className = "group mb-2 text-xs text-muted-foreground";
     activity.dataset.coachActivity = "";
     const activityHeader = document.createElement("summary");
-    activityHeader.className = "flex w-fit cursor-pointer list-none items-center gap-2 rounded-md py-1 font-medium transition hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring";
+    activityHeader.className = "flex w-fit cursor-pointer list-none items-center gap-1.5 rounded-md py-0.5 font-medium transition hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring";
     const activityIcon = document.createElement("span");
-    activityIcon.className = "relative flex size-4 items-center justify-center";
+    activityIcon.className = "relative flex size-3.5 items-center justify-center";
     const activityDot = document.createElement("span");
     activityDot.className = "coach-activity-pulse size-1.5 rounded-full bg-primary";
     activityIcon.append(activityDot);
@@ -102,7 +105,7 @@
     activityHeader.append(activityIcon, activitySummary, createSvg("m6 9 6 6 6-6"));
 
     const activityLog = document.createElement("ol");
-    activityLog.className = "mt-2 space-y-2 border-l border-border pl-3";
+    activityLog.className = "mt-1.5 space-y-1.5 border-l border-border pl-3";
     activityLog.dataset.activityLog = "";
     const initialStep = createActivityStep("Frage analysiert");
     initialStep.dataset.activityStep = "";
@@ -110,7 +113,7 @@
     activity.append(activityHeader, activityLog);
 
     const answer = document.createElement("div");
-    answer.className = "whitespace-pre-wrap text-sm leading-7 text-foreground";
+    answer.className = "whitespace-pre-wrap text-sm leading-6 text-foreground";
     answer.dataset.answerText = "";
 
     body.append(activity, answer);
@@ -255,10 +258,10 @@
     const text = textarea.value.trim();
     if (!text || submit.disabled) return;
 
-    messages.querySelector("[data-coach-empty]")?.remove();
-    messages.append(createUserMessage(text));
+    messageList.querySelector("[data-coach-empty]")?.remove();
+    messageList.append(createUserMessage(text));
     const assistant = createAssistantMessage();
-    messages.append(assistant.article);
+    messageList.append(assistant.article);
     textarea.value = "";
     textarea.style.height = "auto";
     submit.disabled = true;

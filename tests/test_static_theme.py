@@ -90,4 +90,6 @@ def test_coach_stream_renders_model_text_safely() -> None:
 def test_coach_stream_replaces_live_activity_and_keeps_tool_history() -> None:
     assert "assistant.activitySummary.textContent = label" in COACH_JS
     assert "assistant.activityLog.append(item)" in COACH_JS
+    assert 'messages?.querySelector("[data-coach-message-list]")' in COACH_JS
+    assert "messageList.append(assistant.article)" in COACH_JS
     assert "coach-activity-wave" in COACH_JS
