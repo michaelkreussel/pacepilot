@@ -1,3 +1,4 @@
+import re
 from collections.abc import Generator
 from typing import Annotated
 
@@ -16,6 +17,12 @@ from app.models import User
 from app.models.user import utcnow
 
 app = main_module.app
+
+
+def extract_csrf_token(html: str) -> str:
+    match = re.search(r'name="_csrf_token" value="([^"]+)"', html)
+    assert match is not None
+    return match.group(1)
 
 
 @pytest.fixture
@@ -67,6 +74,8 @@ def client(
     app.dependency_overrides[get_current_user] = override_current_user
     try:
         with TestClient(app) as test_client:
+            page = test_client.get("/help")
+            test_client.headers["X-CSRF-Token"] = extract_csrf_token(page.text)
             yield test_client
     finally:
         app.dependency_overrides.clear()

@@ -15,7 +15,7 @@
 - App lifespan creates data/token directories, applies Alembic migrations, and then starts the scheduler. Migration failure aborts startup before background jobs or requests can run.
 - Keep deployment at one Uvicorn worker. Garmin sync exclusion uses in-process per-account `threading.Lock` instances, and every worker would start its own scheduler. SQLite must remain on a local filesystem, not SMB/NFS.
 - `app.config.get_settings()` is cached; `app.database` creates its engine and `app.auth` builds its OAuth registry at import time. Set environment overrides before importing the app. Route tests override dependencies rather than replacing the global engine.
-- Google OpenID Connect and GitHub OAuth create user-scoped signed sessions; protected routes use `CurrentUser`, and incomplete accounts are redirected through onboarding. There is no CSRF protection on state-changing forms.
+- Google OpenID Connect and GitHub OAuth create user-scoped signed sessions; protected routes use `CurrentUser`, and incomplete accounts are redirected through onboarding. Every unsafe-method request requires the session-bound CSRF token supplied by `csrf_field()` or `X-CSRF-Token`.
 
 ## Data And Integrations
 

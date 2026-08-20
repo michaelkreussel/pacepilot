@@ -203,7 +203,9 @@ async def _stream_answer(
     started_at = monotonic()
     answer: list[str] = []
     logger.info(
-        "AI coach stream started user_id=%s assistant_message_id=%s history_messages=%s",
+        "AI coach stream started request_id=%s user_id=%s assistant_message_id=%s "
+        "history_messages=%s",
+        runtime.request_id,
         runtime.user_id,
         assistant_message_id,
         len(history),
@@ -235,8 +237,9 @@ async def _stream_answer(
             complete_message(session, assistant_message_id, content)
             session.commit()
         logger.info(
-            "AI coach stream completed user_id=%s assistant_message_id=%s "
+            "AI coach stream completed request_id=%s user_id=%s assistant_message_id=%s "
             "duration_ms=%s answer_characters=%s",
+            runtime.request_id,
             runtime.user_id,
             assistant_message_id,
             round((monotonic() - started_at) * 1000),
@@ -248,7 +251,9 @@ async def _stream_answer(
             fail_message(session, assistant_message_id, interrupted=True)
             session.commit()
         logger.warning(
-            "AI coach stream interrupted user_id=%s assistant_message_id=%s duration_ms=%s",
+            "AI coach stream interrupted request_id=%s user_id=%s assistant_message_id=%s "
+            "duration_ms=%s",
+            runtime.request_id,
             runtime.user_id,
             assistant_message_id,
             round((monotonic() - started_at) * 1000),
@@ -259,8 +264,9 @@ async def _stream_answer(
             fail_message(session, assistant_message_id)
             session.commit()
         logger.exception(
-            "AI coach stream failed user_id=%s assistant_message_id=%s "
+            "AI coach stream failed request_id=%s user_id=%s assistant_message_id=%s "
             "error_type=%s duration_ms=%s",
+            runtime.request_id,
             runtime.user_id,
             assistant_message_id,
             type(exc).__name__,
@@ -307,7 +313,12 @@ async def ask_coach(
     session.commit()
 
     factory = sessionmaker(bind=session.get_bind(), autoflush=False, expire_on_commit=False)
-    runtime = CoachRuntimeContext(user_id=user.id, as_of=date.today(), session_factory=factory)
+    runtime = CoachRuntimeContext(
+        user_id=user.id,
+        as_of=date.today(),
+        session_factory=factory,
+        request_id=request.state.request_id,
+    )
     history = [*_bounded_history(existing_messages), CoachHistoryMessage("user", message)]
     return StreamingResponse(
         _stream_answer(

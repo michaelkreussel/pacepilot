@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     llm_api_key: str | None = None
     llm_model: str = ""
     llm_timeout_seconds: float = Field(default=60, ge=5, le=180)
+    coach_workout_proposals_enabled: bool = False
+    coach_garmin_sync_enabled: bool = False
+    coach_daily_adaptation_enabled: bool = False
+    coach_plan_generation_enabled: bool = False
 
     @model_validator(mode="after")
     def validate_deployment(self) -> "Settings":
@@ -49,6 +53,12 @@ class Settings(BaseSettings):
                 raise ValueError("SESSION_SECRET must be configured in production")
             if not self.session_https_only:
                 raise ValueError("SESSION_HTTPS_ONLY must be enabled in production")
+        if not self.coach_workout_proposals_enabled and (
+            self.coach_garmin_sync_enabled
+            or self.coach_daily_adaptation_enabled
+            or self.coach_plan_generation_enabled
+        ):
+            raise ValueError("Coach workout features require COACH_WORKOUT_PROPOSALS_ENABLED")
         return self
 
 

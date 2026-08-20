@@ -4,6 +4,7 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
@@ -724,7 +725,7 @@ def test_edit_draft_workout(client: TestClient, session_factory: sessionmaker[Se
     assert "startPaletteDrag('interval'" in form.text
     assert "/static/icons/workout.svg#pencil" in form.text
     assert "setDropTarget(null, index)" in form.text
-    assert "/static/css/tailwind.css?v=20260820-2" in form.text
+    assert "/static/css/tailwind.css?v=20260820-3" in form.text
     assert "/static/js/theme.js?v=20260809-3" in form.text
     assert "data-theme-toggle" in form.text
 
@@ -944,6 +945,308 @@ def test_draft_workout_with_remote_id_cannot_be_pushed(
         workout = session.scalar(select(Workout))
         assert workout is not None
         assert workout.status == "draft"
+
+
+@pytest.mark.parametrize(
+    ("method", "suffix"),
+    [
+        ("get", ""),
+        ("get", "/edit"),
+        ("post", ""),
+        ("post", "/delete"),
+        ("post", "/confirm"),
+        ("post", "/publish"),
+        ("post", "/push"),
+    ],
+)
+def test_other_users_workout_routes_return_404_without_side_effects(
+    method: str,
+    suffix: str,
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: Any,
+) -> None:
+    with session_factory() as session:
+        other_user = User(display_name="Other athlete")
+        session.add(other_user)
+        session.flush()
+        workout = Workout(
+            user_id=other_user.id,
+            name="Foreign workout",
+            sport="running",
+            scheduled_for=date(2026, 8, 9),
+            description="Private",
+            status="pushed",
+            garmin_workout_id="foreign-remote",
+            definition_version=1,
+            definition=json.loads(_workout_data()["definition"]),
+        )
+        session.add(workout)
+        session.commit()
+        workout_id = workout.id
+
+    monkeypatch.setattr(
+        workouts_module,
+        "connect_garmin_account",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("foreign workout contacted Garmin")),
+    )
+
+    path = f"/workouts/{workout_id}{suffix}"
+    response = (
+        client.get(path, follow_redirects=False)
+        if method == "get"
+        else client.post(path, data=_workout_data(), follow_redirects=False)
+    )
+
+    assert response.status_code == 404
+    with session_factory() as session:
+        unchanged = session.get(Workout, workout_id)
+        assert unchanged is not None
+        assert unchanged.name == "Foreign workout"
+        assert unchanged.status == "pushed"
+        assert unchanged.garmin_workout_id == "foreign-remote"
+
+
+@pytest.mark.parametrize(
+    (
+        "initial_status",
+        "remote_id",
+        "action",
+        "expected_status",
+        "expected_connection",
+        "expected_uploads",
+        "expected_schedules",
+        "expected_pushes",
+        "expects_error",
+    ),
+    [
+        ("draft", "remote-1", "confirm", "confirmed", False, 0, 0, 0, False),
+        ("draft", None, "publish", "draft", False, 0, 0, 0, True),
+        ("confirmed", None, "confirm", "confirmed", False, 0, 0, 0, False),
+        ("confirmed", "remote-1", "publish", "published", True, 0, 1, 0, False),
+        ("confirmed", "remote-1", "push", "confirmed", False, 0, 0, 0, True),
+        ("published", None, "publish", "published", True, 1, 1, 0, False),
+        ("published", None, "push", "published", True, 0, 0, 0, True),
+        ("pushed", "remote-1", "publish", "published", True, 0, 1, 0, False),
+        ("pushed", None, "publish", "published", True, 1, 1, 0, False),
+        ("pushed", None, "push", "pushed", True, 0, 0, 0, True),
+    ],
+)
+def test_legacy_status_and_remote_id_action_matrix(
+    initial_status: str,
+    remote_id: str | None,
+    action: str,
+    expected_status: str,
+    expected_connection: bool,
+    expected_uploads: int,
+    expected_schedules: int,
+    expected_pushes: int,
+    expects_error: bool,
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: Any,
+) -> None:
+    created = client.post("/workouts", data=_workout_data(), follow_redirects=False)
+    location = created.headers["location"]
+    with session_factory() as session:
+        workout = session.scalar(select(Workout))
+        assert workout is not None
+        workout.status = initial_status
+        workout.garmin_workout_id = remote_id
+        _mark_garmin_connected(session)
+
+    class FakeGarmin:
+        uploads = 0
+        schedules: list[tuple[str, str]] = []
+        pushes: list[str] = []
+
+        def upload_workout(self, _payload: dict[str, Any]) -> dict[str, str]:
+            self.uploads += 1
+            return {"workoutId": "uploaded-1"}
+
+        def get_scheduled_workouts(self, _year: int, _month: int) -> list[object]:
+            return []
+
+        def schedule_workout(self, workout_id: str, day: str) -> None:
+            self.schedules.append((workout_id, day))
+
+        def push_workout_to_device(self, workout_id: str) -> None:
+            self.pushes.append(workout_id)
+
+    garmin = FakeGarmin()
+    connections = 0
+
+    def connect_test_account(_session: Session, _account: GarminAccount) -> FakeGarmin:
+        nonlocal connections
+        connections += 1
+        return garmin
+
+    monkeypatch.setattr(workouts_module, "connect_garmin_account", connect_test_account)
+
+    response = client.post(f"{location}/{action}", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert ("error=" in response.headers["location"]) is expects_error
+    assert (connections > 0) is expected_connection
+    assert garmin.uploads == expected_uploads
+    assert len(garmin.schedules) == expected_schedules
+    assert len(garmin.pushes) == expected_pushes
+    with session_factory() as session:
+        workout = session.scalar(select(Workout))
+        assert workout is not None
+        assert workout.status == expected_status
+
+
+def test_edit_confirmed_workout_preserves_confirmation_without_garmin(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: Any,
+) -> None:
+    created = client.post("/workouts", data=_workout_data(), follow_redirects=False)
+    location = created.headers["location"]
+    client.post(f"{location}/confirm")
+    monkeypatch.setattr(
+        workouts_module,
+        "connect_garmin_account",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("local edit contacted Garmin")),
+    )
+
+    response = client.post(
+        location,
+        data=_workout_data(name="Edited after confirmation"),
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    with session_factory() as session:
+        workout = session.scalar(select(Workout))
+        assert workout is not None
+        assert workout.name == "Edited after confirmation"
+        assert workout.status == "confirmed"
+
+
+def test_edit_draft_with_remote_id_updates_and_pushes_garmin(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: Any,
+) -> None:
+    created = client.post("/workouts", data=_workout_data(), follow_redirects=False)
+    location = created.headers["location"]
+    with session_factory() as session:
+        workout = session.scalar(select(Workout))
+        assert workout is not None
+        workout.garmin_workout_id = "remote-1"
+        _mark_garmin_connected(session)
+
+    class FakeGarmin:
+        updates: list[str] = []
+        pushes: list[str] = []
+
+        def update_workout(self, workout_id: str, _payload: dict[str, Any]) -> None:
+            self.updates.append(workout_id)
+
+        def push_workout_to_device(self, workout_id: str) -> None:
+            self.pushes.append(workout_id)
+
+    garmin = FakeGarmin()
+    monkeypatch.setattr(
+        workouts_module,
+        "connect_garmin_account",
+        lambda _session, _account: garmin,
+    )
+
+    response = client.post(
+        location,
+        data=_workout_data(name="Inconsistent draft edit"),
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert garmin.updates == ["remote-1"]
+    assert garmin.pushes == ["remote-1"]
+    with session_factory() as session:
+        workout = session.scalar(select(Workout))
+        assert workout is not None
+        assert workout.status == "pushed"
+
+
+def test_repeated_successful_publish_reuses_remote_workout_and_schedule(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: Any,
+) -> None:
+    created = client.post("/workouts", data=_workout_data(), follow_redirects=False)
+    location = created.headers["location"]
+    client.post(f"{location}/confirm")
+    with session_factory() as session:
+        _mark_garmin_connected(session)
+
+    class FakeGarmin:
+        uploads = 0
+        schedules: list[tuple[str, str]] = []
+
+        def upload_workout(self, _payload: dict[str, Any]) -> dict[str, str]:
+            self.uploads += 1
+            return {"workoutId": "remote-1"}
+
+        def get_scheduled_workouts(self, _year: int, _month: int) -> dict[str, object]:
+            return {
+                "items": [
+                    {"id": 99, "date": day, "workoutId": workout_id}
+                    for workout_id, day in self.schedules
+                ]
+            }
+
+        def schedule_workout(self, workout_id: str, day: str) -> None:
+            self.schedules.append((workout_id, day))
+
+    garmin = FakeGarmin()
+    monkeypatch.setattr(
+        workouts_module,
+        "connect_garmin_account",
+        lambda _session, _account: garmin,
+    )
+
+    first = client.post(f"{location}/publish", follow_redirects=False)
+    second = client.post(f"{location}/publish", follow_redirects=False)
+
+    assert first.status_code == second.status_code == 303
+    assert garmin.uploads == 1
+    assert garmin.schedules == [("remote-1", "2026-08-09")]
+
+
+def test_repeated_push_calls_garmin_each_time(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: Any,
+) -> None:
+    created = client.post("/workouts", data=_workout_data(), follow_redirects=False)
+    location = created.headers["location"]
+    with session_factory() as session:
+        workout = session.scalar(select(Workout))
+        assert workout is not None
+        workout.status = "published"
+        workout.garmin_workout_id = "remote-1"
+        _mark_garmin_connected(session)
+
+    class FakeGarmin:
+        pushes: list[str] = []
+
+        def push_workout_to_device(self, workout_id: str) -> None:
+            self.pushes.append(workout_id)
+
+    garmin = FakeGarmin()
+    monkeypatch.setattr(
+        workouts_module,
+        "connect_garmin_account",
+        lambda _session, _account: garmin,
+    )
+
+    first = client.post(f"{location}/push", follow_redirects=False)
+    second = client.post(f"{location}/push", follow_redirects=False)
+
+    assert first.status_code == second.status_code == 303
+    assert garmin.pushes == ["remote-1", "remote-1"]
 
 
 def test_manual_sync_is_queued_once(

@@ -191,6 +191,10 @@ Settings are read from environment variables and, for local development, from `.
 | `LLM_API_KEY` | unset | OpenRouter API key for the optional coach |
 | `LLM_MODEL` | unset | OpenRouter model ID, for example `openai/gpt-4o-mini` |
 | `LLM_TIMEOUT_SECONDS` | `60` | Timeout for an OpenRouter model call |
+| `COACH_WORKOUT_PROPOSALS_ENABLED` | `false` | Enables future local coach workout proposals |
+| `COACH_GARMIN_SYNC_ENABLED` | `false` | Enables future Garmin sync for accepted coach workouts |
+| `COACH_DAILY_ADAPTATION_ENABLED` | `false` | Enables future coach daily adaptations |
+| `COACH_PLAN_GENERATION_ENABLED` | `false` | Enables future coach week and multi-week plans |
 
 Production mode requires `SESSION_SECRET` and `SESSION_HTTPS_ONLY=true`. Configuring only one half
 of an OAuth provider's client ID and secret pair also prevents startup.
@@ -211,8 +215,9 @@ The Compose setup:
 - applies pending migrations before serving requests; and
 - starts exactly one Uvicorn worker.
 
-The included Compose file forwards deployment, OAuth, and LLM settings. Add other tuning variables
-to a Compose override if their defaults need to change in the container.
+The included Compose file forwards deployment, OAuth, LLM, and coach feature settings. Coach
+feature flags never disable the existing manual workout or Garmin flows. Add other tuning
+variables to a Compose override if their defaults need to change in the container.
 
 For internet-facing installations, place PacePilot behind an HTTPS reverse proxy and configure
 `PUBLIC_BASE_URL`. A reverse proxy and TLS termination are not included.
@@ -266,7 +271,8 @@ consider these current limitations:
 - Any valid identity from a configured OAuth provider can create an account; there is no built-in
   allowlist, invitation flow, or administrative approval.
 - Identities from different OAuth providers are not automatically linked by email address.
-- State-changing HTML forms do not currently use CSRF tokens.
+- Requests using unsafe HTTP methods require a synchronizer token bound to the signed session;
+  OAuth login initiation uses a protected POST.
 - There is no complete user-account deletion interface.
 - Application data is not encrypted at rest by PacePilot.
 

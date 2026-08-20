@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
@@ -82,9 +83,28 @@ def test_activity_charts_end_at_the_last_data_point() -> None:
 
 
 def test_coach_stream_renders_model_text_safely() -> None:
-    assert 'headers: { Accept: "text/event-stream" }' in COACH_JS
+    assert 'Accept: "text/event-stream"' in COACH_JS
+    assert '"X-CSRF-Token": form.elements.namedItem("_csrf_token").value' in COACH_JS
     assert "createTextNode(data.text)" in COACH_JS
     assert "innerHTML" not in COACH_JS
+    assert 'includes("text/event-stream")' in COACH_JS
+    assert "terminalEventReceived" in COACH_JS
+    assert "Die Streaming-Antwort wurde vorzeitig beendet." in COACH_JS
+
+
+def test_all_post_forms_include_the_shared_csrf_field() -> None:
+    template_root = ROOT / "app" / "templates"
+    for path in template_root.rglob("*.html"):
+        source = path.read_text(encoding="utf-8")
+        forms = re.findall(r'<form\b[^>]*method="post"[^>]*>.*?</form>', source, re.DOTALL)
+        for form in forms:
+            assert "csrf_field()" in form, path
+
+
+def test_htmx_unsafe_requests_receive_csrf_header() -> None:
+    source = (ROOT / "app" / "static" / "js" / "csrf.js").read_text(encoding="utf-8")
+    assert 'document.addEventListener("htmx:configRequest"' in source
+    assert 'event.detail.headers["X-CSRF-Token"] = token' in source
 
 
 def test_coach_stream_replaces_live_activity_and_keeps_tool_history() -> None:

@@ -37,6 +37,7 @@
 </dialog>
 {% if error %}<div class="mb-5 rounded-md border border-danger/25 bg-danger-subtle px-4 py-3 text-sm text-danger-emphasis">{{ error }}</div>{% endif %}
 <form method="post" action="{{ '/workouts/' ~ workout.id if workout else '/workouts' }}" class="grid gap-5" x-data='workoutBuilder({{ initial_definition|tojson }}, {{ form_data.sport|tojson }})'>
+  {{ csrf_field() }}
   <input type="hidden" name="definition" :value="serializedDefinition()">
   <section class="rounded-lg border border-border bg-surface p-4 sm:p-5">
     <div class="mb-5 flex items-start gap-3">

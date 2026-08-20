@@ -1,10 +1,15 @@
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from fastapi import Request
 from fastapi.templating import Jinja2Templates
+from jinja2 import pass_context
+from jinja2.runtime import Context
+from markupsafe import Markup, escape
 
+from app.config import get_settings
+from app.http_security import get_csrf_token
 from app.onboarding import onboarding_state
 
 templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
@@ -80,11 +85,30 @@ templates.env.filters.update(
 )
 
 
+@pass_context
+def csrf_field(template_context: Context) -> Markup:
+    token = template_context.get("csrf_token", "")
+    return Markup(
+        f'<input type="hidden" name="_csrf_token" value="{escape(str(token))}">'  # noqa: S704
+    )
+
+
+cast(dict[str, Any], templates.env.globals)["csrf_field"] = csrf_field
+
+
 def context(request: Request, **values: Any) -> dict[str, Any]:
     current_user = getattr(request.state, "current_user", None)
+    settings = get_settings()
     return {
         "request": request,
         "current_user": current_user,
         "onboarding": onboarding_state(current_user) if current_user is not None else None,
+        "csrf_token": get_csrf_token(request),
+        "features": {
+            "coach_workout_proposals": settings.coach_workout_proposals_enabled,
+            "coach_garmin_sync": settings.coach_garmin_sync_enabled,
+            "coach_daily_adaptation": settings.coach_daily_adaptation_enabled,
+            "coach_plan_generation": settings.coach_plan_generation_enabled,
+        },
         **values,
     }

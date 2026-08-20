@@ -231,10 +231,14 @@
       }
       throw new Error(message);
     }
+    if (response.redirected || !response.headers.get("content-type")?.includes("text/event-stream")) {
+      throw new Error("Der Coach hat keine gültige Streaming-Antwort geliefert.");
+    }
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    let terminalEventReceived = false;
     while (true) {
       const { value, done } = await reader.read();
       buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
@@ -247,9 +251,15 @@
           if (line.startsWith("event:")) eventName = line.slice(6).trim();
           if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
         }
-        if (dataLines.length) handleEvent(eventName, JSON.parse(dataLines.join("\n")), assistant);
+        if (dataLines.length) {
+          if (["answer.completed", "error"].includes(eventName)) terminalEventReceived = true;
+          handleEvent(eventName, JSON.parse(dataLines.join("\n")), assistant);
+        }
       }
       if (done) break;
+    }
+    if (!terminalEventReceived) {
+      throw new Error("Die Streaming-Antwort wurde vorzeitig beendet.");
     }
   };
 
@@ -282,7 +292,10 @@
       const response = await fetch(form.action, {
         method: "POST",
         body,
-        headers: { Accept: "text/event-stream" },
+        headers: {
+          Accept: "text/event-stream",
+          "X-CSRF-Token": form.elements.namedItem("_csrf_token").value,
+        },
       });
       await consumeEvents(response, assistant);
     } catch (error) {

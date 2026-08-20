@@ -57,7 +57,7 @@ def login_page(request: Request, error: str | None = None) -> Response:
     )
 
 
-@router.get("/auth/{provider}/login", name="oauth_login")
+@router.post("/auth/{provider}/login", name="oauth_login")
 async def oauth_login(provider: str, request: Request, next: str | None = None) -> RedirectResponse:
     client = oauth.create_client(provider)
     if provider not in PROVIDERS or client is None:

@@ -33,6 +33,7 @@ class CoachRuntimeContext:
     user_id: int
     as_of: date
     session_factory: sessionmaker[Session]
+    request_id: str | None = None
 
 
 def _json_default(value: object) -> str:

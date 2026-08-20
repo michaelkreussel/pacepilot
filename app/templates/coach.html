@@ -28,6 +28,7 @@
             <span class="text-[0.625rem] text-muted-foreground">{{ conversations|length }}</span>
           </div>
           <form method="post" action="/coach/conversations">
+            {{ csrf_field() }}
             <button class="inline-flex size-9 items-center justify-center rounded-lg border border-border bg-surface text-foreground shadow-sm transition hover:border-primary/30 hover:bg-primary-subtle hover:text-primary-emphasis focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring min-[1051px]:size-8" type="submit" aria-label="Neuen Chat starten" title="Neuen Chat starten">
               <svg class="size-4 fill-none stroke-current stroke-[1.8]" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" stroke-linecap="round" stroke-linejoin="round"/><path d="M18.4 2.6a2.1 2.1 0 0 1 3 3L12 15l-4 1 1-4Z" stroke-linecap="round" stroke-linejoin="round"/></svg>
             </button>
@@ -42,6 +43,7 @@
             <time class="mt-0.5 block text-[0.625rem] text-muted-foreground" datetime="{{ item.updated_at.isoformat() }}Z" data-local-datetime>{{ item.updated_at.strftime('%d.%m.%Y, %H:%M') }}</time>
           </a>
           <form class="grid place-items-center" method="post" action="/coach/{{ item.id }}/delete" onsubmit="return confirm('Diesen Chat und alle enthaltenen Nachrichten wirklich löschen?')">
+            {{ csrf_field() }}
             {% if conversation %}<input type="hidden" name="selected_conversation_id" value="{{ conversation.id }}">{% endif %}
             <button class="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground transition hover:bg-danger-subtle hover:text-danger-emphasis focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-40" type="submit" aria-label="Chat löschen" title="Chat löschen" data-delete-chat="{{ item.id }}" {% if active and response_running %}disabled{% endif %}>
               <svg class="size-3.5 fill-none stroke-current stroke-[1.8]" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m-8 0 1 13h8l1-13M10 11v5m4-5v5" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -115,6 +117,7 @@
       </div>
 
       <form class="shrink-0 border-t border-border bg-surface/95 px-3 py-2 backdrop-blur sm:px-5" data-coach-form action="/coach/{{ conversation.id }}/messages" method="post">
+        {{ csrf_field() }}
         <div class="mx-auto flex max-w-3xl items-end gap-1.5 rounded-xl border border-input bg-background p-1.5 shadow-sm transition focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/20">
           <label class="sr-only" for="coach-message">Frage an den Coach</label>
           <textarea class="max-h-40 min-h-9 flex-1 resize-none bg-transparent px-2 py-1.5 text-sm leading-5 text-foreground outline-none placeholder:text-muted-foreground" id="coach-message" name="message" rows="1" maxlength="4000" placeholder="Frage zu Gesundheit, Erholung oder Training ..." required {% if not configured %}disabled{% endif %}></textarea>
