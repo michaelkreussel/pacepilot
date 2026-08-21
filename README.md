@@ -318,6 +318,24 @@ the application directly:
 agent-browser --session pacepilot-dev --restore open http://127.0.0.1:8000/
 ```
 
+A `just` alternative drives real Chrome through a dedicated automation profile
+and a CDP debugging port instead of injecting a cookie:
+
+```bash
+just get-session
+```
+
+`get-session` opens Chrome with a dedicated profile, waits until you have
+signed in with Google, and saves the signed-in state to `pacepilot-auth.json`.
+Reuse it with:
+
+```bash
+agent-browser --state pacepilot-auth.json open http://127.0.0.1:8000/
+```
+
+Other recipes: `just open-browser`, `just wait-login`, `just save-state`, and
+`just check`. The `pacepilot-auth.json` state file is gitignored.
+
 ### Tailwind CSS
 
 The generated `app/static/css/tailwind.css` file is committed. Tailwind is not installed as a
