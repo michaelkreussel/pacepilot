@@ -31,3 +31,11 @@
 - Settings are shared mutable state in tests because `get_settings()` is cached; restore values or clear/rebuild the cache when a new test changes them.
 - User-facing UI copy is German. Jinja templates and committed CSS/JS are served directly from `app/templates/` and `app/static/`; HTMX and Alpine are loaded from CDNs.
 - For UI changes, verify authenticated pages at desktop and mobile widths and run an accessibility check when `agent-browser` is available. Do not automate or expose Google/GitHub credentials; use a locally authenticated application session.
+
+## Agent Browser UI Verification
+
+- Create a reusable authenticated agent-browser session once with `just get-session`. It opens real Chrome with a dedicated automation profile and a CDP debugging port, waits until you have signed in with Google, then saves the signed-in state to `pacepilot-auth.json`.
+- Reuse the saved state with `agent-browser --state pacepilot-auth.json open http://127.0.0.1:8000/` (or attach to the still-running Chrome with `agent-browser --cdp 9222 open http://127.0.0.1:8000/`). `pacepilot-auth.json` is gitignored.
+- Related recipes: `just open-browser`, `just wait-login`, `just save-state`, `just check`. See the "Agent Browser Session" section of `README.md` for details.
+- Always use your own named session (`AGENT_BROWSER_SESSION` or `--session <name>`) for a task so you do not hijack another agent's shared default browser. After signing in, do not pass `--cdp 9222` on commands that should use the saved state file instead of the live window.
+- The sign-in waits on the `pacepilot_session` cookie; keep the app running on `http://127.0.0.1:8000/` (or pass `--base-url`/`-AppUrl` as needed).
