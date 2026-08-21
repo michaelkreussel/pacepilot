@@ -127,7 +127,7 @@ def _thresholds(payload: Any, fallback: date) -> ParsedPerformance:
             else speed_hr.get("hearRate")
         )
         if speed is not None:
-            grouped.setdefault(day, {})["lactate_threshold_speed_mps"] = speed
+            grouped.setdefault(day, {})["lactate_threshold_speed_mps"] = round(speed * 10, 4)
         if heart_rate is not None:
             grouped.setdefault(day, {})["lactate_threshold_hr"] = round(heart_rate)
     power = payload.get("power")

@@ -147,7 +147,7 @@ class FakeGarmin:
         return {
             "speed_and_heart_rate": {
                 "calendarDate": date.today().isoformat(),
-                "speed": 4.0,
+                "speed": 0.4,
                 "heartRate": 170,
             },
             "power": {"functionalThresholdPower": 310},

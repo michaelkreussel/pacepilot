@@ -28,7 +28,7 @@ class FullPerformanceGarmin:
         return {
             "speed_and_heart_rate": {
                 "calendarDate": "2026-06-29",
-                "speed": 4.0,
+                "speed": 0.4,
                 "heartRate": 171,
             },
             "power": {
