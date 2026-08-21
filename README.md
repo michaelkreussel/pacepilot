@@ -299,35 +299,18 @@ For schema changes, update both the SQLAlchemy models and Alembic revisions, the
 uv run pytest tests/test_migrations.py
 ```
 
-### Agent Browser Login
+### Agent Browser Session
 
-Google may reject automated Chromium login attempts. After signing in to PacePilot once with a
-normal browser, create a persistent authenticated development session with:
-
-```bash
-uv run python scripts/agent_browser_login.py
-```
-
-The helper only runs with `ENVIRONMENT=development`, accepts only loopback application URLs, and
-sets a newly signed PacePilot session cookie without reading Google credentials or OAuth tokens.
-It uses the most recently logged-in local OAuth user by default; pass `--user-id ID` to select a
-specific user. The default `pacepilot-dev` browser session uses `--restore`, so later runs can open
-the application directly:
-
-```bash
-agent-browser --session pacepilot-dev --restore open http://127.0.0.1:8000/
-```
-
-A `just` alternative drives real Chrome through a dedicated automation profile
-and a CDP debugging port instead of injecting a cookie:
+Google may reject automated Chromium login attempts. To create a persistent authenticated
+agent-browser session for local development, drive real Chrome through a dedicated automation
+profile and a CDP debugging port:
 
 ```bash
 just get-session
 ```
 
-`get-session` opens Chrome with a dedicated profile, waits until you have
-signed in with Google, and saves the signed-in state to `pacepilot-auth.json`.
-Reuse it with:
+`get-session` opens Chrome with a dedicated profile, waits until you have signed in with Google,
+and saves the signed-in state to `pacepilot-auth.json`. Reuse it with:
 
 ```bash
 agent-browser --state pacepilot-auth.json open http://127.0.0.1:8000/
