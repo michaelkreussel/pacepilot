@@ -23,13 +23,17 @@ from app.models import (
     SyncRun,
     User,
     Workout,
+    WorkoutEvent,
+    WorkoutGarminAttempt,
     WorkoutGarminBinding,
+    WorkoutGarminOperation,
     WorkoutGarminRemoteIdentity,
     WorkoutRevision,
 )
 from app.routes import plans as plans_module
 from app.routes import settings as settings_module
 from app.routes import workouts as workouts_module
+from app.services.garmin.account_data import record_connected_principal
 from app.services.garmin.locks import garmin_account_slot
 
 
@@ -644,18 +648,18 @@ def test_delete_garmin_data_preserves_connection_user_and_local_workout(
         workout = session.scalar(select(Workout))
         assert workout is not None
         assert workout.step_count == 3
-        assert workout.garmin_workout_id is None
-        assert workout.status == "confirmed"
+        assert workout.garmin_workout_id == "remote-123"
+        assert workout.status == "pushed"
         binding = session.scalar(select(WorkoutGarminBinding))
         assert binding is not None
-        assert binding.active_remote_identity_id is None
-        assert binding.content_status == "not_requested"
-        assert binding.calendar_status == "not_requested"
-        assert binding.device_status == "not_requested"
-        assert binding.remote_scheduled_for is None
-        assert binding.last_error_code is None
-        assert binding.last_error_message is None
-        assert session.scalar(select(func.count()).select_from(WorkoutGarminRemoteIdentity)) == 0
+        assert binding.active_remote_identity_id is not None
+        assert binding.content_status == "synced"
+        assert binding.calendar_status == "synced"
+        assert binding.device_status == "request_accepted"
+        assert binding.remote_scheduled_for == date(2026, 8, 9)
+        assert binding.last_error_code == "old-error"
+        assert binding.last_error_message == "old metadata"
+        assert session.scalar(select(func.count()).select_from(WorkoutGarminRemoteIdentity)) == 1
         account = session.scalar(select(GarminAccount))
         assert account is not None
         assert account.id == account_id
@@ -673,6 +677,37 @@ def test_garmin_account_actions_are_in_connection_card(client: TestClient) -> No
     assert 'action="/settings/garmin/disconnect"' in connection_card
     assert 'action="/settings/garmin/data/delete"' in connection_card
     assert "Importierte Daten löschen" in connection_card
+
+
+def test_reconnecting_different_garmin_principal_quarantines_remote_ids(
+    client: TestClient, session_factory: sessionmaker[Session]
+) -> None:
+    client.post("/workouts", data=_workout_data(), follow_redirects=False)
+    with session_factory() as session:
+        account = _mark_garmin_connected(session)
+        record_connected_principal(session, account, "old@example.com")
+        workout = session.scalar(select(Workout))
+        assert workout is not None and workout.garmin_binding is not None
+        binding = workout.garmin_binding
+        identity = WorkoutGarminRemoteIdentity(
+            binding_id=binding.id,
+            garmin_account_id=account.id,
+            garmin_workout_id="remote-old",
+            principal_fingerprint=account.principal_fingerprint,
+            status="active",
+        )
+        session.add(identity)
+        session.flush()
+        binding.active_remote_identity_id = identity.id
+        binding.content_status = "synced"
+
+        record_connected_principal(session, account, "new@example.com")
+        session.commit()
+
+        assert binding.content_status == "unknown"
+        assert binding.calendar_status == "unknown"
+        assert binding.device_status == "unknown"
+        assert binding.last_error_code == "garmin.principal_changed"
 
 
 def test_delete_garmin_data_is_blocked_during_account_operation(
@@ -874,7 +909,7 @@ def test_edit_draft_workout(client: TestClient, session_factory: sessionmaker[Se
     assert "startPaletteDrag('interval'" in form.text
     assert "/static/icons/workout.svg#pencil" in form.text
     assert "setDropTarget(null, index)" in form.text
-    assert "/static/css/tailwind.css?v=20260822-4" in form.text
+    assert "/static/css/tailwind.css?v=20260822-6" in form.text
     assert "/static/js/theme.js?v=20260809-3" in form.text
     assert "data-theme-toggle" in form.text
 
@@ -1083,7 +1118,13 @@ def test_publish_retry_reuses_uploaded_garmin_workout(
         assert workout.garmin_workout_id == "remote-123"
         assert workout.status == "published"
         assert workout.garmin_binding is not None
-        assert workout.garmin_binding.calendar_status == "pending"
+        assert workout.garmin_binding.calendar_status == "unknown"
+        operation = session.scalar(
+            select(WorkoutGarminOperation).where(
+                WorkoutGarminOperation.operation_type == "schedule"
+            )
+        )
+        assert operation is not None and operation.status == "unknown"
     detail = client.get(location)
     assert "Garmin aktualisieren" in detail.text
     assert "An meine Uhr senden" not in detail.text
@@ -1099,6 +1140,52 @@ def test_publish_retry_reuses_uploaded_garmin_workout(
         assert workout is not None
         assert workout.garmin_binding is not None
         assert workout.garmin_binding.calendar_status == "synced"
+        operation = session.scalar(
+            select(WorkoutGarminOperation).where(
+                WorkoutGarminOperation.operation_type == "schedule"
+            )
+        )
+        assert operation is not None and operation.status == "succeeded"
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(WorkoutGarminAttempt)
+                .where(WorkoutGarminAttempt.operation_id == operation.id)
+            )
+            == 3
+        )
+
+
+def test_unknown_garmin_state_blocks_mutating_controls(
+    client: TestClient, session_factory: sessionmaker[Session]
+) -> None:
+    created = client.post("/workouts", data=_workout_data(), follow_redirects=False)
+    location = created.headers["location"]
+    _confirm_and_schedule(client, location)
+    with session_factory() as session:
+        binding = session.scalar(select(WorkoutGarminBinding))
+        assert binding is not None
+        binding.device_status = "unknown"
+        binding.last_error_message = "Garmin-Anfrage nicht eindeutig bestätigt."
+        session.commit()
+
+    detail = client.get(location)
+
+    assert "Garmin-Ergebnis unklar." in detail.text
+    assert "Weitere Garmin-Änderungen sind bis zur manuellen Prüfung blockiert." in detail.text
+    assert "Löschen blockiert" in detail.text
+    for action in ("confirm", "publish", "push", "schedule", "unschedule", "delete"):
+        assert f'action="{location}/{action}"' not in detail.text
+    assert "Garmin hat die Anfrage noch nicht angenommen" in detail.text
+    assert "Garmin hat die Übertragung an deine Uhr angenommen" not in detail.text
+
+    blocked_delete = client.post(f"{location}/delete", follow_redirects=False)
+    assert blocked_delete.status_code == 303
+    assert "error=" in blocked_delete.headers["location"]
+    with session_factory() as session:
+        workout = session.scalar(select(Workout))
+        assert workout is not None
+        assert workout.deleted_at is None
 
 
 def test_draft_workout_with_remote_id_cannot_be_pushed(
@@ -1318,7 +1405,7 @@ def test_repeated_successful_publish_reuses_remote_workout_and_schedule(
     assert garmin.schedules == [("remote-1", "2026-08-09")]
 
 
-def test_repeated_push_calls_garmin_each_time(
+def test_repeated_push_reuses_idempotent_operation(
     client: TestClient,
     session_factory: sessionmaker[Session],
     monkeypatch: Any,
@@ -1356,7 +1443,24 @@ def test_repeated_push_calls_garmin_each_time(
     second = client.post(f"{location}/push", follow_redirects=False)
 
     assert first.status_code == second.status_code == 303
-    assert garmin.pushes == ["remote-1", "remote-1"]
+    assert garmin.pushes == ["remote-1"]
+    with session_factory() as session:
+        operations = list(
+            session.scalars(
+                select(WorkoutGarminOperation).where(
+                    WorkoutGarminOperation.operation_type == "push"
+                )
+            )
+        )
+        assert len(operations) == 1
+        assert operations[0].status == "succeeded"
+        assert len(operations[0].attempts) == 1
+        assert (
+            session.scalar(
+                select(func.count()).select_from(WorkoutEvent).where(WorkoutEvent.action == "push")
+            )
+            == 1
+        )
 
 
 def test_manual_sync_is_queued_once(

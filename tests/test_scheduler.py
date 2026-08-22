@@ -7,7 +7,17 @@ from typing import Any
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.jobs import scheduler as scheduler_module
-from app.models import GarminAccount, SyncRun, User
+from app.models import (
+    GarminAccount,
+    SyncRun,
+    User,
+    Workout,
+    WorkoutGarminAttempt,
+    WorkoutGarminBinding,
+    WorkoutGarminOperation,
+    WorkoutRevision,
+)
+from app.services.planning.workout_definition import default_definition
 
 
 def test_scheduler_does_not_sync_immediately_on_startup(monkeypatch: Any) -> None:
@@ -35,6 +45,20 @@ def test_scheduler_does_not_sync_immediately_on_startup(monkeypatch: Any) -> Non
     assert fake_scheduler.running
     assert fake_scheduler.job_kwargs["minutes"] == 60
     assert "next_run_time" not in fake_scheduler.job_kwargs
+
+
+def test_startup_repair_runs_when_periodic_scheduler_is_disabled(monkeypatch: Any) -> None:
+    repaired: list[bool] = []
+    monkeypatch.setattr(scheduler_module, "repair_interrupted_syncs", lambda: repaired.append(True))
+    monkeypatch.setattr(
+        scheduler_module,
+        "get_settings",
+        lambda: SimpleNamespace(scheduler_enabled=False),
+    )
+
+    scheduler_module.start_scheduler()
+
+    assert repaired == [True]
 
 
 def test_interrupted_syncs_become_retryable_after_restart(
@@ -67,6 +91,122 @@ def test_interrupted_syncs_become_retryable_after_restart(
         assert run is not None
         assert run.status == "error"
         assert run.finished_at is not None
+
+
+def test_interrupted_workout_attempt_becomes_unknown_after_restart(
+    session_factory: sessionmaker[Session], monkeypatch: Any
+) -> None:
+    now = datetime.now(UTC).replace(tzinfo=None)
+    with session_factory() as session:
+        user = User(display_name="Restart")
+        session.add(user)
+        session.flush()
+        workout = Workout(
+            user_id=user.id,
+            name="Run",
+            sport="running",
+            status="confirmed",
+            definition=default_definition().model_dump(mode="json"),
+        )
+        session.add(workout)
+        session.flush()
+        revision = WorkoutRevision(
+            workout_id=workout.id,
+            revision_number=1,
+            name="Run",
+            sport="running",
+            definition_version=1,
+            definition=default_definition().model_dump(mode="json"),
+            content_hash="a" * 64,
+        )
+        binding = WorkoutGarminBinding(workout_id=workout.id)
+        session.add_all([revision, binding])
+        session.flush()
+        operation = WorkoutGarminOperation(
+            workout_id=workout.id,
+            binding_id=binding.id,
+            operation_type="upload",
+            revision_id=revision.id,
+            idempotency_key="b" * 64,
+            status="pending",
+            created_at=now,
+        )
+        session.add(operation)
+        session.flush()
+        attempt = WorkoutGarminAttempt(
+            operation_id=operation.id,
+            attempt_number=1,
+            attempt_kind="execute",
+            status="pending",
+            started_at=now,
+        )
+        session.add(attempt)
+        session.commit()
+        operation_id = operation.id
+        attempt_id = attempt.id
+        binding_id = binding.id
+
+    monkeypatch.setattr(scheduler_module, "SessionLocal", session_factory)
+    scheduler_module.repair_interrupted_syncs()
+
+    with session_factory() as session:
+        operation = session.get(WorkoutGarminOperation, operation_id)
+        attempt = session.get(WorkoutGarminAttempt, attempt_id)
+        binding = session.get(WorkoutGarminBinding, binding_id)
+        assert operation is not None and operation.status == "unknown"
+        assert attempt is not None and attempt.status == "unknown"
+        assert binding is not None and binding.content_status == "unknown"
+
+
+def test_interrupted_operation_without_attempt_is_retryable(
+    session_factory: sessionmaker[Session], monkeypatch: Any
+) -> None:
+    with session_factory() as session:
+        user = User(display_name="Restart")
+        session.add(user)
+        session.flush()
+        workout = Workout(
+            user_id=user.id,
+            name="Run",
+            sport="running",
+            status="confirmed",
+            definition=default_definition().model_dump(mode="json"),
+        )
+        session.add(workout)
+        session.flush()
+        revision = WorkoutRevision(
+            workout_id=workout.id,
+            revision_number=1,
+            name="Run",
+            sport="running",
+            definition_version=1,
+            definition=default_definition().model_dump(mode="json"),
+            content_hash="c" * 64,
+        )
+        binding = WorkoutGarminBinding(workout_id=workout.id)
+        session.add_all([revision, binding])
+        session.flush()
+        operation = WorkoutGarminOperation(
+            workout_id=workout.id,
+            binding_id=binding.id,
+            operation_type="upload",
+            revision_id=revision.id,
+            idempotency_key="d" * 64,
+            status="pending",
+        )
+        session.add(operation)
+        session.commit()
+        operation_id = operation.id
+        binding_id = binding.id
+
+    monkeypatch.setattr(scheduler_module, "SessionLocal", session_factory)
+    scheduler_module.repair_interrupted_syncs()
+
+    with session_factory() as session:
+        operation = session.get(WorkoutGarminOperation, operation_id)
+        binding = session.get(WorkoutGarminBinding, binding_id)
+        assert operation is not None and operation.status == "retryable"
+        assert binding is not None and binding.content_status == "retryable"
 
 
 def test_periodic_sync_only_queues_accounts_with_an_expired_successful_sync(

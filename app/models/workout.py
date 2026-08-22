@@ -349,6 +349,9 @@ class WorkoutGarminBinding(Base):
         cascade="all, delete-orphan",
         foreign_keys="WorkoutGarminRemoteIdentity.binding_id",
     )
+    operations: Mapped[list["WorkoutGarminOperation"]] = relationship(
+        back_populates="binding", cascade="all, delete-orphan"
+    )
 
 
 class WorkoutGarminRemoteIdentity(Base):
@@ -385,6 +388,7 @@ class WorkoutGarminRemoteIdentity(Base):
         ForeignKey("garmin_accounts.id", ondelete="CASCADE"), index=True
     )
     garmin_workout_id: Mapped[str] = mapped_column(String(100))
+    principal_fingerprint: Mapped[str | None] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(20), default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     removed_at: Mapped[datetime | None] = mapped_column(DateTime)
@@ -392,3 +396,95 @@ class WorkoutGarminRemoteIdentity(Base):
     binding: Mapped[WorkoutGarminBinding] = relationship(
         back_populates="remote_identities", foreign_keys=[binding_id]
     )
+
+
+class WorkoutGarminOperation(Base):
+    __tablename__ = "workout_garmin_operations"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["binding_id", "workout_id"],
+            ["workout_garmin_bindings.id", "workout_garmin_bindings.workout_id"],
+            name="fk_workout_garmin_operations_binding_same_workout",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["revision_id", "workout_id"],
+            ["workout_revisions.id", "workout_revisions.workout_id"],
+            name="fk_workout_garmin_operations_revision_same_workout",
+        ),
+        ForeignKeyConstraint(
+            ["remote_identity_id", "binding_id"],
+            ["workout_garmin_remote_identities.id", "workout_garmin_remote_identities.binding_id"],
+            name="fk_workout_garmin_operations_identity_same_binding",
+        ),
+        CheckConstraint(
+            "operation_type IN ('upload', 'update', 'schedule', 'unschedule', 'push', 'delete')",
+            name="ck_workout_garmin_operations_type",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'succeeded', 'retryable', 'unknown', 'failed_final')",
+            name="ck_workout_garmin_operations_status",
+        ),
+        CheckConstraint(
+            "(operation_type = 'upload' AND remote_identity_id IS NULL) OR "
+            "(operation_type <> 'upload' AND remote_identity_id IS NOT NULL)",
+            name="ck_workout_garmin_operations_identity_required",
+        ),
+        CheckConstraint("length(idempotency_key) > 0", name="ck_workout_garmin_operations_key"),
+        UniqueConstraint("idempotency_key", name="uq_workout_garmin_operations_key"),
+        Index("ix_workout_garmin_operations_binding_status", "binding_id", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workout_id: Mapped[int] = mapped_column(Integer, index=True)
+    binding_id: Mapped[int] = mapped_column(Integer, index=True)
+    operation_type: Mapped[str] = mapped_column(String(30))
+    revision_id: Mapped[int] = mapped_column(Integer, index=True)
+    remote_identity_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    scheduled_for: Mapped[date | None] = mapped_column(Date)
+    idempotency_key: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
+    remote_reference: Mapped[str | None] = mapped_column(String(200))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime)
+    error_code: Mapped[str | None] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+    binding: Mapped[WorkoutGarminBinding] = relationship(back_populates="operations")
+    attempts: Mapped[list["WorkoutGarminAttempt"]] = relationship(
+        back_populates="operation",
+        cascade="all, delete-orphan",
+        order_by="WorkoutGarminAttempt.attempt_number",
+    )
+
+
+class WorkoutGarminAttempt(Base):
+    __tablename__ = "workout_garmin_attempts"
+    __table_args__ = (
+        UniqueConstraint(
+            "operation_id", "attempt_number", name="uq_workout_garmin_attempts_number"
+        ),
+        CheckConstraint(
+            "attempt_kind IN ('execute', 'reconcile')",
+            name="ck_workout_garmin_attempts_kind",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'succeeded', 'retryable', 'unknown', 'failed')",
+            name="ck_workout_garmin_attempts_status",
+        ),
+        CheckConstraint("attempt_number >= 1", name="ck_workout_garmin_attempts_number"),
+        Index("ix_workout_garmin_attempts_operation_status", "operation_id", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    operation_id: Mapped[int] = mapped_column(
+        ForeignKey("workout_garmin_operations.id", ondelete="CASCADE"), index=True
+    )
+    attempt_number: Mapped[int] = mapped_column(Integer)
+    attempt_kind: Mapped[str] = mapped_column(String(20), default="execute")
+    status: Mapped[str] = mapped_column(String(30), default="pending")
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime)
+    error_code: Mapped[str | None] = mapped_column(String(100))
+    error_message: Mapped[str | None] = mapped_column(String(1000))
+
+    operation: Mapped[WorkoutGarminOperation] = relationship(back_populates="attempts")

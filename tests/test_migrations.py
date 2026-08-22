@@ -41,6 +41,8 @@ def test_initial_migration_matches_models(tmp_path: Path) -> None:
         "users",
         "workout_events",
         "workout_garmin_bindings",
+        "workout_garmin_attempts",
+        "workout_garmin_operations",
         "workout_garmin_remote_identities",
         "workout_revisions",
         "workout_steps",
@@ -106,7 +108,7 @@ def test_workout_revision_migration_resumes_after_added_columns(tmp_path: Path) 
             "SELECT version_num FROM alembic_version"
         ).scalar_one()
         integrity = connection.exec_driver_sql("PRAGMA integrity_check").scalar_one()
-    assert revision == "20260822_16"
+    assert revision == "20260822_18"
     assert integrity == "ok"
     assert "workout_revisions" in inspector.get_table_names()
 
@@ -135,7 +137,30 @@ def test_reverted_athlete_profile_revision_upgrades_to_head(tmp_path: Path) -> N
         revision = connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
         ).scalar_one()
-    assert revision == "20260822_16"
+    assert revision == "20260822_18"
+
+
+def test_principal_fingerprint_migration_upgrades_applied_phase_4_schema(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "phase-4-followup.db"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    config = Config("alembic.ini")
+    config.attributes["database_url"] = database_url
+    command.upgrade(config, "20260822_17")
+    engine = create_engine(database_url)
+    assert "principal_fingerprint" not in {
+        column["name"] for column in inspect(engine).get_columns("garmin_accounts")
+    }
+
+    command.upgrade(config, "head")
+
+    assert "principal_fingerprint" in {
+        column["name"] for column in inspect(engine).get_columns("garmin_accounts")
+    }
+    assert "principal_fingerprint" in {
+        column["name"] for column in inspect(engine).get_columns("workout_garmin_remote_identities")
+    }
 
 
 def test_workout_rpe_migration_normalizes_garmin_scale(tmp_path: Path) -> None:
@@ -379,8 +404,12 @@ def test_workout_revision_constraints(tmp_path: Path) -> None:
         revisions = connection.exec_driver_sql(
             "SELECT workout_id, id FROM workout_revisions ORDER BY workout_id"
         ).all()
+        bindings = connection.exec_driver_sql(
+            "SELECT workout_id, id FROM workout_garmin_bindings ORDER BY workout_id"
+        ).all()
     revision_one = revisions[0].id
     revision_two = revisions[1].id
+    binding_one = bindings[0].id
 
     with pytest.raises(IntegrityError), engine.begin() as connection:
         connection.exec_driver_sql(
@@ -395,3 +424,34 @@ def test_workout_revision_constraints(tmp_path: Path) -> None:
 
     with pytest.raises(IntegrityError), engine.begin() as connection:
         connection.exec_driver_sql("UPDATE workouts SET replaces_workout_id = 2 WHERE id = 1")
+
+    with pytest.raises(IntegrityError), engine.begin() as connection:
+        connection.exec_driver_sql(
+            "INSERT INTO workout_garmin_operations "
+            "(workout_id, binding_id, operation_type, revision_id, remote_identity_id, "
+            "idempotency_key, status, created_at) VALUES "
+            "(1, ?, 'upload', ?, NULL, ?, 'pending', '2026-08-22')",
+            (binding_one, revision_two, "x" * 64),
+        )
+
+    with engine.begin() as connection:
+        operation_id = connection.exec_driver_sql(
+            "INSERT INTO workout_garmin_operations "
+            "(workout_id, binding_id, operation_type, revision_id, remote_identity_id, "
+            "idempotency_key, status, created_at) VALUES "
+            "(1, ?, 'upload', ?, NULL, ?, 'pending', '2026-08-22')",
+            (binding_one, revision_one, "y" * 64),
+        ).lastrowid
+        connection.exec_driver_sql(
+            "INSERT INTO workout_garmin_attempts "
+            "(operation_id, attempt_number, attempt_kind, status, started_at) "
+            "VALUES (?, 1, 'execute', 'pending', '2026-08-22')",
+            (operation_id,),
+        )
+    with pytest.raises(IntegrityError), engine.begin() as connection:
+        connection.exec_driver_sql(
+            "INSERT INTO workout_garmin_attempts "
+            "(operation_id, attempt_number, attempt_kind, status, started_at) "
+            "VALUES (?, 1, 'execute', 'pending', '2026-08-22')",
+            (operation_id,),
+        )

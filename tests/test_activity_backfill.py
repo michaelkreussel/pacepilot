@@ -12,11 +12,20 @@ from app.models import (
     ActivityExerciseSet,
     ActivitySplit,
     ActivityZone,
+    GarminAccount,
     GarminSyncState,
     User,
+    Workout,
+    WorkoutGarminBinding,
+    WorkoutGarminRemoteIdentity,
 )
-from app.services.garmin.activity_backfill import _parse_datetime, sync_activity_history
+from app.services.garmin.activity_backfill import (
+    _map_detail_summary,
+    _parse_datetime,
+    sync_activity_history,
+)
 from app.services.garmin.activity_details import load_activity_details
+from app.services.planning.workout_definition import default_definition
 
 
 def _activity(
@@ -171,6 +180,55 @@ def _user(session: Session, name: str = "Activity") -> User:
     session.add(user)
     session.flush()
     return user
+
+
+def test_activity_matches_removed_remote_identity_for_own_account(
+    session_factory: sessionmaker[Session],
+) -> None:
+    with session_factory() as session:
+        users = [_user(session, name) for name in ("Owner", "Other")]
+        for user in users:
+            account = GarminAccount(user_id=user.id)
+            workout = Workout(
+                user_id=user.id,
+                name="Run",
+                sport="running",
+                status="published",
+                definition=default_definition().model_dump(mode="json"),
+            )
+            session.add_all([account, workout])
+            session.flush()
+            binding = WorkoutGarminBinding(workout_id=workout.id)
+            session.add(binding)
+            session.flush()
+            identity = WorkoutGarminRemoteIdentity(
+                binding_id=binding.id,
+                garmin_account_id=account.id,
+                garmin_workout_id="999",
+                status="removed",
+                removed_at=datetime(2026, 8, 20),
+            )
+            session.add(identity)
+        session.flush()
+        activity = Activity(
+            user_id=users[0].id,
+            garmin_activity_id="activity-1",
+            name="Run",
+            activity_type="running",
+            started_at=datetime(2026, 8, 22),
+        )
+        session.add(activity)
+        session.flush()
+
+        _map_detail_summary(
+            session,
+            activity,
+            {"metadataDTO": {"associatedWorkoutId": 999}},
+        )
+
+        owner_workout = session.scalar(select(Workout).where(Workout.user_id == users[0].id))
+        assert owner_workout is not None
+        assert activity.workout_id == owner_workout.id
 
 
 def test_activity_backfill_imports_details_and_skips_unchanged(

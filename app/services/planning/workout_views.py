@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.models import (
     Workout,
     WorkoutGarminBinding,
+    WorkoutGarminOperation,
     WorkoutGarminRemoteIdentity,
     WorkoutRevision,
 )
@@ -74,10 +75,22 @@ class WorkoutDetailView:
     garmin_calendar_status: str
     garmin_device_status: str
     garmin_workout_id: str | None
+    garmin_last_operation: str | None = None
+    garmin_last_operation_status: str | None = None
+    garmin_last_error: str | None = None
 
     @property
     def has_unaccepted_changes(self) -> bool:
         return self.accepted is not None and self.accepted.id != self.current.id
+
+    @property
+    def garmin_needs_review(self) -> bool:
+        if "unknown" in {self.garmin_content_status, self.garmin_device_status}:
+            return True
+        return (
+            self.garmin_last_operation_status == "unknown"
+            and self.garmin_last_operation not in {"schedule", "unschedule"}
+        )
 
     @property
     def change_labels(self) -> tuple[str, ...]:
@@ -166,6 +179,16 @@ def workout_detail_view(session: Session, workout: Workout) -> WorkoutDetailView
     if binding is not None and binding.active_remote_identity_id is not None:
         identity = session.get(WorkoutGarminRemoteIdentity, binding.active_remote_identity_id)
         remote_id = identity.garmin_workout_id if identity is not None else None
+    latest_operation = (
+        session.scalar(
+            select(WorkoutGarminOperation)
+            .where(WorkoutGarminOperation.binding_id == binding.id)
+            .order_by(WorkoutGarminOperation.id.desc())
+            .limit(1)
+        )
+        if binding is not None
+        else None
+    )
     return WorkoutDetailView(
         id=workout.id,
         current=revision_view(current),
@@ -179,4 +202,7 @@ def workout_detail_view(session: Session, workout: Workout) -> WorkoutDetailView
         garmin_calendar_status=binding.calendar_status if binding else "not_requested",
         garmin_device_status=binding.device_status if binding else "not_requested",
         garmin_workout_id=remote_id or workout.garmin_workout_id,
+        garmin_last_operation=(latest_operation.operation_type if latest_operation else None),
+        garmin_last_operation_status=(latest_operation.status if latest_operation else None),
+        garmin_last_error=binding.last_error_message if binding else None,
     )

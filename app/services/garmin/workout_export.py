@@ -226,8 +226,8 @@ def schedule_published_workout(
             code="garmin.remote_id_required",
         )
     if previous_date != workout.scheduled_for:
-        _unschedule_workout(client, workout.garmin_workout_id, previous_date)
-    if workout.scheduled_for is not None and not _scheduled_workout_ids(
+        unschedule_workout_on_date(client, workout.garmin_workout_id, previous_date)
+    if workout.scheduled_for is not None and not scheduled_workout_ids(
         client, workout.garmin_workout_id, workout.scheduled_for
     ):
         _garmin_call(
@@ -251,7 +251,7 @@ def push_workout(client: Any, workout: WorkoutExecution) -> None:
     )
 
 
-def _scheduled_workout_ids(client: Any, workout_id: str, scheduled_for: date) -> list[str]:
+def scheduled_workout_ids(client: Any, workout_id: str, scheduled_for: date) -> list[str]:
     calendar = _garmin_call(
         "Der Garmin-Kalender konnte nicht geladen werden.",
         client.get_scheduled_workouts,
@@ -279,10 +279,10 @@ def _scheduled_workout_ids(client: Any, workout_id: str, scheduled_for: date) ->
     return scheduled_ids
 
 
-def _unschedule_workout(client: Any, workout_id: str, scheduled_for: date | None) -> None:
+def unschedule_workout_on_date(client: Any, workout_id: str, scheduled_for: date | None) -> None:
     if scheduled_for is None:
         return
-    for scheduled_id in _scheduled_workout_ids(client, workout_id, scheduled_for):
+    for scheduled_id in scheduled_workout_ids(client, workout_id, scheduled_for):
         _garmin_call(
             "Die bisherige Garmin-Planung konnte nicht entfernt werden.",
             client.unschedule_workout,
@@ -305,8 +305,8 @@ def update_published_workout(
         compile_workout(workout),
     )
     if previous_date != workout.scheduled_for:
-        _unschedule_workout(client, workout.garmin_workout_id, previous_date)
-        if workout.scheduled_for is not None and not _scheduled_workout_ids(
+        unschedule_workout_on_date(client, workout.garmin_workout_id, previous_date)
+        if workout.scheduled_for is not None and not scheduled_workout_ids(
             client, workout.garmin_workout_id, workout.scheduled_for
         ):
             _garmin_call(
@@ -341,9 +341,24 @@ def delete_published_workout(
 ) -> None:
     if not workout.garmin_workout_id:
         return
-    _unschedule_workout(client, workout.garmin_workout_id, remote_scheduled_for)
+    unschedule_workout_on_date(client, workout.garmin_workout_id, remote_scheduled_for)
+    delete_remote_workout(client, workout.garmin_workout_id)
+
+
+def schedule_workout_on_date(client: Any, workout_id: str, scheduled_for: date) -> None:
+    if scheduled_workout_ids(client, workout_id, scheduled_for):
+        return
+    _garmin_call(
+        "Das Workout konnte nicht im Garmin-Kalender geplant werden.",
+        client.schedule_workout,
+        workout_id,
+        scheduled_for.isoformat(),
+    )
+
+
+def delete_remote_workout(client: Any, workout_id: str) -> None:
     _garmin_call(
         "Das Workout konnte bei Garmin nicht gelöscht werden.",
         client.delete_workout,
-        workout.garmin_workout_id,
+        workout_id,
     )

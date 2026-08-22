@@ -7,7 +7,9 @@ from app.models.user import GarminAccount, GarminDevice, OAuthIdentity, User
 from app.models.workout import (
     Workout,
     WorkoutEvent,
+    WorkoutGarminAttempt,
     WorkoutGarminBinding,
+    WorkoutGarminOperation,
     WorkoutGarminRemoteIdentity,
     WorkoutRevision,
     WorkoutStep,
@@ -36,6 +38,8 @@ __all__ = [
     "Workout",
     "WorkoutEvent",
     "WorkoutGarminBinding",
+    "WorkoutGarminAttempt",
+    "WorkoutGarminOperation",
     "WorkoutGarminRemoteIdentity",
     "WorkoutRevision",
     "WorkoutStep",

@@ -16,7 +16,16 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.models import Activity, ActivityExerciseSet, ActivitySplit, ActivityZone, Workout
+from app.models import (
+    Activity,
+    ActivityExerciseSet,
+    ActivitySplit,
+    ActivityZone,
+    GarminAccount,
+    Workout,
+    WorkoutGarminBinding,
+    WorkoutGarminRemoteIdentity,
+)
 from app.models.user import utcnow
 from app.repositories.activities import (
     find_activity_by_garmin_id,
@@ -301,9 +310,21 @@ def _map_detail_summary(session: Session, activity: Activity, payload: Any) -> d
     activity.source_updated_at = _parse_datetime(metadata.get("lastUpdateDate"))
     if activity.associated_garmin_workout_id is not None:
         workout_id = session.scalar(
-            select(Workout.id).where(
+            select(Workout.id)
+            .join(WorkoutGarminBinding, WorkoutGarminBinding.workout_id == Workout.id)
+            .join(
+                WorkoutGarminRemoteIdentity,
+                WorkoutGarminRemoteIdentity.binding_id == WorkoutGarminBinding.id,
+            )
+            .join(
+                GarminAccount,
+                GarminAccount.id == WorkoutGarminRemoteIdentity.garmin_account_id,
+            )
+            .where(
+                GarminAccount.user_id == activity.user_id,
                 Workout.user_id == activity.user_id,
-                Workout.garmin_workout_id == activity.associated_garmin_workout_id,
+                WorkoutGarminRemoteIdentity.garmin_workout_id
+                == activity.associated_garmin_workout_id,
             )
         )
         activity.workout_id = workout_id

@@ -5,8 +5,17 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.models import GarminAccount, User, Workout, WorkoutRevision
+from app.config import get_settings
+from app.models import (
+    GarminAccount,
+    User,
+    Workout,
+    WorkoutGarminAttempt,
+    WorkoutGarminOperation,
+    WorkoutRevision,
+)
 from app.models.user import utcnow
+from app.services.garmin.client import GarminUnavailableError
 from app.services.planning.validator import WorkoutInput, WorkoutValidationError
 from app.services.planning.workout_definition import default_definition
 from app.services.planning.workout_revision import (
@@ -93,8 +102,10 @@ def test_service_validates_commands_before_persisting(
 
 
 def test_service_owns_manual_lifecycle_and_garmin_orchestration(
-    session_factory: sessionmaker[Session],
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(get_settings(), "garmin_call_delay_seconds", 0)
+
     class FakeGarmin:
         uploads = 0
         schedules: list[tuple[str, str]] = []
@@ -156,6 +167,16 @@ def test_service_owns_manual_lifecycle_and_garmin_orchestration(
         assert garmin.uploads == 1
         assert garmin.schedules == [("remote-1", "2026-08-23")]
         assert garmin.pushes == ["remote-1"]
+        operations = list(
+            session.scalars(select(WorkoutGarminOperation).order_by(WorkoutGarminOperation.id))
+        )
+        assert [operation.operation_type for operation in operations] == [
+            "upload",
+            "schedule",
+            "push",
+        ]
+        assert all(operation.status == "succeeded" for operation in operations)
+        assert session.query(WorkoutGarminAttempt).count() == 3
 
         service.delete(workout.id)
 
@@ -164,6 +185,82 @@ def test_service_owns_manual_lifecycle_and_garmin_orchestration(
         deleted_workout = session.get(Workout, workout.id)
         assert deleted_workout is not None
         assert deleted_workout.deleted_at is not None
+
+
+def test_ambiguous_upload_is_recorded_and_not_retried(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(get_settings(), "garmin_call_delay_seconds", 0)
+
+    class AmbiguousGarmin:
+        uploads = 0
+
+        def upload_workout(self, _payload: dict[str, Any]) -> dict[str, str]:
+            self.uploads += 1
+            with session_factory() as observer:
+                operation = observer.scalar(select(WorkoutGarminOperation))
+                attempt = observer.scalar(select(WorkoutGarminAttempt))
+                assert operation is not None and operation.status == "pending"
+                assert attempt is not None and attempt.status == "pending"
+            raise TimeoutError("response lost")
+
+    garmin = AmbiguousGarmin()
+    with session_factory() as session:
+        user = User(display_name="Athlete")
+        session.add(user)
+        session.flush()
+        session.add(GarminAccount(user_id=user.id, connected_at=utcnow()))
+        session.commit()
+        service = WorkoutService(session, user, connect_garmin=lambda *_args: garmin)
+        workout = service.create(_input())
+        service.confirm(workout.id, _accept_command(session, workout))
+
+        with pytest.raises(GarminUnavailableError):
+            service.publish(workout.id)
+        service.update(workout.id, _input("Edited after timeout"))
+        with pytest.raises(GarminUnavailableError, match="automatische Wiederholung"):
+            service.publish(workout.id)
+
+        operation = session.scalar(select(WorkoutGarminOperation))
+        assert operation is not None and operation.status == "unknown"
+        assert operation.revision_id == workout.accepted_revision_id
+        assert garmin.uploads == 1
+
+
+def test_ambiguous_push_is_not_retried_after_edit(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(get_settings(), "garmin_call_delay_seconds", 0)
+
+    class AmbiguousPushGarmin:
+        pushes = 0
+
+        def upload_workout(self, _payload: dict[str, Any]) -> dict[str, str]:
+            return {"workoutId": "remote-1"}
+
+        def push_workout_to_device(self, _workout_id: str) -> None:
+            self.pushes += 1
+            raise TimeoutError("response lost")
+
+    garmin = AmbiguousPushGarmin()
+    with session_factory() as session:
+        user = User(display_name="Athlete")
+        session.add(user)
+        session.flush()
+        session.add(GarminAccount(user_id=user.id, connected_at=utcnow()))
+        session.commit()
+        service = WorkoutService(session, user, connect_garmin=lambda *_args: garmin)
+        workout = service.create(_input())
+        service.confirm(workout.id, _accept_command(session, workout))
+        service.publish(workout.id)
+
+        with pytest.raises(GarminUnavailableError):
+            service.push(workout.id)
+        service.update(workout.id, _input("Edited after push timeout"))
+        with pytest.raises(GarminUnavailableError, match="automatische Wiederholung"):
+            service.push(workout.id)
+
+        assert garmin.pushes == 1
 
 
 def test_service_transition_errors_have_stable_codes(

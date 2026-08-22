@@ -15,7 +15,11 @@ from app.models import GarminAccount, SyncEvent, SyncRun
 from app.models.user import utcnow
 from app.onboarding import require_notice_acknowledged
 from app.repositories.users import get_or_create_garmin_account
-from app.services.garmin.account_data import delete_garmin_data, disconnect_garmin_account
+from app.services.garmin.account_data import (
+    delete_garmin_data,
+    disconnect_garmin_account,
+    record_connected_principal,
+)
 from app.services.garmin.client import (
     GarminMfaExpiredError,
     GarminUnavailableError,
@@ -264,6 +268,7 @@ def connect_account(
         session.commit()
         return RedirectResponse("/settings", status_code=303)
 
+    record_connected_principal(session, account, normalized_email)
     account.email = normalized_email
     account.connected_at = datetime.now(UTC).replace(tzinfo=None)
     account.sync_status = "connected"
@@ -306,6 +311,7 @@ def verify_garmin_mfa(
         )
 
     request.session.pop(GARMIN_MFA_SESSION_KEY, None)
+    record_connected_principal(session, account, email)
     account.email = email
     account.connected_at = datetime.now(UTC).replace(tzinfo=None)
     account.sync_status = "connected"

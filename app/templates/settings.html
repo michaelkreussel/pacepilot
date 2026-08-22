@@ -84,6 +84,7 @@
   {% endif %}
 
   <div class="mt-5 flex justify-end border-t border-danger/25 pt-5">
+    <p class="mr-auto max-w-xl text-xs leading-5 text-muted-foreground">Remote-IDs und der technische Operationsverlauf bleiben als minimales Duplikat-Schutzprotokoll erhalten. Workout-Inhalte und importierte Gesundheitsdaten werden dadurch nicht zusätzlich gespeichert.</p>
     <form method="post" action="/settings/garmin/data/delete" onsubmit="return confirm('Alle aus Garmin importierten Daten und lokalen Rohdateien löschen? Die Garmin-Verbindung bleibt aktiv und lokale Workouts bleiben erhalten.')">
       {{ csrf_field() }}
       <input type="hidden" name="confirmation" value="delete">

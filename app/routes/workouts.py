@@ -114,9 +114,14 @@ async def _parse_workout_result(request: Request) -> WorkoutInput | WorkoutFormE
 WorkoutFormDep = Annotated[WorkoutInput | WorkoutFormError, Depends(_parse_workout_result)]
 
 
-def _workout_service(session: SessionDep, user: CurrentUser) -> WorkoutService:
+def _workout_service(request: Request, session: SessionDep, user: CurrentUser) -> WorkoutService:
     # Passing the connector keeps the route test seam while orchestration remains in the service.
-    return WorkoutService(session, user, connect_garmin=connect_garmin_account)
+    return WorkoutService(
+        session,
+        user,
+        connect_garmin=connect_garmin_account,
+        request_id=request.state.request_id,
+    )
 
 
 WorkoutServiceDep = Annotated[WorkoutService, Depends(_workout_service)]

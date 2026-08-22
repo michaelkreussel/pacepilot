@@ -13,6 +13,7 @@ from app.models import (
     Workout,
     WorkoutEvent,
     WorkoutGarminBinding,
+    WorkoutGarminOperation,
     WorkoutGarminRemoteIdentity,
     WorkoutRevision,
     WorkoutValidationRun,
@@ -23,13 +24,16 @@ from app.repositories.workouts import find_workout
 from app.services.garmin.client import GarminUnavailableError, connect_garmin_account
 from app.services.garmin.locks import GarminAccountBusyError, garmin_account_slot
 from app.services.garmin.workout_export import (
-    delete_published_workout,
+    delete_remote_workout,
     push_workout,
-    schedule_published_workout,
+    schedule_workout_on_date,
+    scheduled_workout_ids,
+    unschedule_workout_on_date,
     update_workout_content,
     upload_workout,
 )
-from app.services.planning.validator import WorkoutInput, WorkoutValidationError, validate_workout
+from app.services.garmin.workout_operations import GarminWorkoutOperationRunner
+from app.services.planning.validator import WorkoutInput, validate_workout
 from app.services.planning.workout_definition import definition_to_json
 from app.services.planning.workout_revision import (
     STRUCTURAL_RULE_SET_VERSION,
@@ -311,64 +315,139 @@ class WorkoutService:
         workout = self.get(workout_id)
         revision = self._accepted_revision(workout)
         binding = self._binding(workout)
-        self._ensure_garmin_state_known(binding)
-        if (
-            workout.local_schedule_status == "scheduled"
-            and binding.calendar_status == "not_requested"
-        ):
-            binding.calendar_status = "pending"
+        self._ensure_garmin_state_known(binding, allow={"content", "calendar"})
+        self._validate_for_sync(workout, revision)
+        account = self._garmin_account()
+        runner = GarminWorkoutOperationRunner(self.session, account)
         execution = self._execution(workout, revision)
-        try:
-            with self._garmin_client() as (account, client):
-                if execution.garmin_workout_id is None:
-                    remote_id = upload_workout(client, execution)
-                    identity = WorkoutGarminRemoteIdentity(
-                        binding_id=binding.id,
-                        garmin_account_id=account.id,
-                        garmin_workout_id=remote_id,
-                        status="active",
-                    )
-                    self.session.add(identity)
-                    self.session.flush()
-                    binding.active_remote_identity_id = identity.id
-                    binding.content_status = "synced"
-                    workout.garmin_workout_id = remote_id
-                    workout.status = "published"
-                    self.session.commit()
-                    execution = self._execution(workout, revision)
-                elif binding.content_status in {"pending", "not_requested"}:
-                    update_workout_content(client, execution)
-                    binding.content_status = "synced"
-                if workout.local_schedule_status == "scheduled":
-                    schedule_published_workout(
-                        client,
-                        execution,
-                        previous_date=binding.remote_scheduled_for,
-                    )
-                    binding.calendar_status = "synced"
-                    binding.remote_scheduled_for = workout.scheduled_for
-                else:
-                    schedule_published_workout(
-                        client,
-                        execution,
-                        previous_date=binding.remote_scheduled_for,
-                    )
-                    binding.calendar_status = "not_requested"
-                    binding.remote_scheduled_for = None
+        identity = self._active_identity(binding, account)
+        if identity is None:
+
+            def record_upload(remote_id: str, operation: WorkoutGarminOperation) -> None:
+                identity = WorkoutGarminRemoteIdentity(
+                    binding_id=binding.id,
+                    garmin_account_id=account.id,
+                    garmin_workout_id=remote_id,
+                    principal_fingerprint=account.principal_fingerprint,
+                    status="active",
+                )
+                self.session.add(identity)
+                self.session.flush()
+                binding.active_remote_identity_id = identity.id
+                binding.content_status = "synced"
+                workout.garmin_workout_id = remote_id
                 workout.status = "published"
-                binding.last_success_at = utcnow()
-                self._event(workout, revision, "publish")
-                self.session.commit()
-        except (GarminUnavailableError, WorkoutValidationError):
-            self.session.rollback()
-            raise
+                operation.remote_reference = remote_id
+
+            runner.execute(
+                workout=workout,
+                binding=binding,
+                revision=revision,
+                operation_type="upload",
+                remote_identity=None,
+                call=lambda: self._garmin_call(
+                    account, "workout.upload", lambda client: upload_workout(client, execution)
+                ),
+                on_success=record_upload,
+            )
+            identity = self._active_identity(binding, account)
+            execution = self._execution(workout, revision)
+        elif binding.content_status != "synced":
+            runner.execute(
+                workout=workout,
+                binding=binding,
+                revision=revision,
+                operation_type="update",
+                remote_identity=identity,
+                call=lambda: self._garmin_call(
+                    account,
+                    "workout.update",
+                    lambda client: update_workout_content(client, execution),
+                ),
+                on_success=lambda _result, _operation: setattr(binding, "content_status", "synced"),
+            )
+
+        if identity is None:
+            raise WorkoutTransitionError(
+                "Garmin hat keine aktive Workout-ID geliefert.",
+                code="garmin.remote_id_required",
+            )
+        remote_id = identity.garmin_workout_id
+        previous_date = binding.remote_scheduled_for
+        target_date = (
+            workout.scheduled_for if workout.local_schedule_status == "scheduled" else None
+        )
+        if previous_date is not None and previous_date != target_date:
+
+            def record_unschedule(_result: None, _operation: WorkoutGarminOperation) -> None:
+                binding.remote_scheduled_for = None
+                binding.calendar_status = "not_requested"
+
+            runner.execute(
+                workout=workout,
+                binding=binding,
+                revision=revision,
+                operation_type="unschedule",
+                remote_identity=identity,
+                scheduled_for=previous_date,
+                call=lambda: self._garmin_call(
+                    account,
+                    "workout.unschedule",
+                    lambda client: unschedule_workout_on_date(client, remote_id, previous_date),
+                ),
+                reconcile=lambda: self._garmin_call(
+                    account,
+                    "workout.unschedule.reconcile",
+                    lambda client: not scheduled_workout_ids(client, remote_id, previous_date),
+                ),
+                on_success=record_unschedule,
+                on_reconciled=lambda operation: record_unschedule(None, operation),
+            )
+        if target_date is not None and (
+            binding.remote_scheduled_for != target_date or binding.calendar_status != "synced"
+        ):
+
+            def record_schedule(_result: None, _operation: WorkoutGarminOperation) -> None:
+                binding.remote_scheduled_for = target_date
+                binding.calendar_status = "synced"
+
+            runner.execute(
+                workout=workout,
+                binding=binding,
+                revision=revision,
+                operation_type="schedule",
+                remote_identity=identity,
+                scheduled_for=target_date,
+                call=lambda: self._garmin_call(
+                    account,
+                    "workout.schedule",
+                    lambda client: schedule_workout_on_date(client, remote_id, target_date),
+                ),
+                reconcile=lambda: self._garmin_call(
+                    account,
+                    "workout.schedule.reconcile",
+                    lambda client: bool(scheduled_workout_ids(client, remote_id, target_date)),
+                ),
+                on_success=record_schedule,
+                on_reconciled=lambda operation: record_schedule(None, operation),
+            )
+        elif target_date is None:
+            binding.calendar_status = "not_requested"
+        workout.status = "published"
+        self._event(
+            workout,
+            revision,
+            "publish",
+            idempotency_key=(f"publish:{workout.id}:{revision.id}:{workout.lock_version}"),
+        )
+        self.session.commit()
         return workout
 
     def push(self, workout_id: int) -> Workout:
         workout = self.get(workout_id)
         revision = self._accepted_revision(workout)
         binding = self._binding(workout)
-        self._ensure_garmin_state_known(binding)
+        self._validate_for_sync(workout, revision)
         if binding.content_status != "synced":
             raise WorkoutTransitionError(
                 "Das angenommene Workout muss zuerst an Garmin übertragen werden.",
@@ -382,17 +461,39 @@ class WorkoutService:
                 code="garmin.calendar_not_synced",
             )
         execution = self._execution(workout, revision)
-        try:
-            with self._garmin_client() as (_account, client):
-                push_workout(client, execution)
+        identity = self._active_identity(binding)
+        if identity is None:
+            raise WorkoutTransitionError(
+                "Das Workout besitzt keine aktive Garmin-ID.",
+                code="garmin.remote_id_required",
+            )
+        account = self._garmin_account()
+        self._ensure_identity_principal(identity, account)
+        runner = GarminWorkoutOperationRunner(self.session, account)
+
+        def record_push(_result: None, _operation: WorkoutGarminOperation) -> None:
             workout.status = "pushed"
             binding.device_status = "request_accepted"
-            binding.last_success_at = utcnow()
-            self._event(workout, revision, "push")
+
+        operation = runner.execute(
+            workout=workout,
+            binding=binding,
+            revision=revision,
+            operation_type="push",
+            remote_identity=identity,
+            call=lambda: self._garmin_call(
+                account, "workout.push", lambda client: push_workout(client, execution)
+            ),
+            on_success=record_push,
+        )
+        if binding.device_status == "request_accepted":
+            self._event(
+                workout,
+                revision,
+                "push",
+                idempotency_key=operation.idempotency_key,
+            )
             self.session.commit()
-        except (GarminUnavailableError, WorkoutValidationError):
-            self.session.rollback()
-            raise
         return workout
 
     def delete(self, workout_id: int) -> None:
@@ -403,32 +504,63 @@ class WorkoutService:
             if workout.accepted_revision_id
             else self._current_revision(workout)
         )
-        try:
-            self._ensure_garmin_state_known(binding)
-            remote_id = self._remote_id(binding) or workout.garmin_workout_id
-            if remote_id:
-                execution = self._execution(workout, revision)
-                with self._garmin_client() as (_account, client):
-                    delete_published_workout(client, execution, binding.remote_scheduled_for)
-                identity = (
-                    self.session.get(WorkoutGarminRemoteIdentity, binding.active_remote_identity_id)
-                    if binding.active_remote_identity_id is not None
-                    else None
+        self._ensure_garmin_state_known(binding, allow={"calendar"})
+        identity = self._active_identity(binding)
+        if identity is not None:
+            account = self._garmin_account()
+            self._ensure_identity_principal(identity, account)
+            runner = GarminWorkoutOperationRunner(self.session, account)
+            remote_id = identity.garmin_workout_id
+            remote_date = binding.remote_scheduled_for
+            if remote_date is not None:
+                runner.execute(
+                    workout=workout,
+                    binding=binding,
+                    revision=revision,
+                    operation_type="unschedule",
+                    remote_identity=identity,
+                    scheduled_for=remote_date,
+                    call=lambda: self._garmin_call(
+                        account,
+                        "workout.unschedule",
+                        lambda client: unschedule_workout_on_date(client, remote_id, remote_date),
+                    ),
+                    reconcile=lambda: self._garmin_call(
+                        account,
+                        "workout.unschedule.reconcile",
+                        lambda client: not scheduled_workout_ids(client, remote_id, remote_date),
+                    ),
+                    on_success=lambda _result, _operation: setattr(
+                        binding, "remote_scheduled_for", None
+                    ),
+                    on_reconciled=lambda _operation: setattr(binding, "remote_scheduled_for", None),
                 )
-                if identity is not None:
-                    identity.status = "removed"
-                    identity.removed_at = utcnow()
+
+            def record_delete(_result: None, _operation: WorkoutGarminOperation) -> None:
+                identity.status = "removed"
+                identity.removed_at = utcnow()
                 binding.active_remote_identity_id = None
                 binding.content_status = "removed"
                 binding.calendar_status = "removed"
                 binding.device_status = "not_requested"
-            workout.deleted_at = utcnow()
-            workout.lock_version += 1
-            self._event(workout, revision, "delete")
-            self.session.commit()
-        except (GarminUnavailableError, WorkoutValidationError, WorkoutTransitionError):
-            self.session.rollback()
-            raise
+
+            runner.execute(
+                workout=workout,
+                binding=binding,
+                revision=revision,
+                operation_type="delete",
+                remote_identity=identity,
+                call=lambda: self._garmin_call(
+                    account,
+                    "workout.delete",
+                    lambda client: delete_remote_workout(client, remote_id),
+                ),
+                on_success=record_delete,
+            )
+        workout.deleted_at = utcnow()
+        workout.lock_version += 1
+        self._event(workout, revision, "delete")
+        self.session.commit()
 
     def validate_revision_context(
         self, workout_id: int, revision_id: int, context_fingerprint: str
@@ -504,7 +636,9 @@ class WorkoutService:
 
     def _binding(self, workout: Workout) -> WorkoutGarminBinding:
         binding = self.session.scalar(
-            select(WorkoutGarminBinding).where(WorkoutGarminBinding.workout_id == workout.id)
+            select(WorkoutGarminBinding)
+            .where(WorkoutGarminBinding.workout_id == workout.id)
+            .execution_options(populate_existing=True)
         )
         if binding is None:
             binding = WorkoutGarminBinding(workout_id=workout.id)
@@ -513,17 +647,45 @@ class WorkoutService:
         return binding
 
     def _remote_id(self, binding: WorkoutGarminBinding) -> str | None:
+        identity = self._active_identity(binding)
+        return identity.garmin_workout_id if identity is not None else None
+
+    def _active_identity(
+        self,
+        binding: WorkoutGarminBinding,
+        account: GarminAccount | None = None,
+    ) -> WorkoutGarminRemoteIdentity | None:
         if binding.active_remote_identity_id is None:
             return None
         identity = self.session.get(WorkoutGarminRemoteIdentity, binding.active_remote_identity_id)
-        return identity.garmin_workout_id if identity is not None else None
+        if identity is not None and account is not None:
+            self._ensure_identity_principal(identity, account)
+        return identity
 
-    def _ensure_garmin_state_known(self, binding: WorkoutGarminBinding) -> None:
-        if "unknown" in {
-            binding.content_status,
-            binding.calendar_status,
-            binding.device_status,
-        }:
+    def _ensure_identity_principal(
+        self, identity: WorkoutGarminRemoteIdentity, account: GarminAccount
+    ) -> None:
+        if (
+            identity.garmin_account_id != account.id
+            or identity.principal_fingerprint != account.principal_fingerprint
+        ):
+            raise WorkoutTransitionError(
+                "Die Garmin-ID gehört zu einer früheren Kontoverbindung und muss geprüft werden.",
+                code="garmin.principal_mismatch",
+            )
+
+    def _ensure_garmin_state_known(
+        self, binding: WorkoutGarminBinding, *, allow: set[str] | None = None
+    ) -> None:
+        allowed = allow or set()
+        states = {
+            "content": binding.content_status,
+            "calendar": binding.calendar_status,
+            "device": binding.device_status,
+        }
+        if any(
+            state in {"pending", "unknown"} for axis, state in states.items() if axis not in allowed
+        ):
             raise WorkoutTransitionError(
                 "Der Garmin-Zustand muss vor einer weiteren Änderung geprüft werden.",
                 code="garmin.state_unknown",
@@ -542,8 +704,23 @@ class WorkoutService:
             scheduled_for=(
                 workout.scheduled_for if workout.local_schedule_status == "scheduled" else None
             ),
-            garmin_workout_id=self._remote_id(binding) or workout.garmin_workout_id,
+            garmin_workout_id=self._remote_id(binding),
         )
+
+    def _validate_for_sync(self, workout: Workout, revision: WorkoutRevision) -> None:
+        if workout.accepted_revision_id != revision.id or workout.deleted_at is not None:
+            raise WorkoutConflictError(
+                "Die angenommene Workout-Revision ist nicht mehr aktuell.",
+                code="workout.accepted_revision_mismatch",
+            )
+        validation = self._validate_context(
+            workout, revision, default_context_fingerprint(revision.content_hash)
+        )
+        if not validation.valid:
+            raise WorkoutTransitionError(
+                "Das Workout erfüllt die aktuellen Prüfungen nicht.",
+                code="workout.validation_failed",
+            )
 
     def _validate_context(
         self,
@@ -588,7 +765,16 @@ class WorkoutService:
         action: str,
         *,
         metadata: dict[str, object] | None = None,
+        idempotency_key: str | None = None,
     ) -> None:
+        if idempotency_key is not None and self.session.scalar(
+            select(WorkoutEvent.id).where(
+                WorkoutEvent.owner_user_id == workout.user_id,
+                WorkoutEvent.action == action,
+                WorkoutEvent.idempotency_key == idempotency_key,
+            )
+        ):
+            return
         self.session.add(
             WorkoutEvent(
                 workout_id=workout.id,
@@ -598,15 +784,14 @@ class WorkoutService:
                 actor_user_id=self.user.id,
                 action=action,
                 request_id=self.request_id,
+                idempotency_key=idempotency_key,
                 safe_metadata_json=metadata or {},
             )
         )
 
     @contextmanager
     def _garmin_client(self) -> Iterator[tuple[GarminAccount, Any]]:
-        account = get_or_create_garmin_account(self.session, self.user)
-        if account.connected_at is None:
-            raise GarminUnavailableError("Garmin ist noch nicht verbunden.")
+        account = self._garmin_account()
         try:
             with garmin_account_slot(account.id):
                 yield account, self.connect_garmin(self.session, account)
@@ -614,3 +799,24 @@ class WorkoutService:
             raise GarminUnavailableError(
                 "Für dieses Garmin-Konto läuft gerade eine andere Operation."
             ) from exc
+
+    def _garmin_account(self) -> GarminAccount:
+        account = get_or_create_garmin_account(self.session, self.user)
+        if account.connected_at is None:
+            raise GarminUnavailableError("Garmin ist noch nicht verbunden.")
+        return account
+
+    def _garmin_call[T](
+        self, account: GarminAccount, operation: str, call: Callable[[Any], T]
+    ) -> T:
+        from app.config import get_settings
+        from app.services.garmin.health_backfill import GarminPacer
+
+        settings = get_settings()
+        pacer = GarminPacer(
+            settings.garmin_call_delay_seconds,
+            {"garmin_account_id": account.id, "workout_operation": operation},
+            rate_limit_cooldown=settings.garmin_rate_limit_cooldown_seconds,
+        )
+        with self._garmin_client() as (_account, client):
+            return pacer.call(operation, lambda: call(client))

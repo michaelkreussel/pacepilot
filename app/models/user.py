@@ -74,6 +74,7 @@ class GarminAccount(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), unique=True)
     email: Mapped[str | None] = mapped_column(String(320))
+    principal_fingerprint: Mapped[str | None] = mapped_column(String(64))
     connected_at: Mapped[datetime | None] = mapped_column(DateTime)
     last_sync_at: Mapped[datetime | None] = mapped_column(DateTime)
     rate_limit_until: Mapped[datetime | None] = mapped_column(DateTime)
