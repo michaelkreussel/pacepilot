@@ -63,6 +63,7 @@ class Activity(Base):
     source_updated_at: Mapped[datetime | None] = mapped_column(DateTime)
     details_complete: Mapped[bool] = mapped_column(Boolean, default=False)
     splits_complete: Mapped[bool] = mapped_column(Boolean, default=False)
+    zones_complete: Mapped[bool] = mapped_column(Boolean, default=False)
     details_synced_at: Mapped[datetime | None] = mapped_column(DateTime)
     synced_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 

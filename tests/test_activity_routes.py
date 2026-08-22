@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import get_settings
-from app.models import Activity, User
+from app.models import Activity, ActivityZone, User
 from app.services.garmin.activity_details import activity_details_path, write_activity_details
 
 
@@ -33,6 +33,10 @@ def test_activity_detail_renders_charts_and_map(
             duration_s=3300,
             details_complete=True,
         )
+        activity.zones = [
+            ActivityZone(zone_type="heart_rate", zone_number=2, low_boundary=125, seconds=600)
+        ]
+        activity.zones_complete = True
         session.add(activity)
         session.commit()
         activity_id = activity.id
@@ -78,6 +82,9 @@ def test_activity_detail_renders_charts_and_map(
     assert "Ø Leistung" in response.text
     assert '<details class="group ' in response.text
     assert "Garmin-Metriken" in response.text
+    assert response.text.index("Detailed Stats") < response.text.index(
+        "Herzfrequenzzonen dieser Aktivität"
+    )
     assert 'id="activity-map"' in response.text
     assert '<div class="grid gap-4 md:grid-cols-2">' in response.text
     assert "sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" in response.text
@@ -133,6 +140,48 @@ def test_activity_detail_expands_a_single_chart(
     assert 'id="heart-rate-chart"' in response.text
     assert '<div class="grid gap-4">' in response.text
     assert '<div class="grid gap-4 md:grid-cols-2">' not in response.text
+
+
+def test_activity_detail_shows_zone_values_and_distribution(
+    client: TestClient, session_factory: sessionmaker[Session]
+) -> None:
+    client.get("/")
+    with session_factory() as session:
+        user = session.scalar(select(User))
+        assert user is not None
+        activity = Activity(
+            user_id=user.id,
+            garmin_activity_id="zones",
+            name="Lauf mit Zonen",
+            activity_type="running",
+            started_at=datetime(2026, 8, 8, 8, 0),
+            duration_s=1_200,
+        )
+        activity.zones = [
+            ActivityZone(zone_type="heart_rate", zone_number=1, low_boundary=105, seconds=300),
+            ActivityZone(zone_type="heart_rate", zone_number=2, low_boundary=125, seconds=900),
+            ActivityZone(zone_type="power", zone_number=1, low_boundary=200, seconds=600),
+            ActivityZone(zone_type="power", zone_number=2, low_boundary=250, seconds=600),
+        ]
+        activity.zones_complete = True
+        session.add(activity)
+        session.commit()
+        activity_id = activity.id
+
+    response = client.get(f"/activities/{activity_id}")
+
+    assert response.status_code == 200
+    assert "Herzfrequenzzonen dieser Aktivität" in response.text
+    assert "105–124 bpm" in response.text
+    assert "ab 125 bpm" in response.text
+    assert "5:00 min" in response.text
+    assert "15:00 min" in response.text
+    assert "25,0 %" in response.text
+    assert "75,0 %" in response.text
+    assert "Leistungszonen" not in response.text
+    assert "200–249 W" not in response.text
+    assert 'class="zone-progress ' in response.text
+    assert 'aria-label="Herzfrequenzzone 1: 25,0 Prozent"' in response.text
 
 
 def test_activity_detail_ignores_stale_file_when_enrichment_is_incomplete(

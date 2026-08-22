@@ -108,7 +108,7 @@ def test_workout_revision_migration_resumes_after_added_columns(tmp_path: Path) 
             "SELECT version_num FROM alembic_version"
         ).scalar_one()
         integrity = connection.exec_driver_sql("PRAGMA integrity_check").scalar_one()
-    assert revision == "20260822_18"
+    assert revision == "20260822_21"
     assert integrity == "ok"
     assert "workout_revisions" in inspector.get_table_names()
 
@@ -137,7 +137,7 @@ def test_reverted_athlete_profile_revision_upgrades_to_head(tmp_path: Path) -> N
         revision = connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
         ).scalar_one()
-    assert revision == "20260822_18"
+    assert revision == "20260822_21"
 
 
 def test_principal_fingerprint_migration_upgrades_applied_phase_4_schema(
@@ -161,6 +161,46 @@ def test_principal_fingerprint_migration_upgrades_applied_phase_4_schema(
     assert "principal_fingerprint" in {
         column["name"] for column in inspect(engine).get_columns("workout_garmin_remote_identities")
     }
+
+
+def test_activity_zone_completion_migration_marks_only_complete_zone_data(tmp_path: Path) -> None:
+    database_path = tmp_path / "activity-zones.db"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    config = Config("alembic.ini")
+    config.attributes["database_url"] = database_url
+    command.upgrade(config, "20260822_18")
+    engine = create_engine(database_url)
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "INSERT INTO users (id, display_name, created_at) VALUES (1, 'Runner', '2026-08-22')"
+        )
+        for activity_id, average_hr, max_hr, max_power in (
+            (1, 150, 180, None),
+            (2, 145, 175, None),
+            (3, None, None, None),
+            (4, None, 190, None),
+            (5, None, None, 350),
+        ):
+            connection.exec_driver_sql(
+                "INSERT INTO activities "
+                "(id, user_id, garmin_activity_id, name, activity_type, started_at, average_hr, "
+                "max_hr, max_power_watts, details_complete, splits_complete, synced_at) "
+                "VALUES (?, 1, ?, 'Run', 'running', '2026-08-22', ?, ?, ?, 1, 1, '2026-08-22')",
+                (activity_id, str(activity_id), average_hr, max_hr, max_power),
+            )
+        connection.exec_driver_sql(
+            "INSERT INTO activity_zones "
+            "(activity_id, zone_type, zone_number, seconds) "
+            "VALUES (2, 'heart_rate', 1, 600)"
+        )
+
+    command.upgrade(config, "head")
+
+    with engine.connect() as connection:
+        values = connection.exec_driver_sql(
+            "SELECT id, zones_complete FROM activities ORDER BY id"
+        ).all()
+    assert values == [(1, 0), (2, 1), (3, 1), (4, 0), (5, 0)]
 
 
 def test_workout_rpe_migration_normalizes_garmin_scale(tmp_path: Path) -> None:

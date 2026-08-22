@@ -107,7 +107,7 @@
     </div>
     <div class="grid gap-px bg-border sm:grid-cols-2">
       {% for card in performance_cards %}
-        <a class="group grid grid-cols-[minmax(0,1fr)_auto] items-center gap-4 bg-surface px-5 py-3.5 transition hover:bg-surface-muted" href="{{ card.detail_url }}"><span><span class="block text-xs font-medium text-muted-foreground">{{ card.label }}</span><small class="mt-0.5 block text-xs text-muted-foreground">Stand {{ card.source_day|date }}</small></span><span class="flex items-center gap-3"><strong class="text-sm font-semibold group-hover:text-primary">{{ card.value }}</strong><span class="text-muted-foreground" aria-hidden="true">›</span></span></a>
+        <a class="group grid grid-cols-[minmax(0,1fr)_auto] items-center gap-4 bg-surface px-5 py-3.5 transition hover:bg-surface-muted" href="{{ card.detail_url }}"><span><span class="block text-xs font-medium text-muted-foreground">{{ card.label }}</span><small class="mt-0.5 block text-xs text-muted-foreground">{{ card.note or ('Stand ' ~ (card.source_day|date)) }}</small></span><span class="flex items-center gap-3"><strong class="text-sm font-semibold group-hover:text-primary">{{ card.value }}</strong><span class="text-muted-foreground" aria-hidden="true">›</span></span></a>
       {% endfor %}
     </div>
   </section>

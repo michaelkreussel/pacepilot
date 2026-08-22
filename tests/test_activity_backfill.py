@@ -263,6 +263,7 @@ def test_activity_backfill_imports_details_and_skips_unchanged(
         assert recent.workout_feel == 75
         assert recent.details_complete is True
         assert recent.splits_complete is True
+        assert recent.zones_complete is True
         assert recent.raw_file is not None and f"user-{user.id}" in recent.raw_file
         assert recent.details_file is not None and Path(recent.details_file).is_file()
         normalized = load_activity_details(
@@ -368,6 +369,7 @@ def test_initial_activity_sync_stores_summaries_then_enriches_with_a_budget(
         assert initial.enrichment_deferred == 3
         assert not any(call[0] == "details" for call in client.calls)
         assert all(not activity.details_complete for activity in session.scalars(select(Activity)))
+        assert all(not activity.zones_complete for activity in session.scalars(select(Activity)))
 
         client.calls.clear()
         follow_up = sync_activity_history(
@@ -384,6 +386,45 @@ def test_initial_activity_sync_stores_summaries_then_enriches_with_a_budget(
         assert [call for call in client.calls if call[0] == "details"] == [("details", "3")]
         enriched = session.scalar(select(Activity).where(Activity.garmin_activity_id == "3"))
         assert enriched is not None and enriched.details_complete is True
+
+
+def test_activity_sync_repairs_missing_zone_enrichment_without_refetching_details(
+    session_factory: sessionmaker[Session], monkeypatch: Any, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(get_settings(), "data_dir", tmp_path)
+    client = FakeActivityGarmin()
+
+    with session_factory() as session:
+        user = _user(session)
+        sync_activity_history(
+            session,
+            client,
+            user.id,
+            delay=0,
+            initial_enrichment_limit=1000,
+        )
+        activity = session.scalar(select(Activity).where(Activity.garmin_activity_id == "3"))
+        assert activity is not None
+        activity.zones.clear()
+        activity.zones_complete = False
+        session.commit()
+        client.calls.clear()
+
+        result = sync_activity_history(
+            session,
+            client,
+            user.id,
+            delay=0,
+            incremental_enrichment_limit=1,
+        )
+
+        session.refresh(activity)
+        assert result.activities_enriched == 1
+        assert activity.zones_complete is True
+        assert len(activity.zones) == 10
+        assert ("hr_zones", "3") in client.calls
+        assert ("power_zones", "3") in client.calls
+        assert not any(call[0] == "details" for call in client.calls)
 
 
 def test_changed_summary_invalidates_details_when_enrichment_is_deferred(
@@ -418,6 +459,7 @@ def test_changed_summary_invalidates_details_when_enrichment_is_deferred(
         assert changed is not None
         assert changed.details_complete is False
         assert changed.splits_complete is False
+        assert changed.zones_complete is False
         assert changed.details_file is None
         assert changed.splits == []
         assert changed.zones == []

@@ -54,6 +54,7 @@ class TrainingSummary:
     hard_workouts_per_week: float
     volume_per_sport: tuple[SportVolume, ...]
     zone_distribution: tuple[ZoneDistribution, ...]
+    zone_data_complete: bool
     data_status: str
     history_complete: bool
     oldest_synced_date: date | None
@@ -315,6 +316,7 @@ def get_training_summary(
             ZoneDistribution(sport, zone_type, zone_number, round(seconds, 2))
             for (sport, zone_type, zone_number), seconds in sorted(zones.items())
         ),
+        zone_data_complete=all(activity.zones_complete for activity in activities),
         data_status=activity_state.status if activity_state else "not_synced",
         history_complete=activity_state.backfill_complete if activity_state else False,
         oldest_synced_date=activity_state.oldest_synced_date if activity_state else None,

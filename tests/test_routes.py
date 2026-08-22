@@ -511,6 +511,8 @@ def test_garmin_disconnect_removes_tokens_but_keeps_imported_data(
     client.get("/settings")
     with session_factory() as session:
         account = _mark_garmin_connected(session)
+        account.heart_rate_zone_profiles = [{"sport": "DEFAULT"}]
+        account.heart_rate_zones_synced_at = datetime(2026, 8, 22)
         user_id = account.user_id
         session.add(
             Activity(
@@ -537,6 +539,8 @@ def test_garmin_disconnect_removes_tokens_but_keeps_imported_data(
         assert account.connected_at is None
         assert account.email is None
         assert account.sync_status == "not_connected"
+        assert account.heart_rate_zone_profiles is None
+        assert account.heart_rate_zones_synced_at is None
         assert session.scalar(select(func.count()).select_from(Activity)) == 1
 
 
@@ -555,6 +559,8 @@ def test_delete_garmin_data_preserves_connection_user_and_local_workout(
     with session_factory() as session:
         account = _mark_garmin_connected(session)
         account.email = "runner@example.com"
+        account.heart_rate_zone_profiles = [{"sport": "DEFAULT"}]
+        account.heart_rate_zones_synced_at = datetime(2026, 8, 22)
         user_id = account.user_id
         workout = session.scalar(select(Workout))
         assert workout is not None
@@ -666,6 +672,8 @@ def test_delete_garmin_data_preserves_connection_user_and_local_workout(
         assert account.email == "runner@example.com"
         assert account.connected_at == connected_at
         assert account.sync_status == "connected"
+        assert account.heart_rate_zone_profiles is None
+        assert account.heart_rate_zones_synced_at is None
 
 
 def test_garmin_account_actions_are_in_connection_card(client: TestClient) -> None:
@@ -700,6 +708,8 @@ def test_reconnecting_different_garmin_principal_quarantines_remote_ids(
         session.flush()
         binding.active_remote_identity_id = identity.id
         binding.content_status = "synced"
+        account.heart_rate_zone_profiles = [{"sport": "DEFAULT"}]
+        account.heart_rate_zones_synced_at = datetime(2026, 8, 22)
 
         record_connected_principal(session, account, "new@example.com")
         session.commit()
@@ -708,6 +718,8 @@ def test_reconnecting_different_garmin_principal_quarantines_remote_ids(
         assert binding.calendar_status == "unknown"
         assert binding.device_status == "unknown"
         assert binding.last_error_code == "garmin.principal_changed"
+        assert account.heart_rate_zone_profiles is None
+        assert account.heart_rate_zones_synced_at is None
 
 
 def test_delete_garmin_data_is_blocked_during_account_operation(
@@ -909,7 +921,7 @@ def test_edit_draft_workout(client: TestClient, session_factory: sessionmaker[Se
     assert "startPaletteDrag('interval'" in form.text
     assert "/static/icons/workout.svg#pencil" in form.text
     assert "setDropTarget(null, index)" in form.text
-    assert "/static/css/tailwind.css?v=20260822-6" in form.text
+    assert "/static/css/tailwind.css?v=20260822-9" in form.text
     assert "/static/js/theme.js?v=20260809-3" in form.text
     assert "data-theme-toggle" in form.text
 

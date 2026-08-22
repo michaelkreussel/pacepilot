@@ -345,6 +345,57 @@ def _map_zone(item: Any, zone_type: str) -> ActivityZone | None:
     )
 
 
+def _sync_activity_zones(
+    session: Session,
+    client: Any,
+    activity: Activity,
+    activity_id: str,
+    metadata: Mapping[str, Any],
+    item: Mapping[str, Any],
+    pacer: GarminPacer,
+    result: ActivitySyncResult,
+) -> None:
+    zones: list[ActivityZone] = []
+    has_hr_zones = bool(
+        metadata.get("hasHrTimeInZones")
+        or item.get("hasHrTimeInZones")
+        or activity.min_hr is not None
+        or activity.average_hr is not None
+        or activity.max_hr is not None
+    )
+    if has_hr_zones:
+        hr_payload = _optional_call(
+            pacer,
+            result,
+            f"activity HR zones {activity_id}",
+            partial(client.get_activity_hr_in_timezones, activity_id),
+            [],
+        )
+        zones.extend(
+            zone for raw in hr_payload or [] if (zone := _map_zone(raw, "heart_rate")) is not None
+        )
+    has_power_zones = bool(
+        metadata.get("hasPowerTimeInZones")
+        or item.get("hasPowerTimeInZones")
+        or activity.average_power_watts is not None
+        or activity.max_power_watts is not None
+        or activity.normalized_power_watts is not None
+    )
+    if has_power_zones:
+        power_payload = _optional_call(
+            pacer,
+            result,
+            f"activity power zones {activity_id}",
+            partial(client.get_activity_power_in_timezones, activity_id),
+            [],
+        )
+        zones.extend(
+            zone for raw in power_payload or [] if (zone := _map_zone(raw, "power")) is not None
+        )
+    replace_activity_zones(session, activity, zones)
+    activity.zones_complete = True
+
+
 def _map_split(item: Any, split_type: str, position: int) -> ActivitySplit | None:
     if not isinstance(item, dict):
         return None
@@ -463,18 +514,33 @@ def _process_activity(
         and existing.raw_file is not None
         and Path(existing.raw_file).is_file()
     )
-    enrichment_complete = (
+    detail_enrichment_complete = (
         existing is not None
         and existing.details_complete
         and existing.splits_complete
         and _files_complete(existing)
     )
+    enrichment_complete = detail_enrichment_complete and existing.zones_complete
     if summary_unchanged:
         if enrichment_complete:
             return "skipped", False
         if not enrich:
             result.enrichment_deferred += 1
             return "skipped", False
+        if detail_enrichment_complete:
+            _sync_activity_zones(
+                session,
+                client,
+                existing,
+                activity_id,
+                {},
+                item,
+                pacer,
+                result,
+            )
+            existing.details_synced_at = utcnow()
+            result.activities_enriched += 1
+            return "skipped", True
 
     outcome = "inserted" if existing is None else "updated"
     activity = get_or_create_activity(
@@ -497,6 +563,7 @@ def _process_activity(
             activity.details_file = None
             activity.details_complete = False
             activity.splits_complete = False
+            activity.zones_complete = False
             replace_activity_splits(session, activity, [])
             replace_activity_zones(session, activity, [])
             replace_activity_exercise_sets(session, activity, [])
@@ -545,32 +612,16 @@ def _process_activity(
     )
     replace_activity_splits(session, activity, _split_rows(laps_payload, typed_payload))
 
-    zones: list[ActivityZone] = []
-    has_hr_zones = bool(metadata.get("hasHrTimeInZones") or item.get("hasHrTimeInZones"))
-    if has_hr_zones:
-        hr_payload = _optional_call(
-            pacer,
-            result,
-            f"activity HR zones {activity_id}",
-            partial(client.get_activity_hr_in_timezones, activity_id),
-            [],
-        )
-        zones.extend(
-            zone for raw in hr_payload or [] if (zone := _map_zone(raw, "heart_rate")) is not None
-        )
-    has_power_zones = bool(metadata.get("hasPowerTimeInZones") or item.get("hasPowerTimeInZones"))
-    if has_power_zones:
-        power_payload = _optional_call(
-            pacer,
-            result,
-            f"activity power zones {activity_id}",
-            partial(client.get_activity_power_in_timezones, activity_id),
-            [],
-        )
-        zones.extend(
-            zone for raw in power_payload or [] if (zone := _map_zone(raw, "power")) is not None
-        )
-    replace_activity_zones(session, activity, zones)
+    _sync_activity_zones(
+        session,
+        client,
+        activity,
+        activity_id,
+        metadata,
+        item,
+        pacer,
+        result,
+    )
 
     exercise_payload: Any = {}
     if "strength" in activity.activity_type:
@@ -637,6 +688,7 @@ def sync_activity_history(
                     or_(
                         Activity.details_complete.is_(False),
                         Activity.splits_complete.is_(False),
+                        Activity.zones_complete.is_(False),
                     ),
                 )
                 .limit(1)

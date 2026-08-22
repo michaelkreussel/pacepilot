@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -80,6 +80,8 @@ class GarminAccount(Base):
     rate_limit_until: Mapped[datetime | None] = mapped_column(DateTime)
     sync_status: Mapped[str] = mapped_column(String(30), default="not_connected")
     sync_error: Mapped[str | None] = mapped_column(String(1000))
+    heart_rate_zone_profiles: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON)
+    heart_rate_zones_synced_at: Mapped[datetime | None] = mapped_column(DateTime)
 
     user: Mapped[User] = relationship(back_populates="garmin_account")
     devices: Mapped[list["GarminDevice"]] = relationship(

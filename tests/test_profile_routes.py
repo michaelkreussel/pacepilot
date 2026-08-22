@@ -3,13 +3,14 @@ import re
 from datetime import date, datetime
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from app.models import (
     Activity,
     ActivityZone,
     DailyFitness,
     DailyHealth,
+    GarminAccount,
     GarminSyncState,
     User,
 )
@@ -121,6 +122,62 @@ def test_profile_shows_only_available_device_performance_metrics(client, session
     assert _chart_payload(old_detail.text) == {"charts": []}
     assert "275 W" in old_detail.text
     assert "Kein Verlauf im gewählten Zeitraum" in old_detail.text
+
+
+def test_profile_shows_garmin_heart_rate_zone_configuration(client, session_factory):
+    with session_factory() as session:
+        user = session.scalar(select(User).order_by(User.id))
+        assert user is not None
+        session.add(
+            GarminAccount(
+                user_id=user.id,
+                heart_rate_zone_profiles=[
+                    {
+                        "sport": "DEFAULT",
+                        "training_method": "HR_MAX",
+                        "zone_floors": [105, 125, 144, 164, 185],
+                        "max_hr": 205,
+                        "resting_hr": 67,
+                        "lactate_threshold_hr": None,
+                    },
+                    {
+                        "sport": "RUNNING",
+                        "training_method": "HR_RESERVE",
+                        "zone_floors": [136, 150, 164, 177, 191],
+                        "max_hr": 205,
+                        "resting_hr": 67,
+                        "lactate_threshold_hr": None,
+                    },
+                ],
+                heart_rate_zones_synced_at=datetime(2026, 6, 30, 12),
+            )
+        )
+        session.commit()
+
+    overview = client.get("/profile?period=month&end=2026-06-30")
+
+    assert overview.status_code == 200
+    assert "Garmin HF-Zonen" in overview.text
+    assert "2 Profile" in overview.text
+    assert "Standard: Nach HFmax · 205 bpm" in overview.text
+    assert 'href="/profile/garmin-heart-rate-zones?period=month&amp;end=2026-06-30"' in (
+        overview.text
+    )
+
+    detail = client.get("/profile/garmin-heart-rate-zones?period=month&end=2026-06-30")
+
+    assert detail.status_code == 200
+    assert "Maximale Herzfrequenz" in detail.text
+    assert "Wird für diese Zonen verwendet" in detail.text
+    assert "Ruhepuls" in detail.text
+    assert "67 bpm" in detail.text
+    assert "Herzfrequenzreserve" in detail.text
+    assert detail.text.count("Wird für diese Zonen verwendet") == 3
+    assert "105–124 bpm" in detail.text
+    assert "185–205 bpm" in detail.text
+    assert "136–149 bpm" in detail.text
+    assert "191–205 bpm" in detail.text
+    assert "30.06.2026, 12:00" in detail.text
 
 
 @pytest.mark.parametrize("period", ["day", "week", "month", "3m", "year"])
@@ -376,6 +433,64 @@ def test_profile_preserves_one_sided_intensity_and_anaerobic_effect(client, sess
     assert "30.06.2026" in day_response.text
     day_chart_ids = {chart["id"] for chart in _chart_payload(day_response.text)["charts"]}
     assert day_chart_ids == {"training-effect-chart"}
+
+
+def test_zone_analysis_combines_heart_rate_zones_across_activity_types(client, session_factory):
+    client.get("/")
+    with session_factory() as session:
+        user = session.scalar(select(User).order_by(User.id))
+        assert user is not None
+        run = Activity(
+            user_id=user.id,
+            garmin_activity_id="zone-run",
+            name="Lauf",
+            activity_type="running",
+            started_at=datetime(2026, 6, 30, 8),
+        )
+        run.zones = [
+            ActivityZone(zone_type="heart_rate", zone_number=2, seconds=600),
+            ActivityZone(zone_type="heart_rate", zone_number=3, seconds=300),
+            ActivityZone(zone_type="power", zone_number=1, seconds=1_200),
+        ]
+        run.zones_complete = True
+        strength = Activity(
+            user_id=user.id,
+            garmin_activity_id="zone-strength",
+            name="Krafttraining",
+            activity_type="strength_training",
+            started_at=datetime(2026, 6, 29, 8),
+        )
+        strength.zones = [
+            ActivityZone(zone_type="heart_rate", zone_number=2, seconds=900),
+            ActivityZone(zone_type="heart_rate", zone_number=3, seconds=600),
+        ]
+        strength.zones_complete = True
+        session.add_all([run, strength])
+        session.commit()
+
+    response = client.get("/profile/zones?period=week&end=2026-06-30")
+
+    assert response.status_code == 200
+    chart = _chart_payload(response.text)["charts"][0]
+    assert chart["kicker"] == "Alle Aktivitäten"
+    assert chart["labels"] == ["Zone 2", "Zone 3"]
+    assert chart["datasets"][0]["data"] == [25.0, 15.0]
+    assert chart["summary"][0]["value"] == 40.0
+    assert [item["label"] for item in chart["summary"]] == [
+        "Erfasste Zonenzeit",
+        "Zone 2",
+        "Zone 3",
+    ]
+
+    with session_factory() as session:
+        session.execute(delete(ActivityZone).where(ActivityZone.zone_type == "heart_rate"))
+        session.commit()
+
+    power_response = client.get("/profile/zones?period=week&end=2026-06-30")
+    power_chart = _chart_payload(power_response.text)["charts"][0]
+    assert power_chart["title"] == "Leistungszonen"
+    assert power_chart["labels"] == ["Zone 1"]
+    assert power_chart["datasets"][0]["data"] == [20.0]
 
 
 def test_activity_range_drilldown_filters_results(client, session_factory):

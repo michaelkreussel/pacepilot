@@ -208,6 +208,23 @@
 }
 
 @layer components {
+  .zone-progress {
+    appearance: none;
+    border: 0;
+    background: var(--surface-muted);
+  }
+
+  .zone-progress::-webkit-progress-bar {
+    background: var(--surface-muted);
+    border-radius: 9999px;
+  }
+
+  .zone-progress::-webkit-progress-value,
+  .zone-progress::-moz-progress-bar {
+    background: var(--primary);
+    border-radius: 9999px;
+  }
+
   .sync-state.ok,
   .sync-state.connected,
   .connection-status.ok,

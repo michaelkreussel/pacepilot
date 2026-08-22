@@ -66,6 +66,9 @@ def record_connected_principal(session: Session, account: GarminAccount, email: 
                 "Das verbundene Garmin-Konto hat gewechselt. "
                 "Bestehende Remote-IDs müssen manuell geprüft werden."
             )
+    if principal_changed:
+        account.heart_rate_zone_profiles = None
+        account.heart_rate_zones_synced_at = None
     account.principal_fingerprint = fingerprint
 
 
@@ -108,6 +111,8 @@ def _reset_connection(account: GarminAccount) -> None:
     account.rate_limit_until = None
     account.sync_status = "not_connected"
     account.sync_error = None
+    account.heart_rate_zone_profiles = None
+    account.heart_rate_zones_synced_at = None
 
 
 def _user_row_count(session: Session, model: Any, user_id: int) -> int:
@@ -153,6 +158,8 @@ def delete_garmin_data(session: Session, account: GarminAccount) -> GarminDataDe
         account.last_sync_at = None
         account.rate_limit_until = None
         account.sync_error = None
+        account.heart_rate_zone_profiles = None
+        account.heart_rate_zones_synced_at = None
         if account.connected_at is not None:
             account.sync_status = "connected"
         session.commit()
