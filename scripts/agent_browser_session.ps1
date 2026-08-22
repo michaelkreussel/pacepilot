@@ -43,10 +43,12 @@ param(
     [ValidateSet("browser", "wait", "save", "get", "check")]
     [string]$Action = "get",
 
+    [ValidateRange(1, 65535)]
     [int]$Port = 9222,
     [string]$AppUrl = "http://127.0.0.1:8000/",
     [string]$Profile = "",
     [string]$StateFile = "pacepilot-auth.json",
+    [ValidateRange(1, 86400)]
     [int]$TimeoutSeconds = 600
 )
 
@@ -65,6 +67,25 @@ function Test-Cdp {
         return $true
     } catch {
         return $false
+    }
+}
+
+function Get-AppUri {
+    $uri = $null
+    if (-not [System.Uri]::TryCreate($AppUrl, [System.UriKind]::Absolute, [ref]$uri) -or
+        $uri.Scheme -notin @("http", "https")) {
+        throw "AppUrl must be an absolute HTTP or HTTPS URL; received '$AppUrl'."
+    }
+    return $uri
+}
+
+function Assert-AppAvailable {
+    $uri = Get-AppUri
+    try {
+        $response = Invoke-WebRequest -Uri $uri.AbsoluteUri -UseBasicParsing -TimeoutSec 5
+        Write-Step "PacePilot is reachable at $($uri.AbsoluteUri) (HTTP $($response.StatusCode))."
+    } catch {
+        throw "PacePilot is not reachable at $($uri.AbsoluteUri). Start it with 'uv run uvicorn app.main:app --reload' and retry. $($_.Exception.Message)"
     }
 }
 
@@ -100,7 +121,11 @@ function Invoke-AgentBrowser {
     $exe = Get-AgentBrowser
     $output = & $exe @Arguments 2>&1
     if ($LASTEXITCODE -ne 0) {
-        throw "agent-browser $($Arguments -join ' ') failed (exit $LASTEXITCODE)."
+        $details = ($output | Out-String).Trim()
+        if (-not $details) {
+            $details = "No diagnostic output was returned."
+        }
+        throw "agent-browser $($Arguments -join ' ') failed (exit $LASTEXITCODE): $details"
     }
     return ($output | Out-String)
 }
@@ -137,6 +162,7 @@ function Open-Browser {
 }
 
 function Wait-ForSignIn {
+    $appUri = Get-AppUri
     Write-Step "Waiting for sign-in on $AppUrl (up to $TimeoutSeconds seconds)."
     Write-Step "Complete the Google sign-in in the Chrome window; waiting for the '$SessionCookieName' cookie..."
 
@@ -150,15 +176,26 @@ function Wait-ForSignIn {
 
     $elapsed = 0
     $lastNotice = 0
+    $lastError = $null
     while ($elapsed -lt $TimeoutSeconds) {
         try {
-            $output = Invoke-AgentBrowser @("--cdp", "$Port", "cookies")
-            if ($output -match [regex]::Escape($SessionCookieName)) {
+            $output = Invoke-AgentBrowser @("--cdp", "$Port", "cookies", "--json")
+            $result = $output | ConvertFrom-Json
+            if (-not $result.success) {
+                throw "Cookie query failed: $($result.error)"
+            }
+            $cookies = $result.data.cookies
+            $matchingCookie = $cookies | Where-Object {
+                $_.name -eq $SessionCookieName -and
+                ($appUri.Host -eq $_.domain -or $appUri.Host.EndsWith(".$($_.domain.TrimStart('.'))"))
+            }
+            if ($matchingCookie) {
                 Write-Step "Signed in: '$SessionCookieName' cookie found."
                 return
             }
         } catch {
-            # daemon may still be connecting to CDP; ignore and retry
+            # The daemon may still be connecting to CDP; retain the error for diagnostics.
+            $lastError = $_.Exception.Message
         }
         $elapsed += $PollSeconds
         if ($elapsed - $lastNotice -ge 30) {
@@ -167,7 +204,8 @@ function Wait-ForSignIn {
         }
         Start-Sleep -Seconds $PollSeconds
     }
-    throw "Timed out after $TimeoutSeconds seconds waiting for sign-in. Restart with 'just get-session'."
+    $details = if ($lastError) { " Last agent-browser error: $lastError" } else { "" }
+    throw "Timed out after $TimeoutSeconds seconds waiting for sign-in at $($appUri.Host).$details"
 }
 
 function Resolve-StateFile {
@@ -179,10 +217,14 @@ function Resolve-StateFile {
 
 function Save-State {
     $target = Resolve-StateFile
+    $parent = Split-Path -Parent $target
+    if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
+        throw "State file directory does not exist: $parent"
+    }
     Write-Step "Saving auth state to $target ..."
     Invoke-AgentBrowser @("--cdp", "$Port", "state", "save", $target)
-    if (-not (Test-Path -LiteralPath $target)) {
-        throw "agent-browser did not create $target."
+    if (-not (Test-Path -LiteralPath $target -PathType Leaf) -or (Get-Item -LiteralPath $target).Length -eq 0) {
+        throw "agent-browser did not create a non-empty state file at $target."
     }
     Write-Step "Saved $target."
 }
@@ -206,6 +248,7 @@ function Show-Status {
 }
 
 function Get-Session {
+    Assert-AppAvailable
     Open-Browser
     Wait-ForSignIn
     Save-State
