@@ -18,6 +18,12 @@ from app.services.analytics.health_trends import (
     get_health_trends,
     get_hrv_baseline,
 )
+from app.services.analytics.running_baseline import RunningBaseline, get_running_baseline
+from app.services.analytics.running_intensity import (
+    PerformanceAnchorInput,
+    RunningShadowAnalysis,
+    build_running_shadow_analysis,
+)
 from app.services.analytics.training_trends import (
     ActivityDetails,
     RecentWorkout,
@@ -151,6 +157,20 @@ class AthleteDataService:
 
     def get_activity_details(self, activity_id: int) -> ActivityDetails | None:
         return get_activity_details(self.session, self.user_id, activity_id, as_of=self.as_of)
+
+    def get_running_baseline(self) -> RunningBaseline:
+        return get_running_baseline(self.session, self.user_id, as_of=self.as_of)
+
+    def get_running_shadow_analysis(
+        self, *, performance_anchors: tuple[PerformanceAnchorInput, ...] = ()
+    ) -> RunningShadowAnalysis:
+        baseline = self.get_running_baseline()
+        return build_running_shadow_analysis(
+            self.session,
+            self.user_id,
+            baseline,
+            performance_anchors=performance_anchors,
+        )
 
     def get_health_day(self, day: date) -> HealthDaySummary | None:
         health = find_health_day(self.session, self.user_id, day)

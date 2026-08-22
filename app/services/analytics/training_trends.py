@@ -11,6 +11,11 @@ from app.repositories.activities import (
     list_activities_on_or_before,
 )
 from app.repositories.sync_state import sync_states_for_user
+from app.services.analytics.activity_semantics import (
+    calendar_window,
+    is_hard_activity,
+    sport_family,
+)
 
 
 @dataclass(frozen=True)
@@ -170,54 +175,13 @@ def _average(values: list[int | float | None]) -> float | None:
     return round(sum(present) / len(present), 2) if present else None
 
 
-def _sport_family(sport: str) -> str:
-    normalized = sport.lower()
-    has_run = "run" in normalized
-    has_bike = "cycl" in normalized or "bik" in normalized
-    if has_run and has_bike:
-        return normalized
-    if (
-        normalized == "running"
-        or normalized.endswith("_running")
-        or normalized
-        in {
-            "trail_run",
-            "ultra_run",
-            "obstacle_run",
-        }
-    ):
-        return "running"
-    if (
-        normalized == "cycling"
-        or normalized.endswith(("_cycling", "_biking"))
-        or normalized
-        in {
-            "bike",
-            "road_bike",
-        }
-    ):
-        return "cycling"
-    return normalized
-
-
 def _family_distance(activities: list[Activity], family: str) -> float | None:
     selected = [
-        activity for activity in activities if _sport_family(activity.activity_type) == family
+        activity for activity in activities if sport_family(activity.activity_type) == family
     ]
     if not selected:
         return 0.0
     return _optional_sum([activity.distance_m for activity in selected])
-
-
-def _is_hard(activity: Activity) -> bool:
-    return (
-        (activity.aerobic_training_effect is not None and activity.aerobic_training_effect >= 3.5)
-        or (
-            activity.anaerobic_training_effect is not None
-            and activity.anaerobic_training_effect >= 2.5
-        )
-        or (activity.workout_rpe is not None and activity.workout_rpe >= 7)
-    )
 
 
 def _recent_workout(activity: Activity) -> RecentWorkout:
@@ -242,8 +206,8 @@ def get_training_summary(
 ) -> TrainingSummary:
     if days < 1:
         raise ValueError("days must be at least 1")
-    end = as_of or date.today()
-    start = end - timedelta(days=days - 1)
+    window = calendar_window(days, as_of=as_of)
+    start, end = window.start, window.end
     activities = activities_between(
         session,
         user_id,
@@ -273,7 +237,7 @@ def get_training_summary(
                 zones[(activity.activity_type, zone.zone_type, zone.zone_number)] += zone.seconds
     weeks_in_window = (days + 6) // 7
     active_weeks = len({(activity.started_at.date() - start).days // 7 for activity in activities})
-    hard_workouts = sum(_is_hard(activity) for activity in activities)
+    hard_workouts = sum(is_hard_activity(activity) for activity in activities)
     return TrainingSummary(
         start=start,
         end=end,
@@ -352,7 +316,7 @@ def get_weekly_training_trend(
         rolling = [
             item for item in activities if rolling_start <= item.started_at.date() <= week_end
         ]
-        runs = [item for item in weekly if _sport_family(item.activity_type) == "running"]
+        runs = [item for item in weekly if sport_family(item.activity_type) == "running"]
         points.append(
             WeeklyTrainingPoint(
                 week_start=week_start,
@@ -368,7 +332,7 @@ def get_weekly_training_trend(
                 average_anaerobic_training_effect=_average(
                     [item.anaerobic_training_effect for item in weekly]
                 ),
-                hard_workouts=sum(_is_hard(item) for item in weekly),
+                hard_workouts=sum(is_hard_activity(item) for item in weekly),
                 longest_run_distance_m=(
                     max(item.distance_m for item in runs if item.distance_m is not None)
                     if any(item.distance_m is not None for item in runs)
@@ -395,8 +359,8 @@ def get_training_timeline(
         raise ValueError("days must be at least 1")
     if bucket_days < 1:
         raise ValueError("bucket_days must be at least 1")
-    end = as_of or date.today()
-    start = end - timedelta(days=days - 1)
+    window = calendar_window(days, as_of=as_of)
+    start, end = window.start, window.end
     activities = activities_between(
         session,
         user_id,
@@ -414,7 +378,7 @@ def get_training_timeline(
         rolling = [
             item for item in activities if rolling_start <= item.started_at.date() <= bucket_end
         ]
-        runs = [item for item in bucket if _sport_family(item.activity_type) == "running"]
+        runs = [item for item in bucket if sport_family(item.activity_type) == "running"]
         points.append(
             TrainingTimelinePoint(
                 start=bucket_start,
@@ -434,7 +398,7 @@ def get_training_timeline(
                 average_anaerobic_training_effect=_average(
                     [item.anaerobic_training_effect for item in bucket]
                 ),
-                hard_workouts=sum(_is_hard(item) for item in bucket),
+                hard_workouts=sum(is_hard_activity(item) for item in bucket),
                 longest_run_distance_m=(
                     max(item.distance_m for item in runs if item.distance_m is not None)
                     if any(item.distance_m is not None for item in runs)
