@@ -18,6 +18,8 @@ from app.models import (
     GarminSyncState,
     SyncRun,
     Workout,
+    WorkoutGarminBinding,
+    WorkoutGarminRemoteIdentity,
 )
 from app.services.garmin.client import cancel_garmin_account_logins
 from app.services.garmin.locks import garmin_account_slot
@@ -103,18 +105,43 @@ def delete_garmin_data(session: Session, account: GarminAccount) -> GarminDataDe
         session.execute(delete(SyncRun).where(SyncRun.user_id == user_id))
         session.execute(delete(GarminDevice).where(GarminDevice.account_id == account_id))
 
-        workouts = list(
-            session.scalars(
-                select(Workout).where(
-                    Workout.user_id == user_id,
-                    Workout.garmin_workout_id.is_not(None),
-                )
-            )
-        )
+        workouts = list(session.scalars(select(Workout).where(Workout.user_id == user_id)))
+        workouts_unlinked = 0
         for workout in workouts:
+            binding = workout.garmin_binding
+            has_remote_identity = (
+                binding is not None and binding.active_remote_identity_id is not None
+            )
+            if workout.garmin_workout_id is not None or has_remote_identity:
+                workouts_unlinked += 1
+            if binding is None:
+                if workout.garmin_workout_id is None:
+                    continue
+                binding = WorkoutGarminBinding(workout_id=workout.id)
+                session.add(binding)
+            else:
+                binding.active_remote_identity_id = None
+            binding.content_status = "not_requested"
+            binding.calendar_status = "not_requested"
+            binding.device_status = "not_requested"
+            binding.remote_scheduled_for = None
+            binding.last_attempt_at = None
+            binding.last_success_at = None
+            binding.last_error_code = None
+            binding.last_error_message = None
             workout.garmin_workout_id = None
             if workout.status in {"published", "pushed"}:
                 workout.status = "confirmed"
+        session.flush()
+        session.execute(
+            delete(WorkoutGarminRemoteIdentity).where(
+                WorkoutGarminRemoteIdentity.binding_id.in_(
+                    select(WorkoutGarminBinding.id)
+                    .join(Workout, Workout.id == WorkoutGarminBinding.workout_id)
+                    .where(Workout.user_id == user_id)
+                )
+            )
+        )
         account.last_sync_at = None
         account.rate_limit_until = None
         account.sync_error = None
@@ -127,7 +154,7 @@ def delete_garmin_data(session: Session, account: GarminAccount) -> GarminDataDe
             health_days=health_days,
             fitness_days=fitness_days,
             sync_runs=sync_runs,
-            workouts_unlinked=len(workouts),
+            workouts_unlinked=workouts_unlinked,
         )
         logger.info(
             "Garmin data deleted",

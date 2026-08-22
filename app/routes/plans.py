@@ -6,9 +6,9 @@ from fastapi.responses import HTMLResponse
 
 from app.auth import CurrentUser
 from app.database import SessionDep
-from app.models import Workout
 from app.onboarding import require_planning_access
 from app.repositories.workouts import workouts_between
+from app.services.planning.workout_views import CalendarWorkout
 from app.web import context, templates
 
 router = APIRouter(prefix="/plans", dependencies=[Depends(require_planning_access)])
@@ -52,7 +52,7 @@ def training_plan(
         calendar_start = month_start - timedelta(days=month_start.weekday())
         calendar_end = month_end + timedelta(days=6 - month_end.weekday())
         workouts = workouts_between(session, user.id, calendar_start, calendar_end)
-        month_by_day: dict[date, list[Workout]] = {
+        month_by_day: dict[date, list[CalendarWorkout]] = {
             calendar_start + timedelta(days=offset): []
             for offset in range((calendar_end - calendar_start).days + 1)
         }
@@ -61,7 +61,7 @@ def training_plan(
             if scheduled_for is not None and scheduled_for in month_by_day:
                 month_by_day[scheduled_for].append(workout)
 
-        month_weeks: list[tuple[int, dict[date, list[Workout]]]] = []
+        month_weeks: list[tuple[int, dict[date, list[CalendarWorkout]]]] = []
         week_start = calendar_start
         while week_start <= calendar_end:
             days = {}
@@ -90,7 +90,9 @@ def training_plan(
     monday = today - timedelta(days=today.weekday()) + timedelta(weeks=week)
     sunday = monday + timedelta(days=6)
     workouts = workouts_between(session, user.id, monday, sunday)
-    by_day: dict[date, list[Workout]] = {monday + timedelta(days=offset): [] for offset in range(7)}
+    by_day: dict[date, list[CalendarWorkout]] = {
+        monday + timedelta(days=offset): [] for offset in range(7)
+    }
     for workout in workouts:
         scheduled_for = workout.scheduled_for
         if scheduled_for is not None and scheduled_for in by_day:

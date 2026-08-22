@@ -6,10 +6,11 @@ from sqlalchemy import select
 
 from app.auth import CurrentUser
 from app.database import SessionDep
-from app.models import Activity, Workout
+from app.models import Activity
 from app.onboarding import onboarding_state
 from app.repositories.health import latest_health_on_or_before
 from app.repositories.users import get_or_create_garmin_account
+from app.repositories.workouts import next_scheduled_workout
 from app.services.analytics import AthleteDataService
 from app.services.analytics.health_trends import preferred_readiness
 from app.services.analytics.training_load import calculate_weekly_load
@@ -48,12 +49,7 @@ def dashboard(request: Request, session: SessionDep, user: CurrentUser) -> Respo
     )
     today = date.today()
     latest_health = latest_health_on_or_before(session, user.id, today)
-    upcoming = session.scalar(
-        select(Workout)
-        .where(Workout.user_id == user.id, Workout.scheduled_for >= date.today())
-        .order_by(Workout.scheduled_for)
-        .limit(1)
-    )
+    upcoming = next_scheduled_workout(session, user.id, today)
     recovery = AthleteDataService(session, user.id).get_current_recovery_state()
     readiness = preferred_readiness(recovery)
     readiness_tone = (

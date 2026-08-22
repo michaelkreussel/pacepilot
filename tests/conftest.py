@@ -35,7 +35,9 @@ def session_factory() -> Generator[sessionmaker[Session]]:
     Base.metadata.create_all(test_engine)
     factory = sessionmaker(bind=test_engine, expire_on_commit=False)
     yield factory
-    Base.metadata.drop_all(test_engine)
+    with test_engine.connect() as connection:
+        connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
+        Base.metadata.drop_all(connection)
     test_engine.dispose()
 
 

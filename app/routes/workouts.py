@@ -10,7 +10,6 @@ from pydantic import ValidationError
 
 from app.auth import CurrentUser
 from app.database import SessionDep
-from app.models import Workout
 from app.onboarding import require_planning_access
 from app.services.garmin.client import (
     GarminUnavailableError,
@@ -23,11 +22,19 @@ from app.services.planning.workout_definition import (
     definition_to_json,
     parse_definition,
 )
+from app.services.planning.workout_revision import (
+    AcceptRevisionCommand,
+    RevisionIdentity,
+    ScheduleWorkoutCommand,
+    UnscheduleWorkoutCommand,
+)
 from app.services.planning.workout_service import (
+    WorkoutConflictError,
     WorkoutNotFoundError,
     WorkoutService,
     WorkoutTransitionError,
 )
+from app.services.planning.workout_views import WorkoutDetailView, workout_detail_view
 from app.web import context, templates
 
 router = APIRouter(prefix="/workouts", dependencies=[Depends(require_planning_access)])
@@ -52,14 +59,15 @@ class WorkoutFormError:
     definition: dict[str, object]
 
 
-def _form_data(workout: Workout | None = None) -> dict[str, str]:
+def _form_data(workout: WorkoutDetailView | None = None) -> dict[str, str]:
+    revision = workout.current if workout else None
     return {
-        "name": workout.name if workout else "",
-        "sport": workout.sport if workout else "running",
+        "name": revision.name if revision else "",
+        "sport": revision.sport if revision else "running",
         "scheduled_for": (
-            workout.scheduled_for.isoformat() if workout and workout.scheduled_for else ""
+            revision.suggested_for.isoformat() if revision and revision.suggested_for else ""
         ),
-        "description": workout.description or "" if workout else "",
+        "description": revision.description or "" if revision else "",
     }
 
 
@@ -152,9 +160,9 @@ def create_workout(request: Request, data: WorkoutFormDep, service: WorkoutServi
     return RedirectResponse(f"/workouts/{workout.id}", status_code=303)
 
 
-def _get_workout(service: WorkoutService, workout_id: int) -> Workout:
+def _get_workout(service: WorkoutService, workout_id: int) -> WorkoutDetailView:
     try:
-        return service.get(workout_id)
+        return workout_detail_view(service.session, service.get(workout_id))
     except WorkoutNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -165,9 +173,16 @@ def _raise_not_found(exc: WorkoutNotFoundError) -> Never:
 
 def _operation_error_redirect(
     workout_id: int,
-    exc: GarminUnavailableError | WorkoutValidationError | WorkoutTransitionError,
+    exc: GarminUnavailableError
+    | WorkoutValidationError
+    | WorkoutTransitionError
+    | WorkoutConflictError,
 ) -> RedirectResponse:
-    message = str(exc) if isinstance(exc, WorkoutTransitionError) else message_from_exception(exc)
+    message = (
+        str(exc)
+        if isinstance(exc, (WorkoutTransitionError, WorkoutConflictError))
+        else message_from_exception(exc)
+    )
     query = urlencode({"error": message})
     return RedirectResponse(f"/workouts/{workout_id}?{query}", status_code=303)
 
@@ -203,7 +218,7 @@ def edit_workout(workout_id: int, request: Request, service: WorkoutServiceDep) 
             today=date.today(),
             workout=workout,
             form_data=_form_data(workout),
-            initial_definition=workout.definition,
+            initial_definition=workout.current.definition,
             error=None,
         ),
     )
@@ -235,7 +250,7 @@ def update_workout(
 
     try:
         service.update(workout_id, data)
-    except (GarminUnavailableError, WorkoutValidationError) as exc:
+    except (GarminUnavailableError, WorkoutValidationError, WorkoutConflictError) as exc:
         return _operation_error_redirect(workout_id, exc)
     return RedirectResponse(f"/workouts/{workout.id}", status_code=303)
 
@@ -246,20 +261,117 @@ def delete_workout(workout_id: int, service: WorkoutServiceDep) -> RedirectRespo
         service.delete(workout_id)
     except WorkoutNotFoundError as exc:
         _raise_not_found(exc)
-    except (GarminUnavailableError, WorkoutValidationError) as exc:
+    except (GarminUnavailableError, WorkoutValidationError, WorkoutTransitionError) as exc:
         return _operation_error_redirect(workout_id, exc)
     return RedirectResponse("/plans", status_code=303)
 
 
 @router.post("/{workout_id}/confirm", response_class=RedirectResponse, status_code=303)
-def confirm_workout(workout_id: int, service: WorkoutServiceDep) -> RedirectResponse:
+async def confirm_workout(
+    workout_id: int,
+    request: Request,
+    service: WorkoutServiceDep,
+) -> Response:
+    _get_workout(service, workout_id)
+    form = await request.form()
     try:
-        service.confirm(workout_id)
+        revision_id = int(str(form["revision_id"]))
+        revision_number = int(str(form["revision_number"]))
+        content_hash = str(form["content_hash"])
+        lock_version = int(str(form["lock_version"]))
+        context_fingerprint = str(form["context_fingerprint"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="Ungültige Revisionsangaben") from exc
+    try:
+        service.accept(
+            workout_id,
+            AcceptRevisionCommand(
+                identity=RevisionIdentity(
+                    revision_id=revision_id,
+                    revision_number=revision_number,
+                    content_hash=content_hash,
+                    lock_version=lock_version,
+                ),
+                context_fingerprint=context_fingerprint,
+            ),
+        )
     except WorkoutNotFoundError as exc:
         _raise_not_found(exc)
-    except WorkoutValidationError as exc:
-        query = urlencode({"error": str(exc)})
-        return RedirectResponse(f"/workouts/{workout_id}?{query}", status_code=303)
+    except WorkoutConflictError as exc:
+        return templates.TemplateResponse(
+            request,
+            "workouts/detail.html",
+            context(
+                request,
+                active_page="plans",
+                workout=_get_workout(service, workout_id),
+                error=str(exc),
+            ),
+            status_code=409,
+        )
+    except (WorkoutValidationError, WorkoutTransitionError) as exc:
+        return _operation_error_redirect(workout_id, exc)
+    return RedirectResponse(f"/workouts/{workout_id}", status_code=303)
+
+
+@router.post("/{workout_id}/schedule", response_class=RedirectResponse, status_code=303)
+async def schedule_workout(
+    workout_id: int,
+    request: Request,
+    service: WorkoutServiceDep,
+) -> Response:
+    _get_workout(service, workout_id)
+    form = await request.form()
+    try:
+        revision_id = int(str(form["revision_id"]))
+        lock_version = int(str(form["lock_version"]))
+        scheduled_for_value = str(form["scheduled_for"])
+        if not scheduled_for_value:
+            raise ValueError
+        scheduled_for = date.fromisoformat(scheduled_for_value)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="Ungültige Revisionsangaben") from exc
+    try:
+        service.schedule(
+            workout_id,
+            ScheduleWorkoutCommand(
+                revision_id=revision_id,
+                scheduled_for=scheduled_for,
+                expected_lock_version=lock_version,
+            ),
+        )
+    except WorkoutNotFoundError as exc:
+        _raise_not_found(exc)
+    except (WorkoutValidationError, WorkoutTransitionError, WorkoutConflictError) as exc:
+        return _operation_error_redirect(workout_id, exc)
+    return RedirectResponse(f"/workouts/{workout_id}", status_code=303)
+
+
+@router.post("/{workout_id}/unschedule", response_class=RedirectResponse, status_code=303)
+async def unschedule_workout(
+    workout_id: int,
+    request: Request,
+    service: WorkoutServiceDep,
+) -> Response:
+    _get_workout(service, workout_id)
+    form = await request.form()
+    try:
+        revision_id = int(str(form["revision_id"]))
+        lock_version = int(str(form["lock_version"]))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="Ungültige Revisionsangaben") from exc
+    try:
+        service.unschedule(
+            workout_id,
+            UnscheduleWorkoutCommand(
+                revision_id=revision_id,
+                expected_lock_version=lock_version,
+            ),
+        )
+    except WorkoutNotFoundError as exc:
+        _raise_not_found(exc)
+    except (WorkoutValidationError, WorkoutTransitionError, WorkoutConflictError) as exc:
+        return _operation_error_redirect(workout_id, exc)
     return RedirectResponse(f"/workouts/{workout_id}", status_code=303)
 
 
@@ -269,7 +381,12 @@ def publish(workout_id: int, service: WorkoutServiceDep) -> RedirectResponse:
         service.publish(workout_id)
     except WorkoutNotFoundError as exc:
         _raise_not_found(exc)
-    except (GarminUnavailableError, WorkoutValidationError, WorkoutTransitionError) as exc:
+    except (
+        GarminUnavailableError,
+        WorkoutValidationError,
+        WorkoutTransitionError,
+        WorkoutConflictError,
+    ) as exc:
         return _operation_error_redirect(workout_id, exc)
     return RedirectResponse(f"/workouts/{workout_id}", status_code=303)
 
@@ -280,6 +397,11 @@ def push(workout_id: int, service: WorkoutServiceDep) -> RedirectResponse:
         service.push(workout_id)
     except WorkoutNotFoundError as exc:
         _raise_not_found(exc)
-    except (GarminUnavailableError, WorkoutValidationError, WorkoutTransitionError) as exc:
+    except (
+        GarminUnavailableError,
+        WorkoutValidationError,
+        WorkoutTransitionError,
+        WorkoutConflictError,
+    ) as exc:
         return _operation_error_redirect(workout_id, exc)
     return RedirectResponse(f"/workouts/{workout_id}", status_code=303)

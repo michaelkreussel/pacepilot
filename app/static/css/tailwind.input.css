@@ -185,10 +185,12 @@
 @layer base {
   html {
     background: var(--background);
+    overflow-x: clip;
   }
 
   body {
     min-width: 320px;
+    overflow-x: clip;
   }
 
   [x-cloak] {

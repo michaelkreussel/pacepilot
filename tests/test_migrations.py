@@ -1,9 +1,11 @@
 import json
 from pathlib import Path
 
+import pytest
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, inspect
+from sqlalchemy.exc import IntegrityError
 
 from app.migrations import upgrade_database
 
@@ -37,7 +39,12 @@ def test_initial_migration_matches_models(tmp_path: Path) -> None:
         "sync_events",
         "sync_runs",
         "users",
+        "workout_events",
+        "workout_garmin_bindings",
+        "workout_garmin_remote_identities",
+        "workout_revisions",
         "workout_steps",
+        "workout_validation_runs",
         "workouts",
     } == set(inspector.get_table_names())
 
@@ -54,7 +61,54 @@ def test_application_migration_uses_absolute_project_paths(tmp_path: Path, monke
     assert {column["name"] for column in inspector.get_columns("workouts")} >= {
         "definition",
         "definition_version",
+        "current_revision_id",
+        "accepted_revision_id",
+        "materialized_revision_id",
+        "approval_status",
+        "local_schedule_status",
+        "lock_version",
     }
+
+
+def test_workout_revision_migration_resumes_after_added_columns(tmp_path: Path) -> None:
+    database_path = tmp_path / "partial-workout-revision.db"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    config = Config("alembic.ini")
+    config.attributes["database_url"] = database_url
+    command.upgrade(config, "20260819_15")
+    engine = create_engine(database_url)
+    partial_columns = (
+        "source_type VARCHAR(30) DEFAULT 'manual' NOT NULL",
+        "approval_status VARCHAR(30) DEFAULT 'draft' NOT NULL",
+        "local_schedule_status VARCHAR(30) DEFAULT 'unscheduled' NOT NULL",
+        "current_revision_id INTEGER",
+        "accepted_revision_id INTEGER",
+        "materialized_revision_id INTEGER",
+        "accepted_at DATETIME",
+        "accepted_by_user_id INTEGER",
+        "expires_at DATETIME",
+        "lock_version INTEGER DEFAULT '0' NOT NULL",
+        "replaces_workout_id INTEGER",
+        "originating_conversation_id INTEGER",
+        "originating_user_message_id INTEGER",
+        "originating_assistant_message_id INTEGER",
+        "deleted_at DATETIME",
+    )
+    with engine.begin() as connection:
+        for column in partial_columns:
+            connection.exec_driver_sql(f"ALTER TABLE workouts ADD COLUMN {column}")
+
+    command.upgrade(config, "head")
+
+    inspector = inspect(engine)
+    with engine.connect() as connection:
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+        integrity = connection.exec_driver_sql("PRAGMA integrity_check").scalar_one()
+    assert revision == "20260822_16"
+    assert integrity == "ok"
+    assert "workout_revisions" in inspector.get_table_names()
 
 
 def test_reverted_athlete_profile_revision_upgrades_to_head(tmp_path: Path) -> None:
@@ -81,7 +135,7 @@ def test_reverted_athlete_profile_revision_upgrades_to_head(tmp_path: Path) -> N
         revision = connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
         ).scalar_one()
-    assert revision == "20260819_15"
+    assert revision == "20260822_16"
 
 
 def test_workout_rpe_migration_normalizes_garmin_scale(tmp_path: Path) -> None:
@@ -158,3 +212,186 @@ def test_workout_definition_migration_preserves_repeat_semantics(tmp_path: Path)
         "recovery",
     ]
     assert len({block["id"] for block in definition["blocks"]}) == 3
+
+
+def test_workout_revision_backfill_matrix(tmp_path: Path) -> None:
+    database_path = tmp_path / "workout-revisions.db"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    config = Config("alembic.ini")
+    config.attributes["database_url"] = database_url
+    command.upgrade(config, "20260819_15")
+
+    engine = create_engine(database_url)
+    definition = {
+        "blocks": [
+            {
+                "id": "step",
+                "kind": "step",
+                "step_type": "interval",
+                "end": {"type": "time", "seconds": 600},
+                "target": {"type": "none"},
+            }
+        ]
+    }
+    cases: list[tuple[int, str, bool, bool]] = []
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "INSERT INTO users (id, display_name, created_at) VALUES (1, 'Runner', '2026-08-22')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO garmin_accounts "
+            "(id, user_id, email, connected_at, last_sync_at, rate_limit_until, "
+            "sync_status, sync_error) VALUES "
+            "(1, 1, NULL, NULL, NULL, NULL, 'not_connected', NULL)"
+        )
+        workout_id = 1
+        for status in ("draft", "confirmed", "published", "pushed"):
+            for has_remote in (False, True):
+                for has_date in (False, True):
+                    cases.append((workout_id, status, has_remote, has_date))
+                    connection.exec_driver_sql(
+                        "INSERT INTO workouts "
+                        "(id, user_id, name, sport, scheduled_for, description, status, "
+                        "garmin_workout_id, definition_version, definition, created_at, "
+                        "updated_at) "
+                        "VALUES (?, 1, ?, 'running', ?, 'Description', ?, ?, 1, ?, "
+                        "'2026-08-20', '2026-08-20')",
+                        (
+                            workout_id,
+                            f"Workout {workout_id}",
+                            "2026-08-25" if has_date else None,
+                            status,
+                            f"remote-{workout_id}" if has_remote else None,
+                            json.dumps(definition),
+                        ),
+                    )
+                    workout_id += 1
+
+    command.upgrade(config, "head")
+
+    with engine.connect() as connection:
+        rows = {
+            row.id: row
+            for row in connection.exec_driver_sql(
+                "SELECT w.id, w.status, w.scheduled_for, w.approval_status, "
+                "w.local_schedule_status, w.current_revision_id, w.accepted_revision_id, "
+                "w.materialized_revision_id, r.revision_number, r.name, r.suggested_for, "
+                "r.definition, r.content_hash, b.content_status, b.calendar_status, "
+                "b.device_status, b.last_error_code, ri.garmin_workout_id "
+                "FROM workouts w JOIN workout_revisions r ON r.id = w.current_revision_id "
+                "JOIN workout_garmin_bindings b ON b.workout_id = w.id "
+                "LEFT JOIN workout_garmin_remote_identities ri "
+                "ON ri.id = b.active_remote_identity_id ORDER BY w.id"
+            )
+        }
+        event_count = connection.exec_driver_sql(
+            "SELECT count(*) FROM workout_events WHERE action = 'legacy_backfill'"
+        ).scalar_one()
+        revision_count = connection.exec_driver_sql(
+            "SELECT count(*) FROM workout_revisions"
+        ).scalar_one()
+
+    assert revision_count == event_count == len(cases)
+    with engine.begin() as connection, pytest.raises(IntegrityError, match="immutable"):
+        connection.exec_driver_sql("UPDATE workout_revisions SET name = 'Mutation' WHERE id = 1")
+    for workout_id, status, has_remote, has_date in cases:
+        row = rows[workout_id]
+        accepted = status != "draft"
+        assert row.revision_number == 1
+        assert row.name == f"Workout {workout_id}"
+        assert json.loads(row.definition) == definition
+        assert len(row.content_hash) == 64
+        assert row.current_revision_id == row.materialized_revision_id
+        assert (row.accepted_revision_id == row.current_revision_id) is accepted
+        assert row.approval_status == ("accepted" if accepted else "draft")
+        assert row.local_schedule_status == (
+            "scheduled" if accepted and has_date else "unscheduled"
+        )
+        assert row.scheduled_for == ("2026-08-25" if accepted and has_date else None)
+        assert row.suggested_for == ("2026-08-25" if has_date else None)
+        assert row.garmin_workout_id == (f"remote-{workout_id}" if has_remote else None)
+
+        if not has_remote and status in {"draft", "confirmed"}:
+            assert (row.content_status, row.calendar_status, row.device_status) == (
+                "not_requested",
+                "not_requested",
+                "not_requested",
+            )
+            assert row.last_error_code is None
+        elif has_remote and status in {"draft", "confirmed"}:
+            assert (row.content_status, row.calendar_status, row.device_status) == (
+                "unknown",
+                "unknown",
+                "unknown",
+            )
+            assert row.last_error_code == "legacy_remote_state_requires_review"
+        elif has_remote:
+            assert row.content_status == "synced"
+            assert row.calendar_status == ("unknown" if has_date else "not_requested")
+            assert row.device_status == (
+                "request_accepted" if status == "pushed" else "not_requested"
+            )
+        else:
+            assert (row.content_status, row.calendar_status, row.device_status) == (
+                "unknown",
+                "unknown",
+                "unknown",
+            )
+            assert row.last_error_code == "legacy_remote_state_requires_review"
+
+
+def test_workout_revision_constraints(tmp_path: Path) -> None:
+    database_path = tmp_path / "workout-revision-constraints.db"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    config = Config("alembic.ini")
+    config.attributes["database_url"] = database_url
+    command.upgrade(config, "20260819_15")
+    engine = create_engine(database_url)
+    definition = json.dumps(
+        {
+            "blocks": [
+                {
+                    "id": "step",
+                    "kind": "step",
+                    "step_type": "interval",
+                    "end": {"type": "time", "seconds": 60},
+                    "target": {"type": "none"},
+                }
+            ]
+        }
+    )
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "INSERT INTO users (id, display_name, created_at) VALUES "
+            "(1, 'One', '2026-08-22'), (2, 'Two', '2026-08-22')"
+        )
+        for workout_id, user_id in ((1, 1), (2, 2)):
+            connection.exec_driver_sql(
+                "INSERT INTO workouts "
+                "(id, user_id, name, sport, status, definition_version, definition, "
+                "created_at, updated_at) VALUES (?, ?, ?, 'running', 'draft', 1, ?, "
+                "'2026-08-22', '2026-08-22')",
+                (workout_id, user_id, f"Workout {workout_id}", definition),
+            )
+    command.upgrade(config, "head")
+
+    with engine.connect() as connection:
+        revisions = connection.exec_driver_sql(
+            "SELECT workout_id, id FROM workout_revisions ORDER BY workout_id"
+        ).all()
+    revision_one = revisions[0].id
+    revision_two = revisions[1].id
+
+    with pytest.raises(IntegrityError), engine.begin() as connection:
+        connection.exec_driver_sql(
+            "UPDATE workouts SET current_revision_id = ? WHERE id = 1", (revision_two,)
+        )
+
+    with pytest.raises(IntegrityError), engine.begin() as connection:
+        connection.exec_driver_sql(
+            "UPDATE workout_revisions SET parent_revision_id = ? WHERE id = ?",
+            (revision_two, revision_one),
+        )
+
+    with pytest.raises(IntegrityError), engine.begin() as connection:
+        connection.exec_driver_sql("UPDATE workouts SET replaces_workout_id = 2 WHERE id = 1")

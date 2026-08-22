@@ -4,7 +4,15 @@ from app.models.fitness import DailyFitness
 from app.models.health import DailyHealth, SleepStage
 from app.models.sync import DailyDataStatus, GarminSyncState, SyncEvent, SyncRun
 from app.models.user import GarminAccount, GarminDevice, OAuthIdentity, User
-from app.models.workout import Workout, WorkoutStep
+from app.models.workout import (
+    Workout,
+    WorkoutEvent,
+    WorkoutGarminBinding,
+    WorkoutGarminRemoteIdentity,
+    WorkoutRevision,
+    WorkoutStep,
+    WorkoutValidationRun,
+)
 
 __all__ = [
     "Activity",
@@ -26,5 +34,10 @@ __all__ = [
     "SyncRun",
     "User",
     "Workout",
+    "WorkoutEvent",
+    "WorkoutGarminBinding",
+    "WorkoutGarminRemoteIdentity",
+    "WorkoutRevision",
     "WorkoutStep",
+    "WorkoutValidationRun",
 ]

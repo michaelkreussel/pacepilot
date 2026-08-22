@@ -1,0 +1,14 @@
+{% macro render_blocks(blocks, nested=false) %}
+  <ol class="grid list-none gap-2 p-0 {{ 'ml-2 mt-3 border-l-2 border-border pl-3 sm:ml-3 sm:pl-4' if nested else 'mt-4' }}">
+  {% for block in blocks %}
+    {% if block.kind == 'repeat' %}
+      <li class="definition-repeat rounded-xl border border-primary/30 border-l-4 border-l-primary bg-primary-subtle p-3 sm:p-4">
+        <div class="flex items-center gap-3"><svg class="size-5 shrink-0 fill-none stroke-primary stroke-2" aria-hidden="true"><use href="/static/icons/workout.svg#repeat"></use></svg><div><strong class="text-sm font-semibold">{{ block.iterations }}× wiederholen</strong><p class="mt-0.5 text-xs text-muted-foreground">{{ block.children|length }} Schritte pro Runde</p></div></div>
+        {{ render_blocks(block.children, true) }}
+      </li>
+    {% else %}
+      <li class="definition-step {{ block.step_type }} grid grid-cols-[2rem_minmax(0,1fr)] items-center gap-3 rounded-lg border-y border-r border-l-[3px] border-y-border border-r-border bg-surface p-3"><span class="grid size-8 place-items-center rounded-lg bg-surface-muted text-xs font-semibold text-primary">{{ loop.index }}</span><div><strong class="text-sm font-semibold">{{ {'warmup':'Aufwärmen','interval':'Belastung','recovery':'Erholung','cooldown':'Auslaufen'}.get(block.step_type, block.step_type) }}</strong><p class="mt-0.5 text-xs leading-5 text-muted-foreground">{% if block.end.type == 'time' %}{{ block.end.seconds|precise_duration }}{% else %}{{ block.end.meters|round|int }} m{% endif %}{% if block.target.type == 'pace_range' %} · Pace {{ block.target.fastest_seconds_per_km|pace }} bis {{ block.target.slowest_seconds_per_km|pace }}{% elif block.target.type == 'heart_rate_range' %} · {{ block.target.lower_bpm }}–{{ block.target.upper_bpm }} bpm{% elif block.target.type == 'heart_rate_zone' %} · HF-Zone {{ block.target.zone }}{% endif %}</p></div></li>
+    {% endif %}
+  {% endfor %}
+  </ol>
+{% endmacro %}

@@ -11,20 +11,20 @@ default:
     @just --list
 
 # Open real Chrome with a dedicated automation profile and the CDP debugging port
-open-browser port="9222":
-    @& "{{session_script}}" -Action browser -Port {{port}}
+open-browser port="9222" app_url="http://127.0.0.1:8000/":
+    @& "{{session_script}}" -Action browser -Port {{port}} -AppUrl "{{app_url}}"
 
 # Wait until the Google sign-in completes and the PacePilot session cookie is set
-wait-login port="9222" timeout="600":
-    @& "{{session_script}}" -Action wait -Port {{port}} -TimeoutSeconds {{timeout}}
+wait-login port="9222" timeout="600" app_url="http://127.0.0.1:8000/":
+    @& "{{session_script}}" -Action wait -Port {{port}} -TimeoutSeconds {{timeout}} -AppUrl "{{app_url}}"
 
 # Save the signed-in browser auth state for agent-browser to reuse
 save-state port="9222":
     @& "{{session_script}}" -Action save -Port {{port}} -StateFile "{{auth_state}}"
 
 # One-shot: open Chrome, wait for sign-in, then save the auth state
-get-session port="9222":
-    @& "{{session_script}}" -Action get -Port {{port}} -StateFile "{{auth_state}}"
+get-session port="9222" app_url="http://127.0.0.1:8000/":
+    @& "{{session_script}}" -Action get -Port {{port}} -AppUrl "{{app_url}}" -StateFile "{{auth_state}}"
 
 # Report whether the automation browser is running and signed in
 check port="9222":

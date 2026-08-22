@@ -5,10 +5,16 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.models import GarminAccount, User, Workout
+from app.models import GarminAccount, User, Workout, WorkoutRevision
 from app.models.user import utcnow
 from app.services.planning.validator import WorkoutInput, WorkoutValidationError
 from app.services.planning.workout_definition import default_definition
+from app.services.planning.workout_revision import (
+    AcceptRevisionCommand,
+    RevisionIdentity,
+    ScheduleWorkoutCommand,
+    default_context_fingerprint,
+)
 from app.services.planning.workout_service import (
     WorkoutNotFoundError,
     WorkoutService,
@@ -23,6 +29,21 @@ def _input(name: str = "Easy Run") -> WorkoutInput:
         scheduled_for=date(2026, 8, 23),
         description="Locker",
         definition=default_definition(),
+    )
+
+
+def _accept_command(session: Session, workout: Workout) -> AcceptRevisionCommand:
+    assert workout.current_revision_id is not None
+    revision = session.get(WorkoutRevision, workout.current_revision_id)
+    assert revision is not None
+    return AcceptRevisionCommand(
+        identity=RevisionIdentity(
+            revision_id=revision.id,
+            revision_number=revision.revision_number,
+            content_hash=revision.content_hash,
+            lock_version=workout.lock_version,
+        ),
+        context_fingerprint=default_context_fingerprint(revision.content_hash),
     )
 
 
@@ -116,7 +137,16 @@ def test_service_owns_manual_lifecycle_and_garmin_orchestration(
 
         workout = service.create(_input())
         service.update(workout.id, _input("Updated Easy Run"))
-        service.confirm(workout.id)
+        service.confirm(workout.id, _accept_command(session, workout))
+        assert workout.accepted_revision_id is not None
+        service.schedule(
+            workout.id,
+            ScheduleWorkoutCommand(
+                revision_id=workout.accepted_revision_id,
+                scheduled_for=date(2026, 8, 23),
+                expected_lock_version=workout.lock_version,
+            ),
+        )
         service.publish(workout.id)
         service.push(workout.id)
 
@@ -131,7 +161,9 @@ def test_service_owns_manual_lifecycle_and_garmin_orchestration(
 
         assert garmin.unscheduled == ["schedule-1"]
         assert garmin.deleted == ["remote-1"]
-        assert session.get(Workout, workout.id) is None
+        deleted_workout = session.get(Workout, workout.id)
+        assert deleted_workout is not None
+        assert deleted_workout.deleted_at is not None
 
 
 def test_service_transition_errors_have_stable_codes(

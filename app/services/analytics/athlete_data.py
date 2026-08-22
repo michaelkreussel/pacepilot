@@ -199,7 +199,7 @@ class AthleteDataService:
         for workout in workouts_between(self.session, self.user_id, self.as_of, end):
             if workout.scheduled_for is None:
                 continue
-            metrics = workout_metrics(workout.definition_model)
+            metrics = workout_metrics(workout.definition)
             upcoming.append(
                 UpcomingWorkout(
                     workout_id=workout.id,

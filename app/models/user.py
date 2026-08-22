@@ -37,7 +37,10 @@ class User(Base):
         back_populates="user", cascade="all, delete-orphan", passive_deletes=True
     )
     workouts: Mapped[list["Workout"]] = relationship(
-        back_populates="user", cascade="all, delete-orphan", passive_deletes=True
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        foreign_keys="Workout.user_id",
     )
     coach_conversations: Mapped[list["CoachConversation"]] = relationship(
         back_populates="user", cascade="all, delete-orphan", passive_deletes=True

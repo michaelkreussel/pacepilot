@@ -48,18 +48,18 @@
 </div>
 
 {% if view == 'month' %}
-<section class="overflow-x-auto pb-2" aria-label="Monatskalender {{ month_name }} {{ month_start.year }}">
+<section class="min-w-0 max-w-full overflow-x-auto pb-2" aria-label="Monatskalender {{ month_name }} {{ month_start.year }}">
   {% set day_names = ['Montag', 'Dienstag', 'Mittwoch', 'Donnerstag', 'Freitag', 'Samstag', 'Sonntag'] %}
   <div class="grid min-w-[64rem] grid-cols-[3.25rem_repeat(7,minmax(8rem,1fr))] gap-px overflow-hidden rounded-xl border border-border bg-border">
     <div class="grid min-h-10 place-items-center bg-surface-muted text-[0.625rem] font-semibold uppercase tracking-wider text-muted-foreground">KW</div>
     {% for day_name in day_names %}<div class="grid min-h-10 place-items-center bg-surface-muted text-[0.625rem] font-semibold uppercase tracking-wider text-muted-foreground">{{ day_name }}</div>{% endfor %}
     {% for week_number, days in month_weeks %}
-      <div class="flex min-h-36 flex-col items-center gap-0.5 bg-surface-muted pt-3 text-muted-foreground" aria-label="Kalenderwoche {{ week_number }}"><span class="text-[0.625rem] font-semibold uppercase tracking-wider">KW</span><strong class="font-display text-base font-semibold text-primary">{{ week_number }}</strong></div>
+      <div class="flex min-h-36 flex-col items-center gap-0.5 bg-surface-muted pt-3 text-muted-foreground"><span class="text-[0.625rem] font-semibold uppercase tracking-wider" aria-hidden="true">KW</span><span class="sr-only">Kalenderwoche</span><strong class="font-display text-base font-semibold text-primary">{{ week_number }}</strong></div>
       {% for day, workouts in days.items() %}
         <article class="min-h-36 min-w-0 p-2.5 {{ 'outside-month bg-surface-muted opacity-60' if day.month != month_start.month or day.year != month_start.year else 'bg-surface' }} {{ 'today ring-2 ring-inset ring-primary' if day == today else '' }}">
           <div class="mb-2 flex items-center justify-end"><span class="sr-only">{{ day_names[loop.index0] }}</span><strong class="grid size-7 place-items-center rounded-full font-display text-xs font-semibold {{ 'bg-primary text-primary-foreground' if day == today else 'text-foreground' }}">{{ day.strftime('%d') }}</strong></div>
           <div class="grid gap-1.5">
-            {% for workout in workouts %}<a class="calendar-workout {{ workout.sport }} block min-w-0 rounded-lg p-2.5 transition-opacity hover:opacity-80" href="/workouts/{{ workout.id }}"><small class="block text-[0.625rem] font-semibold uppercase tracking-wide opacity-75">{{ workout.status }}</small><strong class="mt-0.5 block truncate text-xs font-semibold">{{ workout.name }}</strong><span class="mt-1 block text-[0.625rem] opacity-75">{{ workout.step_count }} Schritte</span></a>{% endfor %}
+            {% for workout in workouts %}<a class="calendar-workout {{ workout.sport }} block min-w-0 rounded-lg p-2.5 transition-opacity hover:opacity-80" href="/workouts/{{ workout.id }}"><small class="block text-[0.625rem] font-semibold uppercase tracking-wide opacity-75">Angenommen · R{{ workout.revision_number }}</small><strong class="mt-0.5 block truncate text-xs font-semibold">{{ workout.name }}</strong><span class="mt-1 block text-[0.625rem] opacity-75">{{ workout.step_count }} Schritte · {{ workout.source_label }}{% if workout.has_unaccepted_changes %} · Neue Revision offen{% endif %}</span></a>{% endfor %}
           </div>
         </article>
       {% endfor %}
@@ -67,13 +67,13 @@
   </div>
 </section>
 {% else %}
-<div class="overflow-x-auto pb-2">
+<div class="min-w-0 max-w-full overflow-x-auto pb-2">
   <section class="grid min-w-[64rem] grid-cols-7 gap-3 xl:min-w-0">
   {% set day_names = ['Montag', 'Dienstag', 'Mittwoch', 'Donnerstag', 'Freitag', 'Samstag', 'Sonntag'] %}
   {% for day, workouts in by_day.items() %}
     <article class="min-h-48 rounded-xl border bg-surface p-3 {{ 'today border-primary' if day == today else 'border-border' }}">
       <div class="mb-3 flex items-center justify-between border-b border-border pb-2"><span class="text-[0.625rem] font-semibold uppercase tracking-wider text-muted-foreground">{{ day_names[loop.index0] }}</span><strong class="grid size-7 place-items-center rounded-full font-display text-xs font-semibold {{ 'bg-primary text-primary-foreground' if day == today else 'bg-surface-muted text-foreground' }}">{{ day.strftime('%d') }}</strong></div>
-      {% if workouts %}<div class="grid gap-2">{% for workout in workouts %}<a class="calendar-workout {{ workout.sport }} block min-w-0 rounded-lg p-2.5 transition-opacity hover:opacity-80" href="/workouts/{{ workout.id }}"><small class="block text-[0.625rem] font-semibold uppercase tracking-wide opacity-75">{{ workout.status }}</small><strong class="mt-0.5 block truncate text-sm font-semibold">{{ workout.name }}</strong><span class="mt-1 block text-xs opacity-75">{{ workout.step_count }} Schritte</span></a>{% endfor %}</div>
+      {% if workouts %}<div class="grid gap-2">{% for workout in workouts %}<a class="calendar-workout {{ workout.sport }} block min-w-0 rounded-lg p-2.5 transition-opacity hover:opacity-80" href="/workouts/{{ workout.id }}"><small class="block text-[0.625rem] font-semibold uppercase tracking-wide opacity-75">Angenommen · Revision {{ workout.revision_number }}</small><strong class="mt-0.5 block truncate text-sm font-semibold">{{ workout.name }}</strong><span class="mt-1 block text-xs opacity-75">{{ workout.step_count }} Schritte · {{ workout.source_label }}{% if workout.has_unaccepted_changes %} · Neue Revision offen{% endif %}</span></a>{% endfor %}</div>
       {% else %}<div class="grid min-h-28 place-items-center rounded-lg border border-dashed border-border bg-surface-muted text-xs text-muted-foreground">Freier Tag</div>{% endif %}
     </article>
   {% endfor %}

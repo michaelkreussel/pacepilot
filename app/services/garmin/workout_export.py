@@ -1,8 +1,7 @@
 from collections.abc import Callable
 from datetime import date
-from typing import Any
+from typing import Any, Protocol
 
-from app.models import Workout
 from app.services.garmin.client import GarminUnavailableError
 from app.services.planning.validator import WorkoutValidationError
 from app.services.planning.workout_definition import (
@@ -25,7 +24,29 @@ SPORT_TYPES = {
 }
 
 
-def compile_workout(workout: Workout) -> dict[str, Any]:
+class WorkoutContent(Protocol):
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def sport(self) -> str: ...
+
+    @property
+    def description(self) -> str | None: ...
+
+    @property
+    def definition_model(self) -> Any: ...
+
+
+class WorkoutExecution(WorkoutContent, Protocol):
+    @property
+    def scheduled_for(self) -> date | None: ...
+
+    @property
+    def garmin_workout_id(self) -> str | None: ...
+
+
+def compile_workout(workout: WorkoutContent) -> dict[str, Any]:
     from garminconnect.workout import (
         ConditionType,
         CyclingWorkout,
@@ -180,7 +201,7 @@ def _garmin_call[T](message: str, call: Callable[..., T], *args: Any) -> T:
         raise GarminUnavailableError(message) from exc
 
 
-def upload_workout(client: Any, workout: Workout) -> str:
+def upload_workout(client: Any, workout: WorkoutContent) -> str:
     response = _garmin_call(
         "Das Workout konnte nicht bei Garmin erstellt werden.",
         client.upload_workout,
@@ -194,12 +215,18 @@ def upload_workout(client: Any, workout: Workout) -> str:
     return workout_id
 
 
-def schedule_published_workout(client: Any, workout: Workout) -> None:
+def schedule_published_workout(
+    client: Any,
+    workout: WorkoutExecution,
+    previous_date: date | None = None,
+) -> None:
     if not workout.garmin_workout_id:
         raise WorkoutValidationError(
             "Das Workout muss zuerst veröffentlicht werden.",
             code="garmin.remote_id_required",
         )
+    if previous_date != workout.scheduled_for:
+        _unschedule_workout(client, workout.garmin_workout_id, previous_date)
     if workout.scheduled_for is not None and not _scheduled_workout_ids(
         client, workout.garmin_workout_id, workout.scheduled_for
     ):
@@ -211,7 +238,7 @@ def schedule_published_workout(client: Any, workout: Workout) -> None:
         )
 
 
-def push_workout(client: Any, workout: Workout) -> None:
+def push_workout(client: Any, workout: WorkoutExecution) -> None:
     if not workout.garmin_workout_id:
         raise WorkoutValidationError(
             "Das Workout muss zuerst veröffentlicht werden.",
@@ -263,7 +290,9 @@ def _unschedule_workout(client: Any, workout_id: str, scheduled_for: date | None
         )
 
 
-def update_published_workout(client: Any, workout: Workout, previous_date: date | None) -> None:
+def update_published_workout(
+    client: Any, workout: WorkoutExecution, previous_date: date | None
+) -> None:
     if not workout.garmin_workout_id:
         raise WorkoutValidationError(
             "Das Workout muss zuerst veröffentlicht werden.",
@@ -293,10 +322,26 @@ def update_published_workout(client: Any, workout: Workout, previous_date: date 
     )
 
 
-def delete_published_workout(client: Any, workout: Workout) -> None:
+def update_workout_content(client: Any, workout: WorkoutExecution) -> None:
+    if not workout.garmin_workout_id:
+        raise WorkoutValidationError(
+            "Das Workout muss zuerst veröffentlicht werden.",
+            code="garmin.remote_id_required",
+        )
+    _garmin_call(
+        "Das Workout konnte bei Garmin nicht aktualisiert werden.",
+        client.update_workout,
+        workout.garmin_workout_id,
+        compile_workout(workout),
+    )
+
+
+def delete_published_workout(
+    client: Any, workout: WorkoutExecution, remote_scheduled_for: date | None
+) -> None:
     if not workout.garmin_workout_id:
         return
-    _unschedule_workout(client, workout.garmin_workout_id, workout.scheduled_for)
+    _unschedule_workout(client, workout.garmin_workout_id, remote_scheduled_for)
     _garmin_call(
         "Das Workout konnte bei Garmin nicht gelöscht werden.",
         client.delete_workout,
