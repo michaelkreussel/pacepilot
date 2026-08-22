@@ -20,17 +20,25 @@ class WorkoutInput:
 
 
 class WorkoutValidationError(ValueError):
-    pass
+    def __init__(self, message: str, *, code: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 def validate_workout(workout: WorkoutInput) -> None:
     if not workout.name.strip():
-        raise WorkoutValidationError("Bitte einen Namen angeben.")
+        raise WorkoutValidationError("Bitte einen Namen angeben.", code="workout.name_required")
     if len(workout.name) > 200:
-        raise WorkoutValidationError("Der Name darf höchstens 200 Zeichen lang sein.")
+        raise WorkoutValidationError(
+            "Der Name darf höchstens 200 Zeichen lang sein.",
+            code="workout.name_too_long",
+        )
     if workout.sport not in SPORTS:
-        raise WorkoutValidationError("Diese Sportart wird noch nicht unterstützt.")
+        raise WorkoutValidationError(
+            "Diese Sportart wird noch nicht unterstützt.",
+            code="workout.sport_unsupported",
+        )
     try:
         validate_definition(workout.definition, workout.sport)
     except DefinitionValidationError as exc:
-        raise WorkoutValidationError(str(exc)) from exc
+        raise WorkoutValidationError(str(exc), code=exc.code) from exc

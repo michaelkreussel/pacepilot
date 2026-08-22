@@ -1,40 +1,32 @@
 import json
-from collections.abc import Iterator
-from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date
-from typing import Annotated
+from typing import Annotated, Never
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from pydantic import ValidationError
-from sqlalchemy.orm import Session
 
 from app.auth import CurrentUser
 from app.database import SessionDep
-from app.models import User, Workout
+from app.models import Workout
 from app.onboarding import require_planning_access
-from app.repositories.users import get_or_create_garmin_account
-from app.repositories.workouts import find_workout
 from app.services.garmin.client import (
     GarminUnavailableError,
     connect_garmin_account,
     message_from_exception,
-)
-from app.services.garmin.locks import GarminAccountBusyError, garmin_account_slot
-from app.services.garmin.workout_export import (
-    delete_published_workout,
-    push_workout,
-    schedule_published_workout,
-    update_published_workout,
-    upload_workout,
 )
 from app.services.planning.validator import WorkoutInput, WorkoutValidationError, validate_workout
 from app.services.planning.workout_definition import (
     default_definition,
     definition_to_json,
     parse_definition,
+)
+from app.services.planning.workout_service import (
+    WorkoutNotFoundError,
+    WorkoutService,
+    WorkoutTransitionError,
 )
 from app.web import context, templates
 
@@ -47,11 +39,14 @@ def _parse_optional_date(value: str) -> date | None:
     try:
         return date.fromisoformat(value)
     except ValueError as exc:
-        raise WorkoutValidationError("Das Trainingsdatum ist ungültig.") from exc
+        raise WorkoutValidationError(
+            "Das Trainingsdatum ist ungültig.", code="workout.date_invalid"
+        ) from exc
 
 
 @dataclass(frozen=True)
 class WorkoutFormError:
+    code: str
     message: str
     form_data: dict[str, str]
     definition: dict[str, object]
@@ -90,15 +85,33 @@ async def _parse_workout_result(request: Request) -> WorkoutInput | WorkoutFormE
         validate_workout(workout)
         return workout
     except json.JSONDecodeError:
-        return WorkoutFormError("Die Workout-Struktur ist ungültig.", form_data, fallback)
+        return WorkoutFormError(
+            "definition.json_invalid",
+            "Die Workout-Struktur ist ungültig.",
+            form_data,
+            fallback,
+        )
     except ValidationError:
-        return WorkoutFormError("Die Workout-Struktur ist unvollständig.", form_data, fallback)
+        return WorkoutFormError(
+            "definition.schema_invalid",
+            "Die Workout-Struktur ist unvollständig.",
+            form_data,
+            fallback,
+        )
     except WorkoutValidationError as exc:
         definition_data = definition_to_json(definition) if "definition" in locals() else fallback
-        return WorkoutFormError(str(exc), form_data, definition_data)
+        return WorkoutFormError(exc.code, str(exc), form_data, definition_data)
 
 
 WorkoutFormDep = Annotated[WorkoutInput | WorkoutFormError, Depends(_parse_workout_result)]
+
+
+def _workout_service(session: SessionDep, user: CurrentUser) -> WorkoutService:
+    # Passing the connector keeps the route test seam while orchestration remains in the service.
+    return WorkoutService(session, user, connect_garmin=connect_garmin_account)
+
+
+WorkoutServiceDep = Annotated[WorkoutService, Depends(_workout_service)]
 
 
 @router.get("/new", response_class=HTMLResponse)
@@ -119,9 +132,7 @@ def new_workout(request: Request, _: CurrentUser) -> HTMLResponse:
 
 
 @router.post("", response_class=HTMLResponse)
-def create_workout(
-    request: Request, data: WorkoutFormDep, session: SessionDep, user: CurrentUser
-) -> Response:
+def create_workout(request: Request, data: WorkoutFormDep, service: WorkoutServiceDep) -> Response:
     if isinstance(data, WorkoutFormError):
         return templates.TemplateResponse(
             request,
@@ -137,60 +148,35 @@ def create_workout(
             ),
             status_code=422,
         )
-    workout = Workout(
-        user_id=user.id,
-        name=data.name,
-        sport=data.sport,
-        scheduled_for=data.scheduled_for,
-        description=data.description or None,
-        status="draft",
-        definition_version=1,
-        definition=definition_to_json(data.definition),
-    )
-    session.add(workout)
-    session.commit()
+    workout = service.create(data)
     return RedirectResponse(f"/workouts/{workout.id}", status_code=303)
 
 
-def _get_workout(session: Session, user_id: int, workout_id: int) -> Workout:
-    workout = find_workout(session, user_id, workout_id)
-    if workout is None:
-        raise HTTPException(status_code=404, detail="Workout nicht gefunden")
-    return workout
-
-
-def _validate_persisted_workout(workout: Workout) -> None:
-    validate_workout(
-        WorkoutInput(
-            name=workout.name,
-            sport=workout.sport,
-            scheduled_for=workout.scheduled_for,
-            description=workout.description or "",
-            definition=workout.definition_model,
-        )
-    )
-
-
-@contextmanager
-def _garmin_client(session: Session, user: User) -> Iterator[object]:
-    account = get_or_create_garmin_account(session, user)
-    if account.connected_at is None:
-        raise GarminUnavailableError("Garmin ist noch nicht verbunden.")
+def _get_workout(service: WorkoutService, workout_id: int) -> Workout:
     try:
-        with garmin_account_slot(account.id):
-            yield connect_garmin_account(session, account)
-    except GarminAccountBusyError as exc:
-        raise GarminUnavailableError(
-            "Für dieses Garmin-Konto läuft gerade eine andere Operation."
-        ) from exc
+        return service.get(workout_id)
+    except WorkoutNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+def _raise_not_found(exc: WorkoutNotFoundError) -> Never:
+    raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+def _operation_error_redirect(
+    workout_id: int,
+    exc: GarminUnavailableError | WorkoutValidationError | WorkoutTransitionError,
+) -> RedirectResponse:
+    message = str(exc) if isinstance(exc, WorkoutTransitionError) else message_from_exception(exc)
+    query = urlencode({"error": message})
+    return RedirectResponse(f"/workouts/{workout_id}?{query}", status_code=303)
 
 
 @router.get("/{workout_id}", response_class=HTMLResponse)
 def workout_detail(
     workout_id: int,
     request: Request,
-    session: SessionDep,
-    user: CurrentUser,
+    service: WorkoutServiceDep,
     error: str | None = None,
 ) -> HTMLResponse:
     return templates.TemplateResponse(
@@ -199,17 +185,15 @@ def workout_detail(
         context(
             request,
             active_page="plans",
-            workout=_get_workout(session, user.id, workout_id),
+            workout=_get_workout(service, workout_id),
             error=error,
         ),
     )
 
 
 @router.get("/{workout_id}/edit", response_class=HTMLResponse)
-def edit_workout(
-    workout_id: int, request: Request, session: SessionDep, user: CurrentUser
-) -> HTMLResponse:
-    workout = _get_workout(session, user.id, workout_id)
+def edit_workout(workout_id: int, request: Request, service: WorkoutServiceDep) -> HTMLResponse:
+    workout = _get_workout(service, workout_id)
     return templates.TemplateResponse(
         request,
         "workouts/form.html",
@@ -230,10 +214,9 @@ def update_workout(
     workout_id: int,
     request: Request,
     data: WorkoutFormDep,
-    session: SessionDep,
-    user: CurrentUser,
+    service: WorkoutServiceDep,
 ) -> Response:
-    workout = _get_workout(session, user.id, workout_id)
+    workout = _get_workout(service, workout_id)
     if isinstance(data, WorkoutFormError):
         return templates.TemplateResponse(
             request,
@@ -250,95 +233,53 @@ def update_workout(
             status_code=422,
         )
 
-    previous_date = workout.scheduled_for
-    workout.name = data.name
-    workout.sport = data.sport
-    workout.scheduled_for = data.scheduled_for
-    workout.description = data.description or None
-    workout.definition_version = 1
-    workout.definition = definition_to_json(data.definition)
     try:
-        if workout.garmin_workout_id:
-            with _garmin_client(session, user) as client:
-                update_published_workout(client, workout, previous_date)
-            workout.status = "pushed"
-        session.commit()
+        service.update(workout_id, data)
     except (GarminUnavailableError, WorkoutValidationError) as exc:
-        session.rollback()
-        query = urlencode({"error": message_from_exception(exc)})
-        return RedirectResponse(f"/workouts/{workout.id}?{query}", status_code=303)
+        return _operation_error_redirect(workout_id, exc)
     return RedirectResponse(f"/workouts/{workout.id}", status_code=303)
 
 
 @router.post("/{workout_id}/delete", response_class=RedirectResponse, status_code=303)
-def delete_workout(workout_id: int, session: SessionDep, user: CurrentUser) -> RedirectResponse:
-    workout = _get_workout(session, user.id, workout_id)
+def delete_workout(workout_id: int, service: WorkoutServiceDep) -> RedirectResponse:
     try:
-        if workout.garmin_workout_id:
-            with _garmin_client(session, user) as client:
-                delete_published_workout(client, workout)
-        session.delete(workout)
-        session.commit()
+        service.delete(workout_id)
+    except WorkoutNotFoundError as exc:
+        _raise_not_found(exc)
     except (GarminUnavailableError, WorkoutValidationError) as exc:
-        session.rollback()
-        query = urlencode({"error": message_from_exception(exc)})
-        return RedirectResponse(f"/workouts/{workout.id}?{query}", status_code=303)
+        return _operation_error_redirect(workout_id, exc)
     return RedirectResponse("/plans", status_code=303)
 
 
 @router.post("/{workout_id}/confirm", response_class=RedirectResponse, status_code=303)
-def confirm_workout(workout_id: int, session: SessionDep, user: CurrentUser) -> RedirectResponse:
-    workout = _get_workout(session, user.id, workout_id)
-    if workout.status == "draft":
-        try:
-            _validate_persisted_workout(workout)
-            workout.status = "confirmed"
-            session.commit()
-        except WorkoutValidationError as exc:
-            query = urlencode({"error": str(exc)})
-            return RedirectResponse(f"/workouts/{workout.id}?{query}", status_code=303)
-    return RedirectResponse(f"/workouts/{workout.id}", status_code=303)
+def confirm_workout(workout_id: int, service: WorkoutServiceDep) -> RedirectResponse:
+    try:
+        service.confirm(workout_id)
+    except WorkoutNotFoundError as exc:
+        _raise_not_found(exc)
+    except WorkoutValidationError as exc:
+        query = urlencode({"error": str(exc)})
+        return RedirectResponse(f"/workouts/{workout_id}?{query}", status_code=303)
+    return RedirectResponse(f"/workouts/{workout_id}", status_code=303)
 
 
 @router.post("/{workout_id}/publish", response_class=RedirectResponse, status_code=303)
-def publish(workout_id: int, session: SessionDep, user: CurrentUser) -> RedirectResponse:
-    workout = _get_workout(session, user.id, workout_id)
-    if workout.status not in {"confirmed", "published", "pushed"}:
-        error = "Bitte den Entwurf vor der Übertragung bestätigen."
-        return RedirectResponse(
-            f"/workouts/{workout.id}?{urlencode({'error': error})}", status_code=303
-        )
+def publish(workout_id: int, service: WorkoutServiceDep) -> RedirectResponse:
     try:
-        with _garmin_client(session, user) as client:
-            if not workout.garmin_workout_id:
-                workout.garmin_workout_id = upload_workout(client, workout)
-                workout.status = "published"
-                session.commit()
-            schedule_published_workout(client, workout)
-            workout.status = "published"
-            session.commit()
-    except (GarminUnavailableError, WorkoutValidationError) as exc:
-        session.rollback()
-        query = urlencode({"error": message_from_exception(exc)})
-        return RedirectResponse(f"/workouts/{workout.id}?{query}", status_code=303)
-    return RedirectResponse(f"/workouts/{workout.id}", status_code=303)
+        service.publish(workout_id)
+    except WorkoutNotFoundError as exc:
+        _raise_not_found(exc)
+    except (GarminUnavailableError, WorkoutValidationError, WorkoutTransitionError) as exc:
+        return _operation_error_redirect(workout_id, exc)
+    return RedirectResponse(f"/workouts/{workout_id}", status_code=303)
 
 
 @router.post("/{workout_id}/push", response_class=RedirectResponse, status_code=303)
-def push(workout_id: int, session: SessionDep, user: CurrentUser) -> RedirectResponse:
-    workout = _get_workout(session, user.id, workout_id)
-    if workout.status not in {"published", "pushed"}:
-        error = "Das Workout muss vor der Übertragung veröffentlicht werden."
-        return RedirectResponse(
-            f"/workouts/{workout.id}?{urlencode({'error': error})}", status_code=303
-        )
+def push(workout_id: int, service: WorkoutServiceDep) -> RedirectResponse:
     try:
-        with _garmin_client(session, user) as client:
-            push_workout(client, workout)
-        workout.status = "pushed"
-        session.commit()
-    except (GarminUnavailableError, WorkoutValidationError) as exc:
-        session.rollback()
-        query = urlencode({"error": message_from_exception(exc)})
-        return RedirectResponse(f"/workouts/{workout.id}?{query}", status_code=303)
-    return RedirectResponse(f"/workouts/{workout.id}", status_code=303)
+        service.push(workout_id)
+    except WorkoutNotFoundError as exc:
+        _raise_not_found(exc)
+    except (GarminUnavailableError, WorkoutValidationError, WorkoutTransitionError) as exc:
+        return _operation_error_redirect(workout_id, exc)
+    return RedirectResponse(f"/workouts/{workout_id}", status_code=303)

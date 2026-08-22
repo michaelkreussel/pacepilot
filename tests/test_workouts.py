@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.models import Workout
-from app.services.garmin.workout_export import _create_model
+from app.services.garmin.workout_export import compile_workout
 from app.services.planning.validator import WorkoutInput, WorkoutValidationError, validate_workout
 from app.services.planning.workout_definition import (
     DistanceEnd,
@@ -118,6 +118,39 @@ def test_validator_rejects_reversed_pace_target() -> None:
         validate_workout(_input(definition))
 
 
+def test_validation_errors_have_stable_codes() -> None:
+    with pytest.raises(WorkoutValidationError) as name_error:
+        validate_workout(
+            WorkoutInput(
+                name="",
+                sport="running",
+                scheduled_for=None,
+                description="",
+                definition=WorkoutDefinition(blocks=[_step("step")]),
+            )
+        )
+
+    definition = WorkoutDefinition(
+        blocks=[
+            _step(
+                "pace",
+                target=PaceRangeTarget(
+                    type="pace_range",
+                    fastest_seconds_per_km=300,
+                    slowest_seconds_per_km=280,
+                ),
+            )
+        ]
+    )
+    with pytest.raises(WorkoutValidationError) as definition_error:
+        validate_workout(_input(definition))
+
+    assert name_error.value.code == "workout.name_required"
+    assert str(name_error.value) == "Bitte einen Namen angeben."
+    assert definition_error.value.code == "definition.pace_order_invalid"
+    assert "schnelle Pace-Grenze" in str(definition_error.value)
+
+
 def test_metrics_apply_repeat_iterations() -> None:
     definition = WorkoutDefinition(
         blocks=[
@@ -153,7 +186,7 @@ def test_garmin_model_expands_single_child_repeat() -> None:
         ]
     )
 
-    payload = _create_model(_workout(definition, "3 x 5 minutes")).to_dict()
+    payload = compile_workout(_workout(definition, "3 x 5 minutes"))
 
     assert len(payload["workoutSegments"][0]["workoutSteps"]) == 3
     assert payload["estimatedDurationInSecs"] == 900
@@ -191,7 +224,7 @@ def test_garmin_model_builds_heterogeneous_repeat_with_hr_target() -> None:
         ]
     )
 
-    payload = _create_model(_workout(definition, "8 x 400 m")).to_dict()
+    payload = compile_workout(_workout(definition, "8 x 400 m"))
     steps = payload["workoutSegments"][0]["workoutSteps"]
 
     assert len(steps) == 3
@@ -453,7 +486,7 @@ def test_garmin_v1_golden_payload_for_each_supported_sport(
     workout = _workout(definition, name="Golden", sport=sport)
     workout.description = "Description"
 
-    payload = _create_model(workout).to_dict()
+    payload = compile_workout(workout)
 
     assert payload == {
         "workoutName": "Golden",
@@ -507,7 +540,7 @@ def test_garmin_v1_compiles_heart_rate_zone_target() -> None:
         ]
     )
 
-    step = _create_model(_workout(definition)).to_dict()["workoutSegments"][0]["workoutSteps"][0]
+    step = compile_workout(_workout(definition))["workoutSegments"][0]["workoutSteps"][0]
 
     assert step["targetType"] == {
         "workoutTargetTypeId": 4,

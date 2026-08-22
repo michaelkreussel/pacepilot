@@ -90,7 +90,9 @@ class WorkoutDefinition(BaseModel):
 
 
 class DefinitionValidationError(ValueError):
-    pass
+    def __init__(self, message: str, *, code: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass(frozen=True)
@@ -137,56 +139,75 @@ def parse_definition(value: object) -> WorkoutDefinition:
 
 def validate_definition(definition: WorkoutDefinition, sport: str) -> None:
     if not definition.blocks:
-        raise DefinitionValidationError("Mindestens ein Trainingsschritt ist erforderlich.")
+        raise DefinitionValidationError(
+            "Mindestens ein Trainingsschritt ist erforderlich.",
+            code="definition.blocks_required",
+        )
 
     seen_ids: set[str] = set()
 
     def validate_blocks(blocks: list[WorkoutBlock], depth: int) -> None:
         for block in blocks:
             if not block.id or block.id in seen_ids:
-                raise DefinitionValidationError("Jeder Trainingsblock braucht eine eindeutige ID.")
+                raise DefinitionValidationError(
+                    "Jeder Trainingsblock braucht eine eindeutige ID.",
+                    code="definition.block_id_invalid",
+                )
             seen_ids.add(block.id)
             if isinstance(block, RepeatBlock):
                 if depth >= 1:
                     raise DefinitionValidationError(
-                        "Verschachtelte Wiederholungen werden noch nicht unterstützt."
+                        "Verschachtelte Wiederholungen werden noch nicht unterstützt.",
+                        code="definition.nested_repeat_unsupported",
                     )
                 if not 2 <= block.iterations <= 50:
                     raise DefinitionValidationError(
-                        "Wiederholungen müssen zwischen 2 und 50 liegen."
+                        "Wiederholungen müssen zwischen 2 und 50 liegen.",
+                        code="definition.repeat_iterations_invalid",
                     )
                 if not block.children:
                     raise DefinitionValidationError(
-                        "Eine Wiederholung muss mindestens einen Schritt enthalten."
+                        "Eine Wiederholung muss mindestens einen Schritt enthalten.",
+                        code="definition.repeat_children_required",
                     )
                 validate_blocks(block.children, depth + 1)
                 continue
 
             value = block.end.seconds if isinstance(block.end, TimeEnd) else block.end.meters
             if not isfinite(value) or value <= 0:
-                raise DefinitionValidationError("Zeit und Distanz müssen größer als null sein.")
+                raise DefinitionValidationError(
+                    "Zeit und Distanz müssen größer als null sein.",
+                    code="definition.end_value_invalid",
+                )
             target = block.target
             if isinstance(target, PaceRangeTarget):
                 if sport != "running":
                     raise DefinitionValidationError(
-                        "Pace-Ziele sind derzeit nur beim Laufen möglich."
+                        "Pace-Ziele sind derzeit nur beim Laufen möglich.",
+                        code="definition.pace_running_only",
                     )
                 if not _valid_positive(target.fastest_seconds_per_km) or not _valid_positive(
                     target.slowest_seconds_per_km
                 ):
-                    raise DefinitionValidationError("Pace-Grenzen müssen größer als null sein.")
+                    raise DefinitionValidationError(
+                        "Pace-Grenzen müssen größer als null sein.",
+                        code="definition.pace_value_invalid",
+                    )
                 if target.fastest_seconds_per_km > target.slowest_seconds_per_km:
                     raise DefinitionValidationError(
-                        "Die schnelle Pace-Grenze darf nicht langsamer als die langsame sein."
+                        "Die schnelle Pace-Grenze darf nicht langsamer als die langsame sein.",
+                        code="definition.pace_order_invalid",
                     )
             elif isinstance(target, HeartRateRangeTarget):
                 if not 30 <= target.lower_bpm < target.upper_bpm <= 250:
                     raise DefinitionValidationError(
-                        "Der Herzfrequenzbereich muss zwischen 30 und 250 bpm liegen."
+                        "Der Herzfrequenzbereich muss zwischen 30 und 250 bpm liegen.",
+                        code="definition.heart_rate_range_invalid",
                     )
             elif isinstance(target, HeartRateZoneTarget) and not 1 <= target.zone <= 5:
                 raise DefinitionValidationError(
-                    "Die Herzfrequenzzone muss zwischen 1 und 5 liegen."
+                    "Die Herzfrequenzzone muss zwischen 1 und 5 liegen.",
+                    code="definition.heart_rate_zone_invalid",
                 )
 
     validate_blocks(definition.blocks, 0)

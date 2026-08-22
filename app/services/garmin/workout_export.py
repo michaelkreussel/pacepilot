@@ -25,7 +25,7 @@ SPORT_TYPES = {
 }
 
 
-def _create_model(workout: Workout) -> Any:
+def compile_workout(workout: Workout) -> dict[str, Any]:
     from garminconnect.workout import (
         ConditionType,
         CyclingWorkout,
@@ -47,12 +47,15 @@ def _create_model(workout: Workout) -> Any:
     }
     model_type = model_types.get(workout.sport)
     if model_type is None:
-        raise WorkoutValidationError("Diese Sportart kann nicht an Garmin übertragen werden.")
+        raise WorkoutValidationError(
+            "Diese Sportart kann nicht an Garmin übertragen werden.",
+            code="garmin.sport_unsupported",
+        )
     definition = workout.definition_model
     try:
         validate_definition(definition, workout.sport)
     except DefinitionValidationError as exc:
-        raise WorkoutValidationError(str(exc)) from exc
+        raise WorkoutValidationError(str(exc), code=exc.code) from exc
     step_types = {
         "warmup": (StepType.WARMUP, "warmup", 1),
         "cooldown": (StepType.COOLDOWN, "cooldown", 2),
@@ -167,7 +170,7 @@ def _create_model(workout: Workout) -> Any:
         workoutSegments=[
             WorkoutSegment(segmentOrder=1, sportType=sport_type, workoutSteps=output_steps)
         ],
-    )
+    ).to_dict()
 
 
 def _garmin_call[T](message: str, call: Callable[..., T], *args: Any) -> T:
@@ -178,11 +181,10 @@ def _garmin_call[T](message: str, call: Callable[..., T], *args: Any) -> T:
 
 
 def upload_workout(client: Any, workout: Workout) -> str:
-    model = _create_model(workout)
     response = _garmin_call(
         "Das Workout konnte nicht bei Garmin erstellt werden.",
         client.upload_workout,
-        model.to_dict(),
+        compile_workout(workout),
     )
     if not isinstance(response, dict):
         raise GarminUnavailableError("Garmin hat eine ungültige Antwort zurückgegeben.")
@@ -194,7 +196,10 @@ def upload_workout(client: Any, workout: Workout) -> str:
 
 def schedule_published_workout(client: Any, workout: Workout) -> None:
     if not workout.garmin_workout_id:
-        raise WorkoutValidationError("Das Workout muss zuerst veröffentlicht werden.")
+        raise WorkoutValidationError(
+            "Das Workout muss zuerst veröffentlicht werden.",
+            code="garmin.remote_id_required",
+        )
     if workout.scheduled_for is not None and not _scheduled_workout_ids(
         client, workout.garmin_workout_id, workout.scheduled_for
     ):
@@ -208,7 +213,10 @@ def schedule_published_workout(client: Any, workout: Workout) -> None:
 
 def push_workout(client: Any, workout: Workout) -> None:
     if not workout.garmin_workout_id:
-        raise WorkoutValidationError("Das Workout muss zuerst veröffentlicht werden.")
+        raise WorkoutValidationError(
+            "Das Workout muss zuerst veröffentlicht werden.",
+            code="garmin.remote_id_required",
+        )
     _garmin_call(
         "Das Workout konnte nicht an das Garmin-Gerät gesendet werden.",
         client.push_workout_to_device,
@@ -257,12 +265,15 @@ def _unschedule_workout(client: Any, workout_id: str, scheduled_for: date | None
 
 def update_published_workout(client: Any, workout: Workout, previous_date: date | None) -> None:
     if not workout.garmin_workout_id:
-        raise WorkoutValidationError("Das Workout muss zuerst veröffentlicht werden.")
+        raise WorkoutValidationError(
+            "Das Workout muss zuerst veröffentlicht werden.",
+            code="garmin.remote_id_required",
+        )
     _garmin_call(
         "Das Workout konnte bei Garmin nicht aktualisiert werden.",
         client.update_workout,
         workout.garmin_workout_id,
-        _create_model(workout).to_dict(),
+        compile_workout(workout),
     )
     if previous_date != workout.scheduled_for:
         _unschedule_workout(client, workout.garmin_workout_id, previous_date)
