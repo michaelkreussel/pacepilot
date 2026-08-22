@@ -208,6 +208,19 @@
 }
 
 @layer components {
+  .subjective-feedback-form,
+  .subjective-feedback-form label,
+  .subjective-feedback-form fieldset {
+    min-width: 0;
+  }
+
+  .subjective-feedback-form input:not([type="checkbox"]),
+  .subjective-feedback-form select,
+  .subjective-feedback-form textarea {
+    width: 100%;
+    min-width: 0;
+  }
+
   .zone-progress {
     appearance: none;
     border: 0;

@@ -33,15 +33,20 @@ from app.services.garmin.workout_export import (
     upload_workout,
 )
 from app.services.garmin.workout_operations import GarminWorkoutOperationRunner
+from app.services.planning.safety_triage import (
+    SAFETY_RULE_SET_VERSION,
+    SafetyContext,
+    TriageOutcome,
+    ValidationMode,
+    build_safety_context,
+)
 from app.services.planning.validator import WorkoutInput, validate_workout
 from app.services.planning.workout_definition import definition_to_json
 from app.services.planning.workout_revision import (
-    STRUCTURAL_RULE_SET_VERSION,
     AcceptedWorkoutExecution,
     AcceptRevisionCommand,
     ScheduleWorkoutCommand,
     UnscheduleWorkoutCommand,
-    default_context_fingerprint,
     structural_validation_report,
     workout_content_hash,
 )
@@ -117,11 +122,7 @@ class WorkoutService:
         workout.materialized_revision_id = revision.id
         self.session.add(WorkoutGarminBinding(workout_id=workout.id))
         self._event(workout, revision, "create")
-        self._validate_context(
-            workout,
-            revision,
-            default_context_fingerprint(revision.content_hash),
-        )
+        self._validate_context(workout, revision, self._safety_context(workout, revision))
         self.session.commit()
         return workout
 
@@ -143,11 +144,7 @@ class WorkoutService:
             workout.materialized_revision_id = revision.id
             self._materialize(workout, revision)
         self._event(workout, revision, "revise")
-        self._validate_context(
-            workout,
-            revision,
-            default_context_fingerprint(revision.content_hash),
-        )
+        self._validate_context(workout, revision, self._safety_context(workout, revision))
         self.session.commit()
         return workout
 
@@ -167,7 +164,8 @@ class WorkoutService:
                 "Diese Workout-Revision ist nicht mehr aktuell.",
                 code="workout.revision_stale",
             )
-        if command.context_fingerprint != default_context_fingerprint(revision.content_hash):
+        safety_context = self._safety_context(workout, revision)
+        if command.context_fingerprint != safety_context.fingerprint:
             raise WorkoutConflictError(
                 "Der Prüfkontext dieser Workout-Revision ist nicht mehr aktuell.",
                 code="workout.validation_context_stale",
@@ -176,10 +174,17 @@ class WorkoutService:
             return workout
         binding = self._binding(workout)
         self._ensure_garmin_state_known(binding)
-        validation = self._validate_context(workout, revision, command.context_fingerprint)
+        validation = self._validate_context(workout, revision, safety_context)
         if not validation.valid:
+            outcome = str(validation.report_json.get("outcome", "clarify"))
+            message = (
+                "Ein Sicherheitshinweis blockiert die Annahme dieses Lauftrainings."
+                if outcome == TriageOutcome.SAFETY_STOP.value
+                else "Vor der Annahme fehlen noch eindeutige Sicherheitsangaben."
+            )
+            self.session.commit()
             raise WorkoutTransitionError(
-                "Diese Workout-Revision kann nicht angenommen werden.",
+                message,
                 code="workout.validation_failed",
             )
 
@@ -567,9 +572,31 @@ class WorkoutService:
     ) -> WorkoutValidationRun:
         workout = self.get(workout_id)
         revision = self._revision(workout, revision_id)
-        run = self._validate_context(workout, revision, context_fingerprint)
+        safety_context = self._safety_context(workout, revision)
+        run = self._validate_context(
+            workout,
+            revision,
+            SafetyContext(
+                fingerprint=context_fingerprint,
+                feedback_ids=safety_context.feedback_ids,
+                report=safety_context.report,
+            ),
+        )
         self.session.commit()
         return run
+
+    def acceptance_context(self, workout_id: int) -> SafetyContext:
+        workout = self.get(workout_id)
+        return self._safety_context(workout, self._current_revision(workout))
+
+    def sync_context(self, workout_id: int) -> SafetyContext:
+        workout = self.get(workout_id)
+        revision = (
+            self._revision(workout, workout.accepted_revision_id)
+            if workout.accepted_revision_id is not None
+            else self._current_revision(workout)
+        )
+        return self._safety_context(workout, revision, mode="sync")
 
     def _create_revision(
         self,
@@ -714,19 +741,43 @@ class WorkoutService:
                 code="workout.accepted_revision_mismatch",
             )
         validation = self._validate_context(
-            workout, revision, default_context_fingerprint(revision.content_hash)
+            workout,
+            revision,
+            self._safety_context(workout, revision, mode="sync"),
         )
         if not validation.valid:
+            outcome = str(validation.report_json.get("outcome", "clarify"))
+            message = (
+                "Ein neuer Sicherheitshinweis blockiert die Übertragung dieses Lauftrainings."
+                if outcome == TriageOutcome.SAFETY_STOP.value
+                else "Vor der Übertragung fehlen noch eindeutige Sicherheitsangaben."
+            )
+            self.session.commit()
             raise WorkoutTransitionError(
-                "Das Workout erfüllt die aktuellen Prüfungen nicht.",
+                message,
                 code="workout.validation_failed",
             )
+
+    def _safety_context(
+        self,
+        workout: Workout,
+        revision: WorkoutRevision,
+        *,
+        mode: ValidationMode = "acceptance",
+    ) -> SafetyContext:
+        return build_safety_context(
+            self.session,
+            self.user.id,
+            workout,
+            revision,
+            mode=mode,
+        )
 
     def _validate_context(
         self,
         workout: Workout,
         revision: WorkoutRevision,
-        context_fingerprint: str,
+        safety_context: SafetyContext,
     ) -> WorkoutValidationRun:
         now = utcnow()
         existing = self.session.scalar(
@@ -735,8 +786,8 @@ class WorkoutService:
                 WorkoutValidationRun.workout_id == workout.id,
                 WorkoutValidationRun.revision_id == revision.id,
                 WorkoutValidationRun.validation_kind == "contextual",
-                WorkoutValidationRun.rule_set_version == STRUCTURAL_RULE_SET_VERSION,
-                WorkoutValidationRun.context_fingerprint == context_fingerprint,
+                WorkoutValidationRun.rule_set_version == SAFETY_RULE_SET_VERSION,
+                WorkoutValidationRun.context_fingerprint == safety_context.fingerprint,
                 WorkoutValidationRun.expires_at > now,
             )
             .order_by(WorkoutValidationRun.evaluated_at.desc())
@@ -747,13 +798,13 @@ class WorkoutService:
             workout_id=workout.id,
             revision_id=revision.id,
             validation_kind="contextual",
-            rule_set_version=STRUCTURAL_RULE_SET_VERSION,
-            context_fingerprint=context_fingerprint,
-            feedback_ids_json=[],
+            rule_set_version=SAFETY_RULE_SET_VERSION,
+            context_fingerprint=safety_context.fingerprint,
+            feedback_ids_json=list(safety_context.feedback_ids),
             evaluated_at=now,
             expires_at=now + timedelta(hours=1),
-            valid=True,
-            report_json={"valid": True, "issues": []},
+            valid=safety_context.report.valid,
+            report_json=safety_context.report.to_json(),
         )
         self.session.add(run)
         return run

@@ -257,7 +257,7 @@ class WorkoutValidationRun(Base):
     validation_kind: Mapped[str] = mapped_column(String(30))
     rule_set_version: Mapped[str] = mapped_column(String(100))
     context_fingerprint: Mapped[str] = mapped_column(String(64))
-    feedback_ids_json: Mapped[list[int]] = mapped_column(JSON, default=list)
+    feedback_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
     evaluated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime)
     valid: Mapped[bool] = mapped_column(Boolean)

@@ -16,6 +16,7 @@ from app.repositories.activities import (
     list_activity_types,
 )
 from app.services.garmin.activity_details import empty_activity_details, load_activity_details
+from app.services.planning.feedback_service import FeedbackService
 from app.web import context, format_activity_type, templates
 
 router = APIRouter(prefix="/activities", dependencies=[Depends(require_data_access)])
@@ -128,7 +129,12 @@ def activities(
 
 @router.get("/{activity_id}", response_class=HTMLResponse)
 def activity_detail(
-    activity_id: int, request: Request, session: SessionDep, user: CurrentUser
+    activity_id: int,
+    request: Request,
+    session: SessionDep,
+    user: CurrentUser,
+    error: str | None = None,
+    notice: str | None = None,
 ) -> HTMLResponse:
     activity = find_activity(session, user.id, activity_id)
     if activity is None:
@@ -140,6 +146,11 @@ def activity_detail(
             request,
             active_page="activities",
             activity=activity,
+            post_session_feedback=FeedbackService(session, user).post_session_for_activity(
+                activity.id
+            ),
+            error=error,
+            notice=notice,
             activity_zone_groups=_activity_zone_groups(activity),
             activity_zones_complete=activity.zones_complete,
             activity_data=(

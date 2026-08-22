@@ -34,6 +34,7 @@ class WorkoutRevisionView:
     guidance: dict[str, object] | None
     load_estimate: dict[str, object] | None
     source_type: str
+    context_fingerprint_value: str | None = None
 
     @property
     def definition_model(self) -> WorkoutDefinition:
@@ -58,7 +59,7 @@ class WorkoutRevisionView:
 
     @property
     def context_fingerprint(self) -> str:
-        return default_context_fingerprint(self.content_hash)
+        return self.context_fingerprint_value or default_context_fingerprint(self.content_hash)
 
 
 @dataclass(frozen=True)
@@ -78,6 +79,8 @@ class WorkoutDetailView:
     garmin_last_operation: str | None = None
     garmin_last_operation_status: str | None = None
     garmin_last_error: str | None = None
+    safety_report: dict[str, object] | None = None
+    sync_safety_report: dict[str, object] | None = None
 
     @property
     def has_unaccepted_changes(self) -> bool:
@@ -141,7 +144,9 @@ class CalendarWorkout:
         }.get(self.source_type, self.source_type)
 
 
-def revision_view(revision: WorkoutRevision) -> WorkoutRevisionView:
+def revision_view(
+    revision: WorkoutRevision, *, context_fingerprint: str | None = None
+) -> WorkoutRevisionView:
     return WorkoutRevisionView(
         id=revision.id,
         revision_number=revision.revision_number,
@@ -156,10 +161,18 @@ def revision_view(revision: WorkoutRevision) -> WorkoutRevisionView:
         guidance=revision.guidance_json,
         load_estimate=revision.load_estimate_json,
         source_type=revision.source_type,
+        context_fingerprint_value=context_fingerprint,
     )
 
 
-def workout_detail_view(session: Session, workout: Workout) -> WorkoutDetailView:
+def workout_detail_view(
+    session: Session,
+    workout: Workout,
+    *,
+    context_fingerprint: str | None = None,
+    safety_report: dict[str, object] | None = None,
+    sync_safety_report: dict[str, object] | None = None,
+) -> WorkoutDetailView:
     if workout.current_revision_id is None:
         raise ValueError("Workout has no current revision")
     current = session.get(WorkoutRevision, workout.current_revision_id)
@@ -191,7 +204,7 @@ def workout_detail_view(session: Session, workout: Workout) -> WorkoutDetailView
     )
     return WorkoutDetailView(
         id=workout.id,
-        current=revision_view(current),
+        current=revision_view(current, context_fingerprint=context_fingerprint),
         accepted=revision_view(accepted) if accepted is not None else None,
         approval_status=workout.approval_status,
         local_schedule_status=workout.local_schedule_status,
@@ -205,4 +218,6 @@ def workout_detail_view(session: Session, workout: Workout) -> WorkoutDetailView
         garmin_last_operation=(latest_operation.operation_type if latest_operation else None),
         garmin_last_operation_status=(latest_operation.status if latest_operation else None),
         garmin_last_error=binding.last_error_message if binding else None,
+        safety_report=safety_report,
+        sync_safety_report=sync_safety_report,
     )

@@ -16,6 +16,7 @@ from app.services.garmin.client import (
     connect_garmin_account,
     message_from_exception,
 )
+from app.services.planning.feedback_service import FeedbackService
 from app.services.planning.validator import WorkoutInput, WorkoutValidationError, validate_workout
 from app.services.planning.workout_definition import (
     default_definition,
@@ -167,7 +168,16 @@ def create_workout(request: Request, data: WorkoutFormDep, service: WorkoutServi
 
 def _get_workout(service: WorkoutService, workout_id: int) -> WorkoutDetailView:
     try:
-        return workout_detail_view(service.session, service.get(workout_id))
+        workout = service.get(workout_id)
+        safety_context = service.acceptance_context(workout_id)
+        sync_context = service.sync_context(workout_id)
+        return workout_detail_view(
+            service.session,
+            workout,
+            context_fingerprint=safety_context.fingerprint,
+            safety_report=safety_context.report.to_json(),
+            sync_safety_report=sync_context.report.to_json(),
+        )
     except WorkoutNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -198,6 +208,7 @@ def workout_detail(
     request: Request,
     service: WorkoutServiceDep,
     error: str | None = None,
+    notice: str | None = None,
 ) -> HTMLResponse:
     return templates.TemplateResponse(
         request,
@@ -206,7 +217,11 @@ def workout_detail(
             request,
             active_page="plans",
             workout=_get_workout(service, workout_id),
+            pre_session_feedback=FeedbackService(
+                service.session, service.user
+            ).pre_session_for_workout(workout_id),
             error=error,
+            notice=notice,
         ),
     )
 
@@ -310,7 +325,11 @@ async def confirm_workout(
                 request,
                 active_page="plans",
                 workout=_get_workout(service, workout_id),
+                pre_session_feedback=FeedbackService(
+                    service.session, service.user
+                ).pre_session_for_workout(workout_id),
                 error=str(exc),
+                notice=None,
             ),
             status_code=409,
         )

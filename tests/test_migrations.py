@@ -35,6 +35,8 @@ def test_initial_migration_matches_models(tmp_path: Path) -> None:
         "garmin_devices",
         "garmin_sync_states",
         "oauth_identities",
+        "post_session_feedback",
+        "pre_session_feedback",
         "sleep_stages",
         "sync_events",
         "sync_runs",
@@ -49,6 +51,140 @@ def test_initial_migration_matches_models(tmp_path: Path) -> None:
         "workout_validation_runs",
         "workouts",
     } == set(inspector.get_table_names())
+
+
+def test_subjective_feedback_migration_enforces_privacy_links(tmp_path: Path) -> None:
+    database_path = tmp_path / "feedback.db"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    config = Config("alembic.ini")
+    config.attributes["database_url"] = database_url
+    command.upgrade(config, "head")
+    engine = create_engine(database_url)
+
+    with engine.begin() as connection:
+        connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+        connection.exec_driver_sql(
+            "INSERT INTO users (id, display_name, created_at) VALUES "
+            "(1, 'Runner', '2026-08-22'), (2, 'Other', '2026-08-22')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO activities "
+            "(id, user_id, garmin_activity_id, name, activity_type, started_at, "
+            "details_complete, splits_complete, zones_complete, synced_at) "
+            "VALUES (1, 1, 'run-1', 'Run', 'running', '2026-08-22', 0, 0, 0, '2026-08-22')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO post_session_feedback "
+            "(id, user_id, activity_id, activity_user_id, completion_percent, "
+            "session_rpe, overall_feel, "
+            "pain_present, source, content_hash, recorded_at, created_at) "
+            "VALUES (1, 1, 1, 1, 100, 5, 4, 0, 'explicit_form', ?, "
+            "'2026-08-22', '2026-08-22')",
+            ("a" * 64,),
+        )
+        connection.exec_driver_sql("DELETE FROM activities WHERE id = 1")
+        assert (
+            connection.exec_driver_sql(
+                "SELECT activity_id FROM post_session_feedback WHERE id = 1"
+            ).scalar_one()
+            is None
+        )
+        connection.exec_driver_sql("DELETE FROM users WHERE id = 1")
+        assert (
+            connection.exec_driver_sql("SELECT count(*) FROM post_session_feedback").scalar_one()
+            == 0
+        )
+
+    with engine.begin() as connection, pytest.raises(IntegrityError):
+        connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+        connection.exec_driver_sql(
+            "INSERT INTO users (id, display_name, created_at) VALUES (3, 'Third', '2026-08-22')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO activities "
+            "(id, user_id, garmin_activity_id, name, activity_type, started_at, "
+            "details_complete, splits_complete, zones_complete, synced_at) "
+            "VALUES (2, 2, 'run-2', 'Run', 'running', '2026-08-22', 0, 0, 0, '2026-08-22')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO post_session_feedback "
+            "(user_id, activity_id, activity_user_id, completion_percent, session_rpe, "
+            "overall_feel, pain_present, source, content_hash, recorded_at, created_at) "
+            "VALUES (3, 2, 3, 100, 5, 4, 0, 'explicit_form', ?, "
+            "'2026-08-22', '2026-08-22')",
+            ("c" * 64,),
+        )
+
+    with engine.begin() as connection, pytest.raises(IntegrityError):
+        connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+        connection.exec_driver_sql(
+            "INSERT INTO pre_session_feedback "
+            "(user_id, motivation, fatigue, leg_freshness, soreness, pain_present, "
+            "illness_signal, source, content_hash, recorded_at, created_at) "
+            "VALUES (2, 6, 1, 5, 0, 0, 'none', 'explicit_form', ?, "
+            "'2026-08-22', '2026-08-22')",
+            ("b" * 64,),
+        )
+
+
+def test_feedback_owner_migration_upgrades_applied_revision_22(tmp_path: Path) -> None:
+    database_path = tmp_path / "feedback-revision-22.db"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    config = Config("alembic.ini")
+    config.attributes["database_url"] = database_url
+    command.upgrade(config, "20260822_22")
+    engine = create_engine(database_url)
+    with engine.begin() as connection:
+        connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+        connection.exec_driver_sql(
+            "INSERT INTO users (id, display_name, created_at) VALUES (1, 'Runner', '2026-08-22')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO workouts "
+            "(id, user_id, name, sport, status, source_type, approval_status, "
+            "local_schedule_status, lock_version, definition_version, definition, "
+            "created_at, updated_at) "
+            "VALUES (1, 1, 'Run', 'running', 'draft', 'manual', 'draft', "
+            "'unscheduled', 0, 1, '{\"blocks\": []}', '2026-08-22', '2026-08-22')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO activities "
+            "(id, user_id, garmin_activity_id, name, activity_type, started_at, "
+            "details_complete, splits_complete, zones_complete, synced_at) "
+            "VALUES (1, 1, 'run-1', 'Run', 'running', '2026-08-22', 0, 0, 0, '2026-08-22')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO pre_session_feedback "
+            "(id, user_id, workout_id, motivation, fatigue, leg_freshness, soreness, "
+            "pain_present, illness_signal, source, content_hash, recorded_at, created_at) "
+            "VALUES (1, 1, 1, 3, 3, 3, 0, 0, 'none', 'explicit_form', ?, "
+            "'2026-08-22', '2026-08-22')",
+            ("a" * 64,),
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO post_session_feedback "
+            "(id, user_id, workout_id, activity_id, completion_percent, session_rpe, "
+            "overall_feel, pain_present, source, content_hash, recorded_at, created_at) "
+            "VALUES (1, 1, 1, 1, 100, 5, 4, 0, 'explicit_form', ?, "
+            "'2026-08-22', '2026-08-22')",
+            ("b" * 64,),
+        )
+
+    command.upgrade(config, "head")
+
+    with engine.connect() as connection:
+        assert (
+            connection.exec_driver_sql(
+                "SELECT workout_user_id FROM pre_session_feedback WHERE id = 1"
+            ).scalar_one()
+            == 1
+        )
+        assert connection.exec_driver_sql(
+            "SELECT workout_user_id, activity_user_id FROM post_session_feedback WHERE id = 1"
+        ).one() == (1, 1)
+        assert connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one() == ("20260822_23")
 
 
 def test_application_migration_uses_absolute_project_paths(tmp_path: Path, monkeypatch) -> None:
@@ -108,7 +244,7 @@ def test_workout_revision_migration_resumes_after_added_columns(tmp_path: Path) 
             "SELECT version_num FROM alembic_version"
         ).scalar_one()
         integrity = connection.exec_driver_sql("PRAGMA integrity_check").scalar_one()
-    assert revision == "20260822_21"
+    assert revision == "20260822_23"
     assert integrity == "ok"
     assert "workout_revisions" in inspector.get_table_names()
 
@@ -137,7 +273,7 @@ def test_reverted_athlete_profile_revision_upgrades_to_head(tmp_path: Path) -> N
         revision = connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
         ).scalar_one()
-    assert revision == "20260822_21"
+    assert revision == "20260822_23"
 
 
 def test_principal_fingerprint_migration_upgrades_applied_phase_4_schema(

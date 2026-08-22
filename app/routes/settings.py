@@ -31,6 +31,7 @@ from app.services.garmin.client import (
 )
 from app.services.garmin.locks import GarminAccountBusyError
 from app.services.garmin.sync import METRIC_LABELS, rate_limit_cooldown_remaining
+from app.services.planning.feedback_service import FeedbackService
 from app.web import context, templates
 
 router = APIRouter(prefix="/settings", dependencies=[Depends(require_notice_acknowledged)])
@@ -137,6 +138,7 @@ def settings_page(
             account.sync_status = "not_connected"
             session.commit()
     values = _sync_view(session, account, _latest_sync(session, user.id))
+    feedback_service = FeedbackService(session, user)
     return templates.TemplateResponse(
         request,
         "settings.html",
@@ -146,6 +148,8 @@ def settings_page(
             error=error,
             notice=notice,
             mfa_required=mfa_required,
+            pre_session_feedback=feedback_service.all_pre_session(),
+            post_session_feedback=feedback_service.all_post_session(),
             **values,
         ),
     )

@@ -23,6 +23,7 @@ from app.routes import (
     auth,
     coach,
     dashboard,
+    feedback,
     onboarding,
     plans,
     profile,
@@ -78,6 +79,7 @@ app.include_router(profile.router)
 app.include_router(activities.router)
 app.include_router(plans.router)
 app.include_router(workouts.router)
+app.include_router(feedback.router)
 app.include_router(settings.router)
 app.include_router(coach.router)
 
