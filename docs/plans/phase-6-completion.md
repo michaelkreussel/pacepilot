@@ -50,3 +50,37 @@ Introduce the versioned evidence, workout-template, and constraint registry. Par
 safe-loaded YAML into typed schemas; keep executable rules in Python. The first generated workout
 should be a time-based easy run with RPE/Talk Test content included in the revision content hash and
 shared preview.
+
+## Product Correction - 24 August 2026
+
+User testing showed that the complete internal safety schema was too prominent for routine input.
+The normal flow was therefore reduced without removing the deterministic safety boundary:
+
+- Garmin `directWorkoutRpe` and `directWorkoutFeel` are normalized and used as the primary
+  post-session feedback source. Manual values are field-level fallbacks and remain separately
+  attributable.
+- Routine post-session input contains only effort 1-10 and five feel categories. Completion,
+  pain, stopped reason, and notes are no longer part of the standard activity form.
+- The current coach message provides momentary subjective context. It is not copied into a separate
+  daily-check-in record; available Health and Readiness data can be read through coach tools.
+- Pain and illness questions remain available through progressive disclosure and continue to feed
+  the unchanged deterministic safety triage. Free text is not keyword-classified or treated as a
+  confirmed safety fact.
+- Effective RPE is consumed by running baselines, hard-session classification, recovery analytics,
+  recent-activity coach data, and a read-only activity-feedback coach tool.
+- Migration `20260824_24` makes legacy structured fields optional and normalizes stored Garmin feel
+  values to the canonical 1-5 domain. Existing feedback remains exportable and deletable.
+- A follow-up simplification removed the dashboard check-in and its write endpoint. Existing rows
+  remain exportable and deletable. PacePilot stores new daily condition text locally only in the
+  coach conversation and removes that local copy when the conversation is deleted; messages are
+  also processed according to the configured model provider's retention policy.
+
+Verification for the product correction:
+
+```text
+uv run pytest                    275 passed
+uv run ruff check .              passed
+uv run ruff format --check .     passed
+uv run ty check                  passed
+Agent Browser desktop/mobile     0 WCAG A/AA violations
+```

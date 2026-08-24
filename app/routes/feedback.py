@@ -63,25 +63,22 @@ async def record_pre_session_feedback(
 ) -> RedirectResponse:
     form = await request.form()
     try:
+        pain = _pain_input(form)
+        illness = IllnessSignal(str(form.get("illness_signal", "none")))
+        if not pain.present and illness == IllnessSignal.NONE:
+            raise ValueError("empty feedback")
         data = PreSessionFeedbackInput(
-            motivation=int(str(form.get("motivation", ""))),
-            fatigue=int(str(form.get("fatigue", ""))),
-            leg_freshness=int(str(form.get("leg_freshness", ""))),
-            soreness=int(str(form.get("soreness", ""))),
-            sleep_quality=_optional_int(form, "sleep_quality"),
-            pain=_pain_input(form),
-            illness_signal=IllnessSignal(str(form.get("illness_signal", "none"))),
-            available_minutes=_optional_int(form, "available_minutes"),
-            notes=str(form.get("notes", "")).strip() or None,
+            pain=pain,
+            illness_signal=illness,
         )
         FeedbackService(session, user).record_pre_session(workout_id, data)
     except (FeedbackNotFoundError, ValidationError, ValueError):
         return _error_redirect(
             f"/workouts/{workout_id}",
-            "Bitte prüfe die Angaben zum Tagesgefühl.",
+            "Bitte prüfe die Sicherheitsangaben.",
         )
     return RedirectResponse(
-        f"/workouts/{workout_id}?{urlencode({'notice': 'Tagesgefühl gespeichert.'})}",
+        f"/workouts/{workout_id}?{urlencode({'notice': 'Sicherheitsangabe gespeichert.'})}",
         status_code=303,
     )
 
@@ -98,10 +95,14 @@ async def record_post_session_feedback(
 ) -> RedirectResponse:
     form = await request.form()
     try:
+        session_rpe = _optional_int(form, "session_rpe")
+        overall_feel = _optional_int(form, "overall_feel")
+        if session_rpe is None and overall_feel is None:
+            raise ValueError("empty feedback")
         data = PostSessionFeedbackInput(
-            completion_percent=int(str(form.get("completion_percent", ""))),
-            session_rpe=float(str(form.get("session_rpe", ""))),
-            overall_feel=int(str(form.get("overall_feel", ""))),
+            completion_percent=_optional_int(form, "completion_percent"),
+            session_rpe=session_rpe,
+            overall_feel=overall_feel,
             pain=_pain_input(form),
             stopped_reason=str(form.get("stopped_reason", "")).strip() or None,
             notes=str(form.get("notes", "")).strip() or None,

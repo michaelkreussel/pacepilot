@@ -16,6 +16,10 @@ from app.services.analytics.activity_semantics import (
     is_hard_activity,
     sport_family,
 )
+from app.services.analytics.subjective_feedback import (
+    EffectiveActivityFeedback,
+    effective_activity_feedback,
+)
 
 
 @dataclass(frozen=True)
@@ -115,7 +119,8 @@ class RecentWorkout:
     exercise_load: float | None
     aerobic_training_effect: float | None
     anaerobic_training_effect: float | None
-    workout_rpe: int | None
+    workout_rpe: float | None
+    workout_rpe_source: str | None
 
 
 @dataclass(frozen=True)
@@ -157,6 +162,7 @@ class ActivityDetails:
     normalized_power_watts: float | None
     vo2max: float | None
     workout_feel: int | None
+    workout_feel_source: str | None
     body_battery_change: int | None
     details_complete: bool
     splits_complete: bool
@@ -184,7 +190,9 @@ def _family_distance(activities: list[Activity], family: str) -> float | None:
     return _optional_sum([activity.distance_m for activity in selected])
 
 
-def _recent_workout(activity: Activity) -> RecentWorkout:
+def _recent_workout(
+    activity: Activity, feedback: EffectiveActivityFeedback | None = None
+) -> RecentWorkout:
     return RecentWorkout(
         activity_id=activity.id,
         started_at=activity.started_at,
@@ -197,7 +205,8 @@ def _recent_workout(activity: Activity) -> RecentWorkout:
         exercise_load=activity.exercise_load,
         aerobic_training_effect=activity.aerobic_training_effect,
         anaerobic_training_effect=activity.anaerobic_training_effect,
-        workout_rpe=activity.workout_rpe,
+        workout_rpe=feedback.effort if feedback else activity.workout_rpe,
+        workout_rpe_source=feedback.effort_source if feedback else None,
     )
 
 
@@ -215,6 +224,7 @@ def get_training_summary(
         datetime.combine(end + timedelta(days=1), time.min),
         include_zones=True,
     )
+    feedback = effective_activity_feedback(session, user_id, activities)
     sync_states = {state.resource: state for state in sync_states_for_user(session, user_id)}
     activity_state = sync_states.get("activities")
     by_sport: dict[str, list[Activity]] = defaultdict(list)
@@ -237,7 +247,10 @@ def get_training_summary(
                 zones[(activity.activity_type, zone.zone_type, zone.zone_number)] += zone.seconds
     weeks_in_window = (days + 6) // 7
     active_weeks = len({(activity.started_at.date() - start).days // 7 for activity in activities})
-    hard_workouts = sum(is_hard_activity(activity) for activity in activities)
+    hard_workouts = sum(
+        is_hard_activity(activity, workout_rpe=feedback[activity.id].effort)
+        for activity in activities
+    )
     return TrainingSummary(
         start=start,
         end=end,
@@ -307,6 +320,7 @@ def get_weekly_training_trend(
         datetime.combine(query_start, time.min),
         datetime.combine(end + timedelta(days=1), time.min),
     )
+    feedback = effective_activity_feedback(session, user_id, activities)
     points: list[WeeklyTrainingPoint] = []
     for offset in range(weeks):
         week_start = first_week_start + timedelta(weeks=offset)
@@ -332,7 +346,9 @@ def get_weekly_training_trend(
                 average_anaerobic_training_effect=_average(
                     [item.anaerobic_training_effect for item in weekly]
                 ),
-                hard_workouts=sum(is_hard_activity(item) for item in weekly),
+                hard_workouts=sum(
+                    is_hard_activity(item, workout_rpe=feedback[item.id].effort) for item in weekly
+                ),
                 longest_run_distance_m=(
                     max(item.distance_m for item in runs if item.distance_m is not None)
                     if any(item.distance_m is not None for item in runs)
@@ -367,6 +383,7 @@ def get_training_timeline(
         datetime.combine(start - timedelta(days=27), time.min),
         datetime.combine(end + timedelta(days=1), time.min),
     )
+    feedback = effective_activity_feedback(session, user_id, activities)
     points: list[TrainingTimelinePoint] = []
     bucket_start = start
     while bucket_start <= end:
@@ -398,7 +415,9 @@ def get_training_timeline(
                 average_anaerobic_training_effect=_average(
                     [item.anaerobic_training_effect for item in bucket]
                 ),
-                hard_workouts=sum(is_hard_activity(item) for item in bucket),
+                hard_workouts=sum(
+                    is_hard_activity(item, workout_rpe=feedback[item.id].effort) for item in bucket
+                ),
                 longest_run_distance_m=(
                     max(item.distance_m for item in runs if item.distance_m is not None)
                     if any(item.distance_m is not None for item in runs)
@@ -425,10 +444,9 @@ def get_recent_workouts(
         raise ValueError("limit must be at least 1")
     end = as_of or date.today()
     through = datetime.combine(end, time.max)
-    return tuple(
-        _recent_workout(activity)
-        for activity in list_activities_on_or_before(session, user_id, through, limit)
-    )
+    activities = list_activities_on_or_before(session, user_id, through, limit)
+    feedback = effective_activity_feedback(session, user_id, activities)
+    return tuple(_recent_workout(activity, feedback[activity.id]) for activity in activities)
 
 
 def get_activity_details(
@@ -441,13 +459,15 @@ def get_activity_details(
     activity = find_activity_with_history(session, user_id, activity_id)
     if activity is None or activity.started_at.date() > (as_of or date.today()):
         return None
+    feedback = effective_activity_feedback(session, user_id, [activity])[activity.id]
     return ActivityDetails(
-        workout=_recent_workout(activity),
+        workout=_recent_workout(activity, feedback),
         calories=activity.calories,
         average_power_watts=activity.average_power_watts,
         normalized_power_watts=activity.normalized_power_watts,
         vo2max=activity.vo2max,
-        workout_feel=activity.workout_feel,
+        workout_feel=feedback.feel,
+        workout_feel_source=feedback.feel_source,
         body_battery_change=activity.body_battery_change,
         details_complete=activity.details_complete,
         splits_complete=activity.splits_complete,

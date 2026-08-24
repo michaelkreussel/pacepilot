@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.logging import FILE_HANDLER, configure_logging
 from app.main import app
 from app.models import (
+    Activity,
     CoachConversation,
     CoachMessage,
     CoachToolCall,
@@ -38,6 +39,7 @@ from app.services.coach.tools import (
     CoachRuntimeContext,
     get_current_recovery_state,
     get_health_day,
+    get_subjective_context,
 )
 
 
@@ -335,6 +337,51 @@ def test_health_day_tool_uses_runtime_user_scope(
     assert payload["resting_hr"] == 48
     assert payload["hrv_average"] == 55
     assert payload["day"] == "2026-08-11"
+
+
+def test_subjective_context_tool_uses_runtime_user_scope(
+    session_factory: sessionmaker[Session],
+) -> None:
+    day = date(2026, 8, 11)
+    with session_factory() as session:
+        first = User(display_name="Erste Person")
+        second = User(display_name="Zweite Person")
+        session.add_all((first, second))
+        session.flush()
+        session.add_all(
+            [
+                Activity(
+                    user_id=first.id,
+                    garmin_activity_id="run-1",
+                    name="Lauf",
+                    activity_type="running",
+                    started_at=utcnow().replace(year=2026, month=8, day=11),
+                    workout_rpe=7,
+                    workout_feel=4,
+                ),
+                Activity(
+                    user_id=second.id,
+                    garmin_activity_id="private-run",
+                    name="Privater Lauf",
+                    activity_type="running",
+                    started_at=utcnow().replace(year=2026, month=8, day=11),
+                    workout_rpe=10,
+                    workout_feel=1,
+                ),
+            ]
+        )
+        session.commit()
+        first_id = first.id
+
+    runtime: Any = SimpleNamespace(context=CoachRuntimeContext(first_id, day, session_factory))
+    tool_function: Any = cast(Any, get_subjective_context).func
+
+    payload = json.loads(tool_function(runtime=runtime))
+
+    assert "daily_checkins" not in payload
+    assert [item["name"] for item in payload["recent_activity_feedback"]] == ["Lauf"]
+    assert payload["recent_activity_feedback"][0]["effort"] == 7
+    assert payload["recent_activity_feedback"][0]["effort_source"] == "garmin"
 
 
 def test_langgraph_injects_runtime_context_into_coach_tools(

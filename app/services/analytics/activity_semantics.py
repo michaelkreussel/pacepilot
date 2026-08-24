@@ -47,11 +47,12 @@ def is_running_sport(sport: str) -> bool:
     return sport_family(sport) == "running"
 
 
-def hard_activity_data_available(activity: Activity) -> bool:
+def hard_activity_data_available(activity: Activity, *, workout_rpe: float | None = None) -> bool:
+    effective_rpe = activity.workout_rpe if workout_rpe is None else workout_rpe
     return (
         _valid_training_effect(activity.aerobic_training_effect)
         or _valid_training_effect(activity.anaerobic_training_effect)
-        or _valid_rpe(activity.workout_rpe)
+        or _valid_rpe(effective_rpe)
     )
 
 
@@ -59,7 +60,7 @@ def _valid_training_effect(value: float | None) -> bool:
     return value is not None and math.isfinite(value) and 0 <= value <= 5
 
 
-def _valid_rpe(value: int | None) -> bool:
+def _valid_rpe(value: float | int | None) -> bool:
     return value is not None and 1 <= value <= 10
 
 
@@ -67,13 +68,14 @@ def _training_effect_at_least(value: float | None, threshold: float) -> bool:
     return _valid_training_effect(value) and value is not None and value >= threshold
 
 
-def _rpe_at_least(value: int | None, threshold: int) -> bool:
+def _rpe_at_least(value: float | int | None, threshold: int) -> bool:
     return _valid_rpe(value) and value is not None and value >= threshold
 
 
-def is_hard_activity(activity: Activity) -> bool:
+def is_hard_activity(activity: Activity, *, workout_rpe: float | None = None) -> bool:
+    effective_rpe = activity.workout_rpe if workout_rpe is None else workout_rpe
     return (
         _training_effect_at_least(activity.aerobic_training_effect, 3.5)
         or _training_effect_at_least(activity.anaerobic_training_effect, 2.5)
-        or _rpe_at_least(activity.workout_rpe, 7)
+        or _rpe_at_least(effective_rpe, 7)
     )

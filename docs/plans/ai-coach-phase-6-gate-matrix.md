@@ -22,8 +22,8 @@ facts from chat text.
 | Export and deletion | `test_post_feedback_export_survives_garmin_activity_deletion_and_can_be_deleted` | User-authored feedback survives imported-activity deletion, exports explicitly, and can be hard-deleted |
 | Derived-data deletion | `test_new_safety_feedback_invalidates_acceptance_and_delete_does_not_reuse_cache` | Deleting feedback removes validation reports that reference it and prevents cached-context reuse |
 | User isolation | `test_feedback_service_is_user_scoped` and `test_subjective_feedback_migration_enforces_privacy_links` | Services and database constraints reject cross-user access and cross-user workout/activity links |
-| Explicit German UI | `test_german_feedback_forms_routes_and_export` | Workout and activity pages expose CSRF-protected German forms, visible stops, deletion, and a no-store JSON export |
-| Schema compatibility | `tests/test_migrations.py` | Fresh and previously applied revision-22 upgrades reach `20260822_23`; Alembic metadata check and FK behavior pass |
+| Explicit German UI | `test_german_feedback_forms_routes_and_export` | Workout pages expose only optional progressive safety details; activity pages use Garmin or two direct manual fallback values with smileys; stops, deletion, and no-store export remain visible |
+| Schema compatibility | `tests/test_migrations.py` | Fresh and previously applied revision-23 upgrades reach `20260824_24`; Alembic metadata check and FK behavior pass |
 
 ## Versioned Policies
 
@@ -40,7 +40,12 @@ facts from chat text.
 - Fever, systemic illness, cardiopulmonary warning signals, and gait-changing pain stop running.
   Ambiguous pain or illness requests clarification instead of guessing.
 - Garmin RPE/feel and PacePilot post-session feedback remain separate sources. No values are copied
-  between them.
+  between them. A field-level read model uses Garmin first and manual feedback only when Garmin is
+  missing.
+- The full structured safety schema is not a routine questionnaire. Current subjective text is
+  stored locally only in the coach conversation, Health signals are available through read-only
+  coach tools, and pain or illness details are requested only when relevant. No separate
+  daily-check-in record is created.
 - Explicit form input is authoritative. Phase 6 performs no LLM or keyword extraction from notes.
 - Feedback is user-authored PacePilot data. Garmin-data deletion detaches an activity reference but
   preserves the feedback. Account erasure cascades it. Individual deletion hard-deletes the source

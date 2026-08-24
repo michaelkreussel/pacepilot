@@ -76,6 +76,20 @@ def get_current_recovery_state(runtime: ToolRuntime[CoachRuntimeContext]) -> str
 
 
 @tool
+def get_subjective_context(runtime: ToolRuntime[CoachRuntimeContext]) -> str:
+    """Get recent effective Garmin/manual activity feedback.
+
+    Use this with recovery data when recent perceived effort should affect today's training. The
+    athlete's current subjective condition comes directly from the current chat message.
+    """
+    with runtime.context.session_factory() as session:
+        subjective = AthleteDataService(
+            session, runtime.context.user_id, as_of=runtime.context.as_of
+        ).get_subjective_context()
+    return _json(asdict(subjective))
+
+
+@tool
 def get_health_trends(
     runtime: ToolRuntime[CoachRuntimeContext],
     days: Annotated[int, Field(ge=7, le=365)] = 28,
@@ -186,6 +200,7 @@ def get_upcoming_workouts(
 
 COACH_TOOLS = (
     get_current_recovery_state,
+    get_subjective_context,
     get_health_trends,
     get_training_summary,
     get_recent_activities,
@@ -196,6 +211,7 @@ COACH_TOOLS = (
 
 TOOL_LABELS = {
     "get_current_recovery_state": "Aktuelle Erholung prüfen",
+    "get_subjective_context": "Subjektives Aktivitätsfeedback laden",
     "get_health_trends": "Gesundheitstrends vergleichen",
     "get_training_summary": "Trainingsbelastung auswerten",
     "get_recent_activities": "Letzte Trainingseinheiten ansehen",

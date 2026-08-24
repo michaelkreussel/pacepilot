@@ -184,7 +184,7 @@ def test_feedback_owner_migration_upgrades_applied_revision_22(tmp_path: Path) -
         ).one() == (1, 1)
         assert connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
-        ).scalar_one() == ("20260822_23")
+        ).scalar_one() == ("20260824_24")
 
 
 def test_application_migration_uses_absolute_project_paths(tmp_path: Path, monkeypatch) -> None:
@@ -244,7 +244,7 @@ def test_workout_revision_migration_resumes_after_added_columns(tmp_path: Path) 
             "SELECT version_num FROM alembic_version"
         ).scalar_one()
         integrity = connection.exec_driver_sql("PRAGMA integrity_check").scalar_one()
-    assert revision == "20260822_23"
+    assert revision == "20260824_24"
     assert integrity == "ok"
     assert "workout_revisions" in inspector.get_table_names()
 
@@ -273,7 +273,7 @@ def test_reverted_athlete_profile_revision_upgrades_to_head(tmp_path: Path) -> N
         revision = connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
         ).scalar_one()
-    assert revision == "20260822_23"
+    assert revision == "20260824_24"
 
 
 def test_principal_fingerprint_migration_upgrades_applied_phase_4_schema(
@@ -369,6 +369,59 @@ def test_workout_rpe_migration_normalizes_garmin_scale(tmp_path: Path) -> None:
             .all()
         )
     assert values == [3, 7, 8]
+
+
+def test_simplified_feedback_migration_normalizes_feel_and_allows_short_entries(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "simplified-feedback.db"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    config = Config("alembic.ini")
+    config.attributes["database_url"] = database_url
+    command.upgrade(config, "20260822_23")
+    engine = create_engine(database_url)
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "INSERT INTO users (id, display_name, created_at) VALUES (1, 'Runner', '2026-08-24')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO activities "
+            "(id, user_id, garmin_activity_id, name, activity_type, started_at, workout_feel, "
+            "details_complete, splits_complete, zones_complete, synced_at) "
+            "VALUES (1, 1, 'run-1', 'Run', 'running', '2026-08-24', 75, 0, 0, 0, "
+            "'2026-08-24')"
+        )
+
+    command.upgrade(config, "head")
+
+    columns = {
+        column["name"]: column for column in inspect(engine).get_columns("pre_session_feedback")
+    }
+    post_columns = {
+        column["name"]: column for column in inspect(engine).get_columns("post_session_feedback")
+    }
+    with engine.connect() as connection:
+        feel = connection.exec_driver_sql(
+            "SELECT workout_feel FROM activities WHERE id = 1"
+        ).scalar_one()
+    assert feel == 4
+    assert all(
+        columns[name]["nullable"] for name in ("motivation", "fatigue", "leg_freshness", "soreness")
+    )
+    assert all(
+        post_columns[name]["nullable"]
+        for name in ("completion_percent", "session_rpe", "overall_feel")
+    )
+
+    command.downgrade(config, "20260822_23")
+
+    with engine.connect() as connection:
+        assert (
+            connection.exec_driver_sql(
+                "SELECT workout_feel FROM activities WHERE id = 1"
+            ).scalar_one()
+            == 4
+        )
 
 
 def test_workout_definition_migration_preserves_repeat_semantics(tmp_path: Path) -> None:

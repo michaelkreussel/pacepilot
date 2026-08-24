@@ -56,7 +56,7 @@ class FeedbackService:
             illness_signal=data.illness_signal.value,
             available_minutes=data.available_minutes,
             notes=data.notes or None,
-            source="explicit_form",
+            source="workout_safety",
             content_hash=feedback_content_hash(data),
         )
         self.session.add(feedback)
@@ -89,7 +89,7 @@ class FeedbackService:
             pain_worsens_with_activity=pain.worsens_with_activity if pain else None,
             stopped_reason=data.stopped_reason or None,
             notes=data.notes or None,
-            source="explicit_form",
+            source="manual",
             content_hash=feedback_content_hash(data),
         )
         self.session.add(feedback)

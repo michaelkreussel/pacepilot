@@ -519,7 +519,8 @@ Spaetere additive Modelle:
 
 Sie referenzieren den User und optional Workout, Revision, Activity und Coach Message. Garmin
 RPE und Garmin Workout Feel auf `Activity` bleiben separate Quellen und werden nicht in
-subjektives PacePilot-Feedback kopiert.
+subjektives PacePilot-Feedback kopiert. Ein gemeinsames Read Model priorisiert pro Feld einen
+vorhandenen Garmin-Wert und verwendet manuelle Aktivitaetswerte nur als Fallback.
 
 ### 6.8 Planmodelle
 
@@ -783,8 +784,12 @@ Migration:
 
 Arbeiten:
 
-- Zunaechst explizite deutsche Formulare fuer Fatigue, Motivation, Beinfrische, Soreness,
-  lokalisierten Schmerz, Gait Change, Illness, Schlafgefuehl und Zeitbudget.
+- Das aktuelle subjektive Tagesbefinden kommt primaer aus der laufenden Coach-Nachricht und wird
+  nicht zusaetzlich als Daily Check-in persistiert. Vorhandene Health-Signale werden automatisch
+  geladen; lokalisierter Schmerz, Gait Change und Illness koennen bei Bedarf freiwillig am Workout
+  strukturiert erfasst oder spaeter im Coach gezielt geklaert werden.
+- Nach einer Aktivitaet werden ausschliesslich Anstrengung 1-10 und Workout Feel 1-5 erfasst.
+  Garmin-Werte haben je Feld Vorrang, manuelle Eingabe dient nur als Fallback.
 - Deterministische Triage mit `allow`, `clarify`, `warn` und `safety_stop`.
 - Red-Flag-Texte ohne Diagnose und mit angemessener professioneller Eskalation.
 - Datenexport und Loeschverhalten gleichzeitig implementieren.
@@ -882,7 +887,7 @@ Exit-Kriterien:
 
 Arbeiten:
 
-- Bestehende sieben read-only Tools behalten.
+- Bestehende read-only Tools behalten.
 - Genau ein neues idempotentes Tool fuer den MVP:
   `create_running_workout_proposal`.
 - Tool akzeptiert Intent und strukturierte Inputs, keine frei erfundene WorkoutDefinition.

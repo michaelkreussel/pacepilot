@@ -1,7 +1,7 @@
 import json
 from datetime import date, datetime, timedelta
 
-from app.models import Activity, DailyFitness, GarminSyncState, User
+from app.models import Activity, DailyFitness, GarminSyncState, PostSessionFeedback, User
 from app.services.analytics import AthleteDataService
 from app.services.analytics.activity_semantics import is_running_sport, sport_family
 from app.services.analytics.running_intensity import PerformanceAnchorInput
@@ -58,6 +58,36 @@ def test_activity_classification_is_shared_and_excludes_mixed_sports():
     assert is_running_sport("TREADMILL_RUNNING") is True
     assert is_running_sport("bike_run") is False
     assert sport_family("road_bike") == "cycling"
+
+
+def test_running_baseline_uses_manual_rpe_when_garmin_feedback_is_missing(session_factory):
+    as_of = date(2026, 6, 30)
+    with session_factory() as session:
+        user = _user(session)
+        run = _run(user.id, "manual-rpe", as_of, duration_s=1_800, distance_m=5_000)
+        session.add(run)
+        session.flush()
+        session.add_all(
+            [
+                PostSessionFeedback(
+                    user_id=user.id,
+                    activity_id=run.id,
+                    activity_user_id=user.id,
+                    session_rpe=8,
+                    pain_present=False,
+                    source="manual",
+                    content_hash="a" * 64,
+                ),
+                _complete_activity_history(user.id, as_of),
+            ]
+        )
+        session.commit()
+
+        window = AthleteDataService(session, user.id, as_of=as_of).get_running_baseline().window(7)
+
+        assert window.quality.rpe.percent == 100
+        assert window.total_srpe == 240
+        assert window.hard_runs == 1
 
 
 def test_running_baseline_uses_exact_windows_and_running_only_metrics(session_factory):

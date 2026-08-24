@@ -145,6 +145,16 @@ def _workout_rpe(data: Any) -> int | None:
     return round(value / 10) if value > 10 else value
 
 
+def _workout_feel(data: Any) -> int | None:
+    value = _integer(data, "directWorkoutFeel")
+    if value is None:
+        return None
+    if 1 <= value <= 5:
+        return value
+    # Garmin exposes the five watch/app choices as 0, 25, 50, 75, and 100.
+    return {0: 1, 25: 2, 50: 3, 75: 4, 100: 5}.get(value)
+
+
 def _parse_datetime(value: object) -> datetime | None:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         try:
@@ -276,7 +286,7 @@ def _map_activity_summary(activity: Activity, item: dict[str, Any]) -> None:
     )
     activity.vertical_ratio = _number(item, "avgVerticalRatio", "verticalRatio")
     activity.workout_rpe = _workout_rpe(item)
-    activity.workout_feel = _integer(item, "directWorkoutFeel")
+    activity.workout_feel = _workout_feel(item)
     activity.moderate_intensity_minutes = _integer(item, "moderateIntensityMinutes")
     activity.vigorous_intensity_minutes = _integer(item, "vigorousIntensityMinutes")
     activity.body_battery_change = _integer(item, "differenceBodyBattery")
@@ -287,8 +297,10 @@ def _map_detail_summary(session: Session, activity: Activity, payload: Any) -> d
         return {}
     summary = payload.get("summaryDTO")
     if isinstance(summary, dict):
+        workout_feel = _workout_feel(summary)
+        if workout_feel is not None:
+            activity.workout_feel = workout_feel
         for attribute, keys, integer in (
-            ("workout_feel", ("directWorkoutFeel",), True),
             ("aerobic_training_effect", ("trainingEffect",), False),
             ("anaerobic_training_effect", ("anaerobicTrainingEffect",), False),
             ("average_power_watts", ("averagePower",), False),

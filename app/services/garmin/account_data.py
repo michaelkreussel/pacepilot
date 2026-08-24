@@ -18,8 +18,10 @@ from app.models import (
     GarminDevice,
     GarminSyncState,
     SyncRun,
+    Workout,
     WorkoutGarminBinding,
     WorkoutGarminRemoteIdentity,
+    WorkoutValidationRun,
 )
 from app.services.garmin.client import cancel_garmin_account_logins
 from app.services.garmin.locks import garmin_account_slot
@@ -151,6 +153,13 @@ def delete_garmin_data(session: Session, account: GarminAccount) -> GarminDataDe
         session.execute(delete(GarminSyncState).where(GarminSyncState.user_id == user_id))
         session.execute(delete(SyncRun).where(SyncRun.user_id == user_id))
         session.execute(delete(GarminDevice).where(GarminDevice.account_id == account_id))
+        session.execute(
+            delete(WorkoutValidationRun).where(
+                WorkoutValidationRun.workout_id.in_(
+                    select(Workout.id).where(Workout.user_id == user_id)
+                )
+            )
+        )
 
         # Remote identities and operation history are a minimal deduplication ledger. Removing
         # them while Garmin still holds the workout could cause a later duplicate upload.

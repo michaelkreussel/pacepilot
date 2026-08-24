@@ -37,7 +37,11 @@ READINESS_GUIDANCE = {
 
 
 @router.get("/", response_class=HTMLResponse)
-def dashboard(request: Request, session: SessionDep, user: CurrentUser) -> Response:
+def dashboard(
+    request: Request,
+    session: SessionDep,
+    user: CurrentUser,
+) -> Response:
     if not onboarding_state(user).complete:
         return RedirectResponse("/onboarding", status_code=303)
     account = get_or_create_garmin_account(session, user)

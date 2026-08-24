@@ -16,6 +16,7 @@ from app.models import (
     WorkoutValidationRun,
 )
 from app.models.user import utcnow
+from app.services.analytics.subjective_feedback import effective_activity_feedback
 from app.services.planning.feedback_service import FeedbackNotFoundError, FeedbackService
 from app.services.planning.safety_triage import (
     IllnessSignal,
@@ -368,6 +369,45 @@ def test_positive_wearable_readiness_cannot_override_safety_stop(
         assert service.acceptance_context(workout.id).report.outcome == TriageOutcome.SAFETY_STOP
 
 
+def test_effective_activity_feedback_drives_safety_context(
+    session_factory: sessionmaker[Session],
+) -> None:
+    with session_factory() as session:
+        user = User(display_name="Runner")
+        session.add(user)
+        session.flush()
+        workout_service = WorkoutService(session, user)
+        workout = workout_service.create(_workout_input())
+        activity = Activity(
+            user_id=user.id,
+            garmin_activity_id="effective-feedback",
+            name="Run",
+            activity_type="running",
+            started_at=utcnow(),
+        )
+        session.add(activity)
+        session.commit()
+        FeedbackService(session, user).record_post_session(
+            activity.id, PostSessionFeedbackInput(session_rpe=9, overall_feel=2)
+        )
+
+        manual_context = workout_service.acceptance_context(workout.id)
+        assert manual_context.report.outcome == TriageOutcome.WARN
+
+        activity.workout_rpe = 4
+        activity.workout_feel = 4
+        session.commit()
+        garmin_override = workout_service.acceptance_context(workout.id)
+        assert garmin_override.report.outcome == TriageOutcome.ALLOW
+        assert garmin_override.fingerprint != manual_context.fingerprint
+
+        activity.workout_rpe = 8
+        session.commit()
+        garmin_warning = workout_service.acceptance_context(workout.id)
+        assert garmin_warning.report.outcome == TriageOutcome.WARN
+        assert garmin_warning.fingerprint != garmin_override.fingerprint
+
+
 def test_post_feedback_export_survives_garmin_activity_deletion_and_can_be_deleted(
     session_factory: sessionmaker[Session],
 ) -> None:
@@ -389,23 +429,24 @@ def test_post_feedback_export_survives_garmin_activity_deletion_and_can_be_delet
             activity.id,
             PostSessionFeedbackInput(
                 completion_percent=80,
-                session_rpe=7.5,
+                session_rpe=8,
                 overall_feel=3,
                 stopped_reason="Zeitbudget",
                 notes="Bewusst verkürzt",
             ),
         )
 
-        payload = service.export_data()
-        exported = payload["post_session_feedback"]
-        assert isinstance(exported, list)
-        assert exported[0]["activity_id"] == activity.id
-        assert exported[0]["notes"] == "Bewusst verkürzt"
-
         session.delete(activity)
         session.commit()
         session.refresh(feedback)
         assert feedback.activity_id is None
+
+        payload = service.export_data()
+        exported = payload["post_session_feedback"]
+        assert isinstance(exported, list)
+        assert exported[0]["activity_id"] is None
+        assert exported[0]["notes"] == "Bewusst verkürzt"
+
         service.delete_post_session(feedback.id)
         assert session.get(PostSessionFeedback, feedback.id) is None
 
@@ -422,6 +463,47 @@ def test_feedback_service_is_user_scoped(session_factory: sessionmaker[Session])
 
         with pytest.raises(FeedbackNotFoundError):
             FeedbackService(session, owner).delete_pre_session(feedback.id)
+
+
+def test_effective_activity_feedback_prefers_garmin_and_falls_back_per_field(
+    session_factory: sessionmaker[Session],
+) -> None:
+    with session_factory() as session:
+        user = User(display_name="Runner")
+        session.add(user)
+        session.flush()
+        garmin = Activity(
+            user_id=user.id,
+            garmin_activity_id="garmin",
+            name="Garmin Run",
+            activity_type="running",
+            started_at=utcnow(),
+            workout_rpe=8,
+            workout_feel=4,
+        )
+        manual = Activity(
+            user_id=user.id,
+            garmin_activity_id="manual",
+            name="Manual Run",
+            activity_type="running",
+            started_at=utcnow(),
+        )
+        session.add_all([garmin, manual])
+        session.commit()
+        service = FeedbackService(session, user)
+        service.record_post_session(
+            garmin.id, PostSessionFeedbackInput(session_rpe=3, overall_feel=2)
+        )
+        service.record_post_session(
+            manual.id, PostSessionFeedbackInput(session_rpe=7, overall_feel=3)
+        )
+
+        feedback = effective_activity_feedback(session, user.id, [garmin, manual])
+
+        assert (feedback[garmin.id].effort, feedback[garmin.id].effort_source) == (8, "garmin")
+        assert (feedback[garmin.id].feel, feedback[garmin.id].feel_source) == (4, "garmin")
+        assert (feedback[manual.id].effort, feedback[manual.id].effort_source) == (7, "manual")
+        assert (feedback[manual.id].feel, feedback[manual.id].feel_source) == (3, "manual")
 
 
 def test_german_feedback_forms_routes_and_export(
@@ -441,25 +523,20 @@ def test_german_feedback_forms_routes_and_export(
     assert created.status_code == 303
     location = created.headers["location"]
     detail = client.get(location)
-    assert "Tagesgefühl und Sicherheit" in detail.text
-    assert "Lokalisierter Schmerz" in detail.text
+    assert ">Sicherheit<" in detail.text
+    assert "Sicherheitsangaben öffnen" in detail.text
+    assert "Was soll heute berücksichtigt" not in detail.text
+    assert "Motivation (1–5)" not in detail.text
 
     recorded = client.post(
         f"{location}/feedback/pre-session",
         data={
-            "motivation": "5",
-            "fatigue": "1",
-            "leg_freshness": "5",
-            "soreness": "0",
-            "sleep_quality": "5",
             "illness_signal": "none",
-            "available_minutes": "45",
             "pain_present": "yes",
             "pain_location": "Knie",
             "pain_severity": "3",
             "pain_alters_gait": "yes",
             "pain_worsens_with_activity": "no",
-            "notes": "Gangbild verändert",
         },
         follow_redirects=False,
     )
@@ -483,16 +560,45 @@ def test_german_feedback_forms_routes_and_export(
         activity_id = activity.id
     activity_page = client.get(f"/activities/{activity_id}")
     assert "Wie lief dein Training?" in activity_page.text
+    assert "Wie anstrengend war es?" in activity_page.text
+    assert "Abgeschlossen (%)" not in activity_page.text
+    assert 'pt-4" open>' in activity_page.text
     post = client.post(
         f"/activities/{activity_id}/feedback/post-session",
         data={
-            "completion_percent": "90",
-            "session_rpe": "6.5",
+            "session_rpe": "6",
             "overall_feel": "3",
         },
         follow_redirects=False,
     )
     assert post.status_code == 303
+    activity_page = client.get(f"/activities/{activity_id}")
+    assert "😐 Okay" in activity_page.text
+
+    with session_factory() as session:
+        activity = session.get(Activity, activity_id)
+        assert activity is not None
+        activity.workout_rpe = 5
+        activity.workout_feel = 4
+        session.commit()
+    activity_page = client.get(f"/activities/{activity_id}")
+    assert "🙂 Gut" in activity_page.text
+    assert activity_page.text.count(">Garmin<") >= 2
+
+    with session_factory() as session:
+        activity = session.get(Activity, activity_id)
+        assert activity is not None
+        activity.workout_rpe = None
+        session.commit()
+    activity_page = client.get(f"/activities/{activity_id}")
+    assert "6.0" in activity_page.text
+    assert "🙂 Gut" in activity_page.text
+    assert ">Manuell<" in activity_page.text
+    assert ">Garmin<" in activity_page.text
+
+    dashboard = client.get("/")
+    assert "Wie geht es dir heute?" not in dashboard.text
+    assert client.post("/feedback/daily").status_code == 404
 
     exported = client.get("/settings/feedback/export")
     assert exported.status_code == 200

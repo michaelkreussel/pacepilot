@@ -20,6 +20,7 @@ from app.models import (
     WorkoutGarminRemoteIdentity,
 )
 from app.services.garmin.activity_backfill import (
+    _map_activity_summary,
     _map_detail_summary,
     _parse_datetime,
     sync_activity_history,
@@ -70,6 +71,26 @@ def _activity(
 def test_provider_timestamps_are_normalized_to_naive_utc() -> None:
     assert _parse_datetime(0) == datetime(1970, 1, 1)
     assert _parse_datetime("2026-08-08T12:00:00+02:00") == datetime(2026, 8, 8, 10)
+
+
+def test_activity_summary_clears_removed_garmin_feedback() -> None:
+    activity = Activity(
+        user_id=1,
+        garmin_activity_id="1",
+        name="Run",
+        activity_type="running",
+        started_at=datetime(2026, 8, 8, 10),
+        workout_rpe=8,
+        workout_feel=4,
+    )
+
+    _map_activity_summary(
+        activity,
+        _activity(1, "2026-08-08 10:00:00", "running", name="Run"),
+    )
+
+    assert activity.workout_rpe is None
+    assert activity.workout_feel is None
 
 
 class FakeActivityGarmin:
@@ -260,7 +281,7 @@ def test_activity_backfill_imports_details_and_skips_unchanged(
         assert recent is not None
         assert recent.vo2max == 54.0
         assert recent.workout_rpe == 5
-        assert recent.workout_feel == 75
+        assert recent.workout_feel == 4
         assert recent.details_complete is True
         assert recent.splits_complete is True
         assert recent.zones_complete is True

@@ -10,6 +10,7 @@ from app.repositories.activities import activities_between
 from app.repositories.fitness import fitness_between
 from app.repositories.health import health_metrics_between, latest_health_on_or_before
 from app.repositories.sync_state import sync_states_for_user
+from app.services.analytics.subjective_feedback import effective_activity_feedback
 
 BASELINE_DAYS = 84
 BASELINE_GAP_DAYS = 7
@@ -610,12 +611,13 @@ def _pacepilot_readiness(
         datetime.combine(as_of - timedelta(days=6), time.min),
         datetime.combine(as_of + timedelta(days=1), time.min),
     )
+    feedback = effective_activity_feedback(session, user_id, recent)
     measured = [
         activity
         for activity in recent
         if activity.aerobic_training_effect is not None
         or activity.anaerobic_training_effect is not None
-        or activity.workout_rpe is not None
+        or feedback[activity.id].effort is not None
     ]
     activity_state = next(
         (
@@ -638,7 +640,7 @@ def _pacepilot_readiness(
             if (
                 (activity.aerobic_training_effect or 0) >= 3.5
                 or (activity.anaerobic_training_effect or 0) >= 2.5
-                or (activity.workout_rpe or 0) >= 7
+                or (feedback[activity.id].effort or 0) >= 7
             )
         ]
         days_since_hard = (as_of - hard[-1].started_at.date()).days if hard else 7

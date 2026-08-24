@@ -19,8 +19,12 @@ from app.services.analytics.activity_semantics import (
     is_hard_activity,
     is_running_sport,
 )
+from app.services.analytics.subjective_feedback import (
+    EffectiveActivityFeedback,
+    effective_activity_feedback,
+)
 
-RUNNING_BASELINE_VERSION = "1.0"
+RUNNING_BASELINE_VERSION = "1.1"
 RUNNING_BASELINE_WINDOWS = (7, 28, 56, 180)
 INTERRUPTION_DAYS = 7
 REENTRY_INTERRUPTION_DAYS = 14
@@ -323,6 +327,7 @@ def _weekly_values(
 def _window_baseline(
     all_runs: list[Activity],
     state: GarminSyncState | None,
+    feedback: dict[int, EffectiveActivityFeedback],
     *,
     days: int,
     as_of: date,
@@ -335,7 +340,9 @@ def _window_baseline(
     distance_values = [
         value for run in runs if (value := _valid_measurement(run.distance_m)) is not None
     ]
-    valid_rpe = [run for run in runs if run.workout_rpe is not None and 1 <= run.workout_rpe <= 10]
+    valid_rpe = [
+        run for run in runs if (rpe := feedback[run.id].effort) is not None and 1 <= rpe <= 10
+    ]
     invalid_duration = sum(
         run.duration_s is not None and _valid_measurement(run.duration_s) is None for run in runs
     )
@@ -347,11 +354,11 @@ def _window_baseline(
     )
     srpe_values: list[float] = []
     for run in valid_rpe:
-        rpe = run.workout_rpe
+        rpe = feedback[run.id].effort
         duration = _valid_measurement(run.duration_s)
         if rpe is not None and duration is not None:
             srpe_values.append(float(rpe) * duration / 60)
-    hard_runs = [run for run in runs if is_hard_activity(run)]
+    hard_runs = [run for run in runs if is_hard_activity(run, workout_rpe=feedback[run.id].effort)]
     hard_days = sorted({run.started_at.date() for run in hard_runs})
     gaps = [
         (later - earlier).days for earlier, later in zip(hard_days, hard_days[1:], strict=False)
@@ -360,7 +367,10 @@ def _window_baseline(
     distance_coverage = _coverage(len(distance_values), len(runs))
     rpe_coverage = _coverage(len(valid_rpe), len(runs))
     srpe_coverage = _coverage(len(srpe_values), len(runs))
-    hard_coverage = _coverage(sum(hard_activity_data_available(run) for run in runs), len(runs))
+    hard_coverage = _coverage(
+        sum(hard_activity_data_available(run, workout_rpe=feedback[run.id].effort) for run in runs),
+        len(runs),
+    )
     history_percent = _history_coverage(state, window.start, window.end)
     latest_day = max((run.started_at.date() for run in runs), default=None)
     latest_age = (as_of - latest_day).days if latest_day else None
@@ -524,7 +534,10 @@ def _fingerprint_value(value: float | int | None) -> float | int | str | None:
 
 
 def _input_fingerprint(
-    source_runs: list[Activity], state: GarminSyncState | None, as_of: date
+    source_runs: list[Activity],
+    state: GarminSyncState | None,
+    as_of: date,
+    feedback: dict[int, EffectiveActivityFeedback],
 ) -> str:
     payload = {
         "as_of": as_of,
@@ -540,7 +553,9 @@ def _input_fingerprint(
                 "distance_m": _fingerprint_value(run.distance_m),
                 "aerobic_training_effect": _fingerprint_value(run.aerobic_training_effect),
                 "anaerobic_training_effect": _fingerprint_value(run.anaerobic_training_effect),
-                "workout_rpe": run.workout_rpe,
+                "workout_rpe": feedback[run.id].effort,
+                "workout_rpe_source": feedback[run.id].effort_source,
+                "workout_rpe_feedback_id": feedback[run.id].effort_feedback_id,
                 "source_fingerprint": run.source_fingerprint,
             }
             for run in source_runs
@@ -602,21 +617,23 @@ def get_running_baseline(
         )
     states = {state.resource: state for state in sync_states_for_user(session, user_id)}
     activity_state = states.get("activities")
-    interruptions = _interruptions(runs, predecessor, end)
     fingerprint_runs = list(reference_runs)
+    feedback = effective_activity_feedback(session, user_id, fingerprint_runs)
+    interruptions = _interruptions(runs, predecessor, end)
     if predecessor and all(run.id != predecessor.id for run in reference_runs):
         fingerprint_runs.insert(0, predecessor)
+        feedback.update(effective_activity_feedback(session, user_id, [predecessor]))
     return RunningBaseline(
         as_of=end,
         baseline_version=RUNNING_BASELINE_VERSION,
         sport_classification_version=SPORT_CLASSIFICATION_VERSION,
         hard_activity_rule_version=HARD_ACTIVITY_RULE_VERSION,
         windows=tuple(
-            _window_baseline(runs, activity_state, days=days, as_of=end)
+            _window_baseline(runs, activity_state, feedback, days=days, as_of=end)
             for days in RUNNING_BASELINE_WINDOWS
         ),
         interruptions=interruptions,
         reentry=_reentry(interruptions, end),
         latest_distance_spike=_distance_spike(runs, reference_runs),
-        input_fingerprint=_input_fingerprint(fingerprint_runs, activity_state, end),
+        input_fingerprint=_input_fingerprint(fingerprint_runs, activity_state, end, feedback),
     )

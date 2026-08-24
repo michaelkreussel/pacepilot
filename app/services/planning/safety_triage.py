@@ -9,8 +9,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from app.models import PostSessionFeedback, PreSessionFeedback, Workout, WorkoutRevision
+from app.models import Activity, PostSessionFeedback, PreSessionFeedback, Workout, WorkoutRevision
 from app.models.user import utcnow
+from app.services.analytics.subjective_feedback import effective_activity_feedback
 from app.services.planning.workout_revision import default_context_fingerprint
 
 SAFETY_RULE_SET_VERSION = "safety-triage-v1"
@@ -47,10 +48,10 @@ class PainInput(BaseModel):
 class PreSessionFeedbackInput(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
-    motivation: int = Field(ge=1, le=5)
-    fatigue: int = Field(ge=1, le=5)
-    leg_freshness: int = Field(ge=1, le=5)
-    soreness: int = Field(ge=0, le=10)
+    motivation: int | None = Field(default=None, ge=1, le=5)
+    fatigue: int | None = Field(default=None, ge=1, le=5)
+    leg_freshness: int | None = Field(default=None, ge=1, le=5)
+    soreness: int | None = Field(default=None, ge=0, le=10)
     sleep_quality: int | None = Field(default=None, ge=1, le=5)
     pain: PainInput = Field(default_factory=PainInput)
     illness_signal: IllnessSignal = IllnessSignal.NONE
@@ -61,9 +62,9 @@ class PreSessionFeedbackInput(BaseModel):
 class PostSessionFeedbackInput(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
-    completion_percent: int = Field(ge=0, le=100)
-    session_rpe: float = Field(ge=0, le=10)
-    overall_feel: int = Field(ge=1, le=5)
+    completion_percent: int | None = Field(default=None, ge=0, le=100)
+    session_rpe: int | None = Field(default=None, ge=1, le=10)
+    overall_feel: int | None = Field(default=None, ge=1, le=5)
     pain: PainInput = Field(default_factory=PainInput)
     stopped_reason: str | None = Field(default=None, max_length=500)
     notes: str | None = Field(default=None, max_length=2000)
@@ -111,6 +112,14 @@ class SafetyContext:
     report: SafetyReport
 
 
+@dataclass(frozen=True)
+class EffectiveSessionFeedback:
+    activity_id: int | None
+    effort: float | None
+    feel: int | None
+    feedback_ids: tuple[str, ...]
+
+
 def feedback_content_hash(data: BaseModel) -> str:
     payload = json.dumps(
         data.model_dump(mode="json"),
@@ -139,6 +148,7 @@ def _issue(
 def triage_feedback(
     pre_feedback: list[PreSessionFeedback],
     post_feedback: list[PostSessionFeedback],
+    effective_sessions: list[EffectiveSessionFeedback] | None = None,
 ) -> SafetyReport:
     issues: dict[str, SafetyIssue] = {}
     for feedback in pre_feedback:
@@ -203,9 +213,12 @@ def triage_feedback(
             feedback.pain_worsens_with_activity,
         )
         if (
-            feedback.fatigue >= 4
-            or feedback.leg_freshness <= 2
-            or feedback.soreness >= 5
+            feedback.fatigue is not None
+            and feedback.fatigue >= 4
+            or feedback.leg_freshness is not None
+            and feedback.leg_freshness <= 2
+            or feedback.soreness is not None
+            and feedback.soreness >= 5
             or feedback.sleep_quality is not None
             and feedback.sleep_quality <= 2
         ):
@@ -242,9 +255,14 @@ def triage_feedback(
             feedback.pain_worsens_with_activity,
         )
         if (
-            feedback.completion_percent < 75
-            or feedback.session_rpe >= 8
-            or feedback.overall_feel <= 2
+            feedback.completion_percent is not None
+            and feedback.completion_percent < 75
+            or effective_sessions is None
+            and feedback.session_rpe is not None
+            and feedback.session_rpe >= 8
+            or effective_sessions is None
+            and feedback.overall_feel is not None
+            and feedback.overall_feel <= 2
         ):
             _issue(
                 issues,
@@ -257,6 +275,24 @@ def triage_feedback(
                 rule_id="RECOVERY-SESSION-001",
                 feedback_id=feedback_id,
             )
+
+    for feedback in effective_sessions or ():
+        if (feedback.effort is not None and feedback.effort >= 8) or (
+            feedback.feel is not None and feedback.feel <= 2
+        ):
+            references = feedback.feedback_ids or (f"activity-feedback:{feedback.activity_id}",)
+            for feedback_id in references:
+                _issue(
+                    issues,
+                    code="recovery.difficult_session",
+                    severity=TriageOutcome.WARN,
+                    message=(
+                        "Die letzte Einheit war auffällig belastend oder unvollständig. Die "
+                        "nächste Belastung sollte konservativ geprüft werden."
+                    ),
+                    rule_id="RECOVERY-SESSION-001",
+                    feedback_id=feedback_id,
+                )
 
     severity_order = {
         TriageOutcome.ALLOW: 0,
@@ -365,10 +401,78 @@ def build_safety_context(
         if include_recent
         else []
     )
-    report = triage_feedback(pre_feedback, post_feedback)
-    feedback_entries = [
-        {"id": f"pre:{item.id}", "content_hash": item.content_hash} for item in pre_feedback
-    ] + [{"id": f"post:{item.id}", "content_hash": item.content_hash} for item in post_feedback]
+    linked_activity_ids = {
+        item.activity_id for item in post_feedback if item.activity_id is not None
+    }
+    activity_filter = Activity.started_at >= cutoff
+    if linked_activity_ids:
+        activity_filter = or_(activity_filter, Activity.id.in_(linked_activity_ids))
+    activities = (
+        list(
+            session.scalars(
+                select(Activity)
+                .where(Activity.user_id == user_id, activity_filter)
+                .order_by(Activity.started_at, Activity.id)
+            )
+        )
+        if include_recent
+        else []
+    )
+    effective = effective_activity_feedback(session, user_id, activities)
+    effective_sessions = [
+        EffectiveSessionFeedback(
+            activity_id=activity.id,
+            effort=effective[activity.id].effort,
+            feel=effective[activity.id].feel,
+            feedback_ids=tuple(
+                dict.fromkeys(
+                    f"post:{feedback_id}"
+                    for feedback_id in (
+                        effective[activity.id].effort_feedback_id,
+                        effective[activity.id].feel_feedback_id,
+                    )
+                    if feedback_id is not None
+                )
+            ),
+        )
+        for activity in activities
+        if effective[activity.id].effort is not None or effective[activity.id].feel is not None
+    ]
+    effective_sessions.extend(
+        EffectiveSessionFeedback(
+            activity_id=None,
+            effort=item.session_rpe,
+            feel=item.overall_feel,
+            feedback_ids=(f"post:{item.id}",),
+        )
+        for item in post_feedback
+        if item.activity_id is None
+    )
+    report = triage_feedback(pre_feedback, post_feedback, effective_sessions)
+    effective_entries = [
+        {
+            "id": f"activity-feedback:{item.activity_id}",
+            "content_hash": hashlib.sha256(
+                json.dumps(
+                    {
+                        "activity_id": item.activity_id,
+                        "effort": item.effort,
+                        "feel": item.feel,
+                        "feedback_ids": item.feedback_ids,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest(),
+        }
+        for item in effective_sessions
+        if item.activity_id is not None
+    ]
+    feedback_entries = (
+        [{"id": f"pre:{item.id}", "content_hash": item.content_hash} for item in pre_feedback]
+        + [{"id": f"post:{item.id}", "content_hash": item.content_hash} for item in post_feedback]
+        + effective_entries
+    )
     if not feedback_entries:
         fingerprint = default_context_fingerprint(revision.content_hash)
     else:

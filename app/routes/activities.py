@@ -15,6 +15,7 @@ from app.repositories.activities import (
     list_activities_filtered,
     list_activity_types,
 )
+from app.services.analytics.subjective_feedback import effective_activity_feedback
 from app.services.garmin.activity_details import empty_activity_details, load_activity_details
 from app.services.planning.feedback_service import FeedbackService
 from app.web import context, format_activity_type, templates
@@ -139,6 +140,8 @@ def activity_detail(
     activity = find_activity(session, user.id, activity_id)
     if activity is None:
         raise HTTPException(status_code=404, detail="Aktivität nicht gefunden")
+    feedback_service = FeedbackService(session, user)
+    effective_feedback = effective_activity_feedback(session, user.id, [activity])[activity.id]
     return templates.TemplateResponse(
         request,
         "activities/detail.html",
@@ -146,9 +149,8 @@ def activity_detail(
             request,
             active_page="activities",
             activity=activity,
-            post_session_feedback=FeedbackService(session, user).post_session_for_activity(
-                activity.id
-            ),
+            effective_feedback=effective_feedback,
+            post_session_feedback=feedback_service.post_session_for_activity(activity.id),
             error=error,
             notice=notice,
             activity_zone_groups=_activity_zone_groups(activity),
