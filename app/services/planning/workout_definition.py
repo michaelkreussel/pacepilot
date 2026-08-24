@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from math import isfinite
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, overload
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -60,6 +61,22 @@ type WorkoutTarget = Annotated[
 ]
 
 
+class RpeRangeTarget(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["rpe_range"]
+    lower_rpe: int = Field(ge=1, le=10)
+    upper_rpe: int = Field(ge=1, le=10)
+
+
+type WorkoutTargetV2 = Annotated[
+    NoTarget | PaceRangeTarget | HeartRateRangeTarget | HeartRateZoneTarget | RpeRangeTarget,
+    Field(discriminator="type"),
+]
+
+type StepInstruction = Annotated[str, Field(min_length=1, max_length=300)]
+
+
 class StepBlock(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -87,6 +104,42 @@ class WorkoutDefinition(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     blocks: list[WorkoutBlock]
+
+
+class StepBlockV2(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    kind: Literal["step"]
+    step_type: Literal["warmup", "interval", "recovery", "cooldown"]
+    end: EndCondition
+    target: WorkoutTargetV2
+    instructions: list[StepInstruction] = Field(default_factory=list, max_length=5)
+
+
+class RepeatBlockV2(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    kind: Literal["repeat"]
+    iterations: int
+    children: list[WorkoutBlockV2]
+
+
+type WorkoutBlockV2 = Annotated[StepBlockV2 | RepeatBlockV2, Field(discriminator="kind")]
+RepeatBlockV2.model_rebuild()
+
+
+class WorkoutDefinitionV2(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    blocks: list[WorkoutBlockV2]
+
+
+type WorkoutDefinitionModel = WorkoutDefinition | WorkoutDefinitionV2
+type AnyWorkoutBlock = WorkoutBlock | WorkoutBlockV2
+type AnyStepBlock = StepBlock | StepBlockV2
+type AnyRepeatBlock = RepeatBlock | RepeatBlockV2
 
 
 class DefinitionValidationError(ValueError):
@@ -129,15 +182,34 @@ def _new_step(
     )
 
 
-def definition_to_json(definition: WorkoutDefinition) -> dict[str, Any]:
+def definition_to_json(definition: WorkoutDefinitionModel) -> dict[str, Any]:
     return definition.model_dump(mode="json")
 
 
-def parse_definition(value: object) -> WorkoutDefinition:
-    return WorkoutDefinition.model_validate(value)
+@overload
+def parse_definition(value: object, definition_version: Literal[1] = 1) -> WorkoutDefinition: ...
 
 
-def validate_definition(definition: WorkoutDefinition, sport: str) -> None:
+@overload
+def parse_definition(value: object, definition_version: Literal[2]) -> WorkoutDefinitionV2: ...
+
+
+@overload
+def parse_definition(value: object, definition_version: int) -> WorkoutDefinitionModel: ...
+
+
+def parse_definition(value: object, definition_version: int = 1) -> WorkoutDefinitionModel:
+    if definition_version == 1:
+        return WorkoutDefinition.model_validate(value)
+    if definition_version == 2:
+        return WorkoutDefinitionV2.model_validate(value)
+    raise DefinitionValidationError(
+        "Diese Workout-Formatversion wird nicht unterstützt.",
+        code="definition.version_unsupported",
+    )
+
+
+def validate_definition(definition: WorkoutDefinitionModel, sport: str) -> None:
     if not definition.blocks:
         raise DefinitionValidationError(
             "Mindestens ein Trainingsschritt ist erforderlich.",
@@ -146,7 +218,7 @@ def validate_definition(definition: WorkoutDefinition, sport: str) -> None:
 
     seen_ids: set[str] = set()
 
-    def validate_blocks(blocks: list[WorkoutBlock], depth: int) -> None:
+    def validate_blocks(blocks: Sequence[AnyWorkoutBlock], depth: int) -> None:
         for block in blocks:
             if not block.id or block.id in seen_ids:
                 raise DefinitionValidationError(
@@ -154,7 +226,7 @@ def validate_definition(definition: WorkoutDefinition, sport: str) -> None:
                     code="definition.block_id_invalid",
                 )
             seen_ids.add(block.id)
-            if isinstance(block, RepeatBlock):
+            if isinstance(block, (RepeatBlock, RepeatBlockV2)):
                 if depth >= 1:
                     raise DefinitionValidationError(
                         "Verschachtelte Wiederholungen werden noch nicht unterstützt.",
@@ -209,6 +281,11 @@ def validate_definition(definition: WorkoutDefinition, sport: str) -> None:
                     "Die Herzfrequenzzone muss zwischen 1 und 5 liegen.",
                     code="definition.heart_rate_zone_invalid",
                 )
+            elif isinstance(target, RpeRangeTarget) and target.lower_rpe > target.upper_rpe:
+                raise DefinitionValidationError(
+                    "Die untere RPE-Grenze darf nicht höher als die obere sein.",
+                    code="definition.rpe_order_invalid",
+                )
 
     validate_blocks(definition.blocks, 0)
 
@@ -217,11 +294,11 @@ def _valid_positive(value: float) -> bool:
     return isfinite(value) and value > 0
 
 
-def workout_metrics(definition: WorkoutDefinition) -> WorkoutMetrics:
-    def collect(blocks: list[WorkoutBlock], multiplier: int = 1) -> WorkoutMetrics:
+def workout_metrics(definition: WorkoutDefinitionModel) -> WorkoutMetrics:
+    def collect(blocks: Sequence[AnyWorkoutBlock], multiplier: int = 1) -> WorkoutMetrics:
         result = WorkoutMetrics()
         for block in blocks:
-            if isinstance(block, RepeatBlock):
+            if isinstance(block, (RepeatBlock, RepeatBlockV2)):
                 child = collect(block.children, multiplier * block.iterations)
                 result = _add_metrics(result, child)
                 continue

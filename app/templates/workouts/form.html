@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Workout {{ 'bearbeiten' if workout else 'erstellen' }} · PacePilot{% endblock %}
-{% block head %}<script src="{{ url_for('static', path='/js/workout-builder.js') }}?v=20260809-2"></script>{% endblock %}
+{% block head %}<script src="{{ url_for('static', path='/js/workout-builder.js') }}?v=20260824-3"></script>{% endblock %}
 {% block content %}
 <div class="mb-6 flex flex-col gap-4 sm:mb-8 sm:flex-row sm:items-start sm:justify-between">
   <div class="min-w-0">
@@ -37,9 +37,11 @@
 </dialog>
 {% if error %}<div class="mb-5 rounded-md border border-danger/25 bg-danger-subtle px-4 py-3 text-sm text-danger-emphasis">{{ error }}</div>{% endif %}
 {% if workout and workout.accepted %}<div class="mb-5 rounded-md border border-info/25 bg-info-subtle px-4 py-3 text-sm text-info-emphasis"><strong class="text-foreground">Revision {{ workout.accepted.revision_number }} bleibt aktiv.</strong> Speichern ändert Garmin und deinen Kalender noch nicht.</div>{% endif %}
-<form method="post" action="{{ '/workouts/' ~ workout.id if workout else '/workouts' }}" class="grid gap-5" x-data='workoutBuilder({{ initial_definition|tojson }}, {{ form_data.sport|tojson }})'>
+<form method="post" action="{{ '/workouts/' ~ workout.id if workout else '/workouts' }}" class="grid gap-5" x-data='workoutBuilder({{ initial_definition|tojson }}, {{ form_data.sport|tojson }}, {{ form_data.definition_version|tojson }})'>
   {{ csrf_field() }}
+  {% if workout and workout.source_type == 'coach_single' %}<input type="hidden" name="revision_id" value="{{ workout.current.id }}"><input type="hidden" name="revision_number" value="{{ workout.current.revision_number }}"><input type="hidden" name="content_hash" value="{{ workout.current.content_hash }}"><input type="hidden" name="lock_version" value="{{ workout.lock_version }}"><input type="hidden" name="idempotency_key" value="{{ edit_idempotency_key }}"><input type="hidden" name="sport" value="running">{% endif %}
   <input type="hidden" name="definition" :value="serializedDefinition()">
+  <input type="hidden" name="definition_version" :value="definitionVersion">
   <section class="rounded-lg border border-border bg-surface p-4 sm:p-5">
     <div class="mb-5 flex items-start gap-3">
       <span class="mt-0.5 grid size-7 shrink-0 place-items-center rounded-full bg-primary-subtle text-xs font-semibold text-primary-emphasis">01</span>
@@ -47,8 +49,8 @@
     </div>
     <label class="block min-w-0 text-xs font-semibold text-foreground">Name<input class="mt-1.5 block w-full rounded-md border border-input bg-surface px-3 py-2 text-sm text-foreground shadow-none outline-none placeholder:text-muted-foreground focus:border-ring focus:ring-2 focus:ring-ring/20 disabled:cursor-not-allowed disabled:opacity-50" name="name" required maxlength="200" placeholder="z. B. 8 × 400 m kontrolliert" value="{{ form_data.name }}"></label>
     <div class="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
-      <label class="block min-w-0 text-xs font-semibold text-foreground">Sportart<select class="mt-1.5 block w-full rounded-md border border-input bg-surface px-3 py-2 text-sm text-foreground shadow-none outline-none placeholder:text-muted-foreground focus:border-ring focus:ring-2 focus:ring-ring/20 disabled:cursor-not-allowed disabled:opacity-50" name="sport" x-model="sport"><option value="running">Laufen</option><option value="cycling">Radfahren</option><option value="walking">Gehen</option><option value="hiking">Wandern</option></select></label>
-      <label class="block min-w-0 text-xs font-semibold text-foreground">Vorgeschlagenes Datum<input class="mt-1.5 block w-full rounded-md border border-input bg-surface px-3 py-2 text-sm text-foreground shadow-none outline-none placeholder:text-muted-foreground focus:border-ring focus:ring-2 focus:ring-ring/20 disabled:cursor-not-allowed disabled:opacity-50" type="date" name="scheduled_for" {% if not workout %}min="{{ today.isoformat() }}"{% endif %} value="{{ form_data.scheduled_for }}"></label>
+      <label class="block min-w-0 text-xs font-semibold text-foreground">Sportart<select class="mt-1.5 block w-full rounded-md border border-input bg-surface px-3 py-2 text-sm text-foreground shadow-none outline-none placeholder:text-muted-foreground focus:border-ring focus:ring-2 focus:ring-ring/20 disabled:cursor-not-allowed disabled:opacity-50" {% if not workout or workout.source_type != 'coach_single' %}name="sport"{% else %}disabled aria-describedby="proposal-sport-help"{% endif %} x-model="sport"><option value="running">Laufen</option><option value="cycling">Radfahren</option><option value="walking">Gehen</option><option value="hiking">Wandern</option></select>{% if workout and workout.source_type == 'coach_single' %}<span class="mt-1 block font-normal text-muted-foreground" id="proposal-sport-help">Easy-Run-Vorschläge bleiben Lauftrainings.</span>{% endif %}</label>
+      <label class="block min-w-0 text-xs font-semibold text-foreground">Vorgeschlagenes Datum<input class="mt-1.5 block w-full rounded-md border border-input bg-surface px-3 py-2 text-sm text-foreground shadow-none outline-none placeholder:text-muted-foreground focus:border-ring focus:ring-2 focus:ring-ring/20 disabled:cursor-not-allowed disabled:opacity-50" type="date" name="scheduled_for" {% if not workout or workout.source_type == 'coach_single' %}min="{{ today.isoformat() }}"{% endif %} value="{{ form_data.scheduled_for }}"></label>
     </div>
     <label class="mt-4 block min-w-0 text-xs font-semibold text-foreground">Beschreibung<textarea class="mt-1.5 block w-full resize-y rounded-md border border-input bg-surface px-3 py-2 text-sm text-foreground shadow-none outline-none placeholder:text-muted-foreground focus:border-ring focus:ring-2 focus:ring-ring/20 disabled:cursor-not-allowed disabled:opacity-50" name="description" rows="3" placeholder="Ziel und Hinweise für die Einheit">{{ form_data.description }}</textarea></label>
   </section>

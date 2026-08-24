@@ -1,7 +1,8 @@
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from enum import StrEnum
 from typing import Literal
 
@@ -12,11 +13,20 @@ from sqlalchemy.orm import Session
 from app.models import Activity, PostSessionFeedback, PreSessionFeedback, Workout, WorkoutRevision
 from app.models.user import utcnow
 from app.services.analytics.subjective_feedback import effective_activity_feedback
+from app.services.planning.registry import get_knowledge_registry
 from app.services.planning.workout_revision import default_context_fingerprint
 
-SAFETY_RULE_SET_VERSION = "safety-triage-v1"
+_KNOWLEDGE_VERSION = get_knowledge_registry().version.rsplit(":", 1)[-1][:12]
+SAFETY_RULE_SET_VERSION = f"safety-triage-v1+{_KNOWLEDGE_VERSION}"
 FEEDBACK_FRESHNESS_DAYS = 7
 type ValidationMode = Literal["acceptance", "sync"]
+
+
+def _integer_rule_parameter(parameters: Mapping[str, object], name: str) -> int:
+    value = parameters[name]
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise RuntimeError(f"Safety rule parameter {name} must be an integer")
+    return value
 
 
 class IllnessSignal(StrEnum):
@@ -150,6 +160,9 @@ def triage_feedback(
     post_feedback: list[PostSessionFeedback],
     effective_sessions: list[EffectiveSessionFeedback] | None = None,
 ) -> SafetyReport:
+    recovery_parameters = get_knowledge_registry().constraints["RECOVERY-SESSION-001"].parameters
+    high_rpe_threshold = _integer_rule_parameter(recovery_parameters, "high_rpe_threshold")
+    low_feel_threshold = _integer_rule_parameter(recovery_parameters, "low_feel_threshold")
     issues: dict[str, SafetyIssue] = {}
     for feedback in pre_feedback:
         feedback_id = f"pre:{feedback.id}"
@@ -259,10 +272,10 @@ def triage_feedback(
             and feedback.completion_percent < 75
             or effective_sessions is None
             and feedback.session_rpe is not None
-            and feedback.session_rpe >= 8
+            and feedback.session_rpe >= high_rpe_threshold
             or effective_sessions is None
             and feedback.overall_feel is not None
-            and feedback.overall_feel <= 2
+            and feedback.overall_feel <= low_feel_threshold
         ):
             _issue(
                 issues,
@@ -277,8 +290,8 @@ def triage_feedback(
             )
 
     for feedback in effective_sessions or ():
-        if (feedback.effort is not None and feedback.effort >= 8) or (
-            feedback.feel is not None and feedback.feel <= 2
+        if (feedback.effort is not None and feedback.effort >= high_rpe_threshold) or (
+            feedback.feel is not None and feedback.feel <= low_feel_threshold
         ):
             references = feedback.feedback_ids or (f"activity-feedback:{feedback.activity_id}",)
             for feedback_id in references:
@@ -493,4 +506,48 @@ def build_safety_context(
         fingerprint=fingerprint,
         feedback_ids=tuple(str(item["id"]) for item in feedback_entries),
         report=report,
+    )
+
+
+def build_proposal_safety_context(
+    session: Session,
+    user_id: int,
+    *,
+    suggested_for: date | None = None,
+    content_hash: str = "proposal-candidate",
+    now: datetime | None = None,
+) -> SafetyContext:
+    """Build the same acceptance context before a proposal aggregate exists."""
+    proposed_date = suggested_for or (now or utcnow()).date()
+    workout = Workout(
+        user_id=user_id,
+        name="Proposal candidate",
+        sport="running",
+        scheduled_for=None,
+        status="draft",
+        definition_version=2,
+        definition={"blocks": []},
+        source_type="coach_single",
+        approval_status="proposed",
+        local_schedule_status="unscheduled",
+    )
+    revision = WorkoutRevision(
+        workout_id=0,
+        revision_number=1,
+        name="Proposal candidate",
+        sport="running",
+        suggested_for=proposed_date,
+        definition_version=2,
+        definition={"blocks": []},
+        source_type="coach_single",
+        content_hash=content_hash,
+        edit_source="generator",
+    )
+    return build_safety_context(
+        session,
+        user_id,
+        workout,
+        revision,
+        mode="acceptance",
+        now=now,
     )

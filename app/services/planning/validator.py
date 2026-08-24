@@ -4,6 +4,8 @@ from datetime import date
 from app.services.planning.workout_definition import (
     DefinitionValidationError,
     WorkoutDefinition,
+    WorkoutDefinitionModel,
+    WorkoutDefinitionV2,
     validate_definition,
 )
 
@@ -16,7 +18,8 @@ class WorkoutInput:
     sport: str
     scheduled_for: date | None
     description: str
-    definition: WorkoutDefinition
+    definition: WorkoutDefinitionModel
+    definition_version: int = 1
 
 
 class WorkoutValidationError(ValueError):
@@ -37,6 +40,16 @@ def validate_workout(workout: WorkoutInput) -> None:
         raise WorkoutValidationError(
             "Diese Sportart wird noch nicht unterstützt.",
             code="workout.sport_unsupported",
+        )
+    if workout.definition_version not in {1, 2} or (
+        workout.definition_version == 1
+        and not isinstance(workout.definition, WorkoutDefinition)
+        or workout.definition_version == 2
+        and not isinstance(workout.definition, WorkoutDefinitionV2)
+    ):
+        raise WorkoutValidationError(
+            "Workout-Struktur und Formatversion passen nicht zusammen.",
+            code="definition.version_mismatch",
         )
     try:
         validate_definition(workout.definition, workout.sport)

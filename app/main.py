@@ -30,6 +30,7 @@ from app.routes import (
     settings,
     workouts,
 )
+from app.services.planning.registry import get_knowledge_registry
 
 
 @asynccontextmanager
@@ -47,6 +48,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         level=getattr(logging, app_settings.log_level),
     )
     app_settings.garmin_token_dir.mkdir(parents=True, exist_ok=True)
+    get_knowledge_registry()
     upgrade_database()
     start_scheduler()
     try:

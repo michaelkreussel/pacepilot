@@ -1,0 +1,41 @@
+id: progression
+version: 1.0.0
+rules:
+  - id: LOAD-NO-CATCHUP-001
+    status: active
+    enforcement: hard_constraint
+    implementation: progression.no_catchup_stacking
+    description: Missed sessions are not stacked into a later day.
+    evidence_refs: [E-PROGRESSION-001]
+    product_heuristic:
+      product_default: true
+      rationale: Rejecting catch-up stacking is a conservative load-management invariant.
+      status: initial_product_default
+      reviewed_on: 2026-08-24
+  - id: LOAD-SESSION-SPIKE-001
+    status: active
+    enforcement: soft_constraint
+    implementation: progression.single_session_distance_spike
+    description: A planned distance above the recent longest-run reference requires review.
+    parameters:
+      warning_ratio: 1.1
+      lookback_days: 30
+    evidence_refs: [E-INJURY-SESSION-SPIKE-001]
+    product_heuristic:
+      product_default: true
+      rationale: The threshold is a visible risk marker, never a claim that lower increases are safe.
+      status: initial_product_default
+      reviewed_on: 2026-08-24
+  - id: LOAD-CHANGE-BUDGET-001
+    status: active
+    enforcement: soft_constraint
+    implementation: progression.change_one_axis
+    description: Progression changes one principal load axis at a time.
+    parameters:
+      axes: [volume, intensity, density]
+    evidence_refs: [E-PROGRESSION-001]
+    product_heuristic:
+      product_default: true
+      rationale: One-axis progression is a conservative implementation of baseline-relative load management.
+      status: initial_product_default
+      reviewed_on: 2026-08-24

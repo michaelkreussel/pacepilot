@@ -18,12 +18,14 @@ dependencies = [
     "pydantic>=2.7,<3",
     "pydantic-settings>=2.7,<3",
     "python-multipart>=0.0.20,<1",
+    "pyyaml==6.0.3",
     "sqlalchemy>=2.0,<3",
     "uvicorn[standard]>=0.34,<1",
 ]
 
 [dependency-groups]
 dev = [
+    "hypothesis>=6.165.10",
     "pytest>=8.3,<9",
     "pytest-asyncio>=0.25,<1",
     "ruff>=0.9,<1",

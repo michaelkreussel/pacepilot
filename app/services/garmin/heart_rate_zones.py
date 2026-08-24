@@ -97,6 +97,43 @@ def normalize_heart_rate_zone_profiles(payload: Any) -> list[dict[str, Any]]:
     return profiles
 
 
+def is_valid_normalized_heart_rate_zone_profile(profile: object) -> bool:
+    if not isinstance(profile, Mapping):
+        return False
+    sport = profile.get("sport")
+    method = profile.get("training_method")
+    raw_floors = profile.get("zone_floors")
+    if (
+        not isinstance(sport, str)
+        or not sport
+        or not isinstance(method, str)
+        or not method
+        or not isinstance(raw_floors, list)
+        or len(raw_floors) != 5
+    ):
+        return False
+    floors = [_positive_integer(value) for value in raw_floors]
+    if any(floor is None for floor in floors):
+        return False
+    normalized_floors = [floor for floor in floors if floor is not None]
+    if any(
+        left >= right for left, right in zip(normalized_floors, normalized_floors[1:], strict=False)
+    ):
+        return False
+    max_hr = _positive_integer(profile.get("max_hr"))
+    resting_hr = _positive_integer(profile.get("resting_hr"))
+    threshold_hr = _positive_integer(profile.get("lactate_threshold_hr"))
+    if max_hr is not None and normalized_floors[-1] > max_hr:
+        return False
+    if method == "HR_MAX" and max_hr is None:
+        return False
+    if method in {"HR_RESERVE", "HRR"} and (
+        max_hr is None or resting_hr is None or resting_hr >= max_hr
+    ):
+        return False
+    return method != "LACTATE_THRESHOLD" or threshold_hr is not None
+
+
 def sync_heart_rate_zone_profiles(
     session: Session,
     client: Any,

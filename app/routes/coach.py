@@ -5,9 +5,11 @@ from collections.abc import AsyncIterator, Sequence
 from datetime import date, timedelta
 from time import monotonic
 from typing import Annotated
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response, StreamingResponse
+from pydantic import ValidationError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.auth import CurrentUser
@@ -34,6 +36,13 @@ from app.services.coach.agent import (
 )
 from app.services.coach.dependencies import CoachAgentDep
 from app.services.coach.tools import CoachRuntimeContext
+from app.services.planning.workout_proposals import (
+    EasyRunProposalRequest,
+    RunningProposalService,
+    WorkoutProposalError,
+)
+from app.services.planning.workout_service import WorkoutTransitionError
+from app.services.planning.workout_templates import TemplateExpansionError
 from app.web import context, templates
 
 router = APIRouter(prefix="/coach", dependencies=[Depends(require_data_access)])
@@ -75,6 +84,11 @@ def _render_coach(
     user: CurrentUser,
     agent: object | None,
     conversation_id: int | None,
+    *,
+    proposal_error: str | None = None,
+    proposal_date: str | None = None,
+    proposal_minutes: str = "45",
+    status_code: int = 200,
 ) -> HTMLResponse:
     conversations = list_conversations(session, user.id)
     selected = None
@@ -102,7 +116,13 @@ def _render_coach(
             conversations=conversations,
             conversation=selected,
             messages=messages,
+            today=date.today(),
+            proposal_error=proposal_error,
+            proposal_date=proposal_date or date.today().isoformat(),
+            proposal_minutes=proposal_minutes,
+            proposal_idempotency_key=str(uuid4()),
         ),
+        status_code=status_code,
     )
 
 
@@ -129,6 +149,52 @@ def new_conversation(session: SessionDep, user: CurrentUser) -> RedirectResponse
     conversation = create_conversation(session, user.id)
     session.commit()
     return RedirectResponse(f"/coach/{conversation.id}", status_code=303)
+
+
+@router.post("/workout-proposals/easy-run")
+async def create_easy_run_proposal(
+    request: Request,
+    session: SessionDep,
+    user: CurrentUser,
+    agent: CoachAgentDep,
+) -> Response:
+    form = await request.form()
+    proposal_date = str(form.get("suggested_for", ""))
+    proposal_minutes = str(form.get("available_minutes", ""))
+    try:
+        proposal = EasyRunProposalRequest.model_validate(
+            {
+                "suggested_for": proposal_date,
+                "available_minutes": proposal_minutes,
+                "idempotency_key": str(form.get("idempotency_key", "")),
+            }
+        )
+        workout = RunningProposalService(
+            session, user, request_id=request.state.request_id
+        ).create_easy_run(proposal)
+    except ValidationError:
+        error = "Bitte gib ein gültiges Datum und mindestens 20 verfügbare Minuten an."
+    except WorkoutProposalError as exc:
+        if exc.code == "proposal.feature_disabled":
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        error = str(exc)
+    except (TemplateExpansionError, WorkoutTransitionError) as exc:
+        error = str(exc)
+    else:
+        return RedirectResponse(
+            f"/workouts/{workout.id}?notice=Easy-Run-Vorschlag erstellt", status_code=303
+        )
+    return _render_coach(
+        request,
+        session,
+        user,
+        agent,
+        None,
+        proposal_error=error,
+        proposal_date=proposal_date,
+        proposal_minutes=proposal_minutes,
+        status_code=422,
+    )
 
 
 @router.post("/{conversation_id}/delete")

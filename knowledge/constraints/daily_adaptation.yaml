@@ -1,0 +1,16 @@
+id: daily_adaptation
+version: 1.0.0
+rules:
+  - id: ADAPT-NO-ESCALATION-001
+    status: active
+    enforcement: hard_constraint
+    implementation: adaptation.no_load_increase
+    description: Daily adaptation may preserve or reduce load but cannot increase it.
+    parameters:
+      compared_dimensions: [duration, distance, intensity, density]
+    evidence_refs: [E-PROGRESSION-001]
+    product_heuristic:
+      product_default: true
+      rationale: No spontaneous escalation is a safety-oriented product invariant for daily adaptation.
+      status: initial_product_default
+      reviewed_on: 2026-08-24

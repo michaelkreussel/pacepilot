@@ -1,0 +1,17 @@
+id: quality_density
+version: 1.0.0
+rules:
+  - id: DENSITY-HARD-DAYS-001
+    status: active
+    enforcement: soft_constraint
+    implementation: quality.minimum_spacing
+    description: Typical recreational runners receive a warning when quality sessions are too close.
+    parameters:
+      default_minimum_hours: 48
+      applies_to_levels: [novice, intermediate]
+    evidence_refs: [E-TID-001]
+    product_heuristic:
+      product_default: true
+      rationale: Forty-eight hours is a conservative configurable default, not a biological constant.
+      status: initial_product_default
+      reviewed_on: 2026-08-24

@@ -1,0 +1,48 @@
+id: easy_run
+version: 1.0.0
+status: active
+name: Lockerer Dauerlauf
+sport: running
+purpose: aerobic_base
+intensity_domain: low
+rule_strength: heuristic
+eligibility:
+  requirements:
+    - available_time
+    - no_active_safety_stop
+contraindications:
+  - active_pain_affecting_gait
+  - fever_or_systemic_illness
+structure:
+  kind: continuous
+  duration_minutes: {minimum: 20, default: 45, maximum: 90}
+  rpe: {minimum: 2, maximum: 3}
+  session_rpe: {minimum: 2, maximum: 3}
+  instructions:
+    - Halte die Anstrengung bei RPE 2–3 von 10.
+    - Laufe so locker, dass du in vollständigen Sätzen sprechen kannst.
+    - Verkürze die Einheit oder gehe, wenn sich das Tempo nicht mehr locker anfühlt.
+progression_axes:
+  - duration
+  - weekly_frequency
+weekly_frequency_cap: 7
+fallback_targets:
+  - rpe_and_talk_test
+  - walking_breaks
+evidence_refs:
+  - E-TID-001
+  - E-TALK-TEST-001
+  - E-SRPE-001
+product_heuristic:
+  product_default: true
+  rationale: The exact 20-90 minute range and 45 minute default are configurable starting values, not a universal optimum.
+  status: initial_product_default
+  reviewed_on: 2026-08-24
+garmin_capabilities:
+  time_steps: true
+  repeat_blocks: true
+  rpe_target: false
+  local_instructions: false
+  degradation:
+    - rpe_target_to_no_device_target
+    - instructions_remain_in_pacepilot

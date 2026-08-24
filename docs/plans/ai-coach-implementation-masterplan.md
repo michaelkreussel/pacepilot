@@ -810,6 +810,9 @@ Exit-Kriterien:
 
 ### Phase 7 - Evidence-, Template- und Constraint Registry
 
+**Status:** Abgeschlossen am 24. August 2026. Details und Gates stehen in
+`phase-7-completion.md` und `ai-coach-phase-7-gate-matrix.md`.
+
 **Ziel:** Versionierte Fachlogik wird von Prompttext getrennt.
 
 Geplante Struktur:
@@ -857,12 +860,18 @@ Exit-Kriterien:
 
 ### Phase 8 - Erster Proposal-Vertical-Slice ohne LangChain
 
+**Status:** Abgeschlossen am 24. August 2026. Details und Gates stehen in
+`phase-8-completion.md` und
+`ai-coach-phase-8-gate-matrix.md`.
+
 **Ziel:** Die vollstaendige sichere Pipeline funktioniert vor Agent-Integration.
 
 Arbeiten:
 
 - Typisierten Request fuer Easy Run mit Datumsvorschlag und verfuegbarer Zeit anbieten.
 - Baseline, Safety Context, Template, Generator und Validator verbinden.
+- Ein valides persoenliches Garmin-Running-HF-Profil als konkreten aeroben BPM-Geraetebereich
+  verwenden; Default-Profil nur als Fallback, RPE/Sprechtest immer als lokale Leitplanken.
 - Ergebnis als `Workout` plus `WorkoutRevision` im Status `proposed` speichern.
 - Initiale strukturelle und kontextuelle Validation Runs sowie Generation Context persistieren.
 - Vorschlagsdatum bleibt `suggested_for` und veraendert nicht versteckt den Kalender.
@@ -880,6 +889,8 @@ Exit-Kriterien:
 - Annahme fuehrt eine frische kontextuelle Validierung aus und speichert deren Context-
   Fingerprint.
 - Exakte Annahme, Doppelklick und Garmin-Idempotenz sind getestet.
+- Persoenlicher HF-Bereich, Profilquelle und Synchronisationsdatum sind sichtbar und in der
+  Revision eingefroren; ohne valides Profil bleibt das Geraete-Ziel explizit offen.
 
 ### Phase 9 - LangChain-Integration als strukturiertes Artefakt
 

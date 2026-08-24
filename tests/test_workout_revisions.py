@@ -472,12 +472,12 @@ def test_changed_context_creates_validation_run(
             revision_id,
             command.context_fingerprint,
         )
-        assert len(workout.revisions[0].validation_runs) == 1
+        assert len(workout.revisions[0].validation_runs) == 2
         service.validate_revision_context(workout.id, revision_id, "a" * 64)
         session.expire_all()
         revision = session.get(WorkoutRevision, revision_id)
         assert revision is not None
-        assert len(revision.validation_runs) == 2
+        assert len(revision.validation_runs) == 3
 
 
 def test_delete_tombstones_workout(session_factory: sessionmaker[Session]) -> None:

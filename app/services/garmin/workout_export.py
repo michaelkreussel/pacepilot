@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import date
 from typing import Any, Protocol
 
@@ -10,9 +11,11 @@ from app.services.planning.workout_definition import (
     HeartRateZoneTarget,
     PaceRangeTarget,
     RepeatBlock,
+    RepeatBlockV2,
+    RpeRangeTarget,
     StepBlock,
+    StepBlockV2,
     TimeEnd,
-    WorkoutBlock,
     validate_definition,
 )
 
@@ -46,7 +49,20 @@ class WorkoutExecution(WorkoutContent, Protocol):
     def garmin_workout_id(self) -> str | None: ...
 
 
-def compile_workout(workout: WorkoutContent) -> dict[str, Any]:
+@dataclass(frozen=True)
+class CompilationWarning:
+    code: str
+    message: str
+    block_id: str
+
+
+@dataclass(frozen=True)
+class CompilationResult:
+    payload: dict[str, Any]
+    warnings: tuple[CompilationWarning, ...]
+
+
+def compile_workout_with_report(workout: WorkoutContent) -> CompilationResult:
     from garminconnect.workout import (
         ConditionType,
         CyclingWorkout,
@@ -73,6 +89,7 @@ def compile_workout(workout: WorkoutContent) -> dict[str, Any]:
             code="garmin.sport_unsupported",
         )
     definition = workout.definition_model
+    warnings: list[CompilationWarning] = []
     try:
         validate_definition(definition, workout.sport)
     except DefinitionValidationError as exc:
@@ -84,7 +101,7 @@ def compile_workout(workout: WorkoutContent) -> dict[str, Any]:
         "recovery": (StepType.RECOVERY, "recovery", 4),
     }
 
-    def create_step(step: StepBlock, step_order: int) -> Any:
+    def create_step(step: StepBlock | StepBlockV2, step_order: int) -> Any:
         step_type_id, step_type_key, display_order = step_types[step.step_type]
         is_time = isinstance(step.end, TimeEnd)
         condition_id = ConditionType.TIME if is_time else ConditionType.DISTANCE
@@ -120,12 +137,39 @@ def compile_workout(workout: WorkoutContent) -> dict[str, Any]:
                 "displayOrder": 4,
             }
             target_values = {"zoneNumber": step.target.zone}
+        elif isinstance(step.target, RpeRangeTarget):
+            target = {
+                "workoutTargetTypeId": TargetType.NO_TARGET,
+                "workoutTargetTypeKey": "no.target",
+                "displayOrder": 1,
+            }
+            warnings.append(
+                CompilationWarning(
+                    code="garmin.rpe_target_degraded",
+                    message=(
+                        "Garmin kann das RPE-Ziel nicht als Gerätebereich abbilden. "
+                        "Der Schritt wird ohne Geräte-Ziel übertragen."
+                    ),
+                    block_id=step.id,
+                )
+            )
         else:
             target = {
                 "workoutTargetTypeId": TargetType.NO_TARGET,
                 "workoutTargetTypeKey": "no.target",
                 "displayOrder": 1,
             }
+        if isinstance(step, StepBlockV2) and step.instructions:
+            warnings.append(
+                CompilationWarning(
+                    code="garmin.instructions_omitted",
+                    message=(
+                        "Lokale Schrittanweisungen bleiben in PacePilot und werden von Garmin "
+                        "nicht auf die Uhr übernommen."
+                    ),
+                    block_id=step.id,
+                )
+            )
         return ExecutableStep(
             stepOrder=step_order,
             stepType={
@@ -144,12 +188,14 @@ def compile_workout(workout: WorkoutContent) -> dict[str, Any]:
             **target_values,
         )
 
-    def create_blocks(blocks: list[WorkoutBlock]) -> list[Any]:
+    def create_blocks(blocks: list[Any]) -> list[Any]:
         output: list[Any] = []
         for block in blocks:
-            if isinstance(block, StepBlock):
+            if isinstance(block, (StepBlock, StepBlockV2)):
                 output.append(create_step(block, len(output) + 1))
-            elif len(block.children) == 1 and isinstance(block.children[0], StepBlock):
+            elif len(block.children) == 1 and isinstance(
+                block.children[0], (StepBlock, StepBlockV2)
+            ):
                 for _ in range(block.iterations):
                     output.append(create_step(block.children[0], len(output) + 1))
             else:
@@ -166,10 +212,10 @@ def compile_workout(workout: WorkoutContent) -> dict[str, Any]:
 
     default_paces = {"running": 360.0, "walking": 720.0, "hiking": 900.0, "cycling": 150.0}
 
-    def estimate_blocks(blocks: list[WorkoutBlock]) -> float:
+    def estimate_blocks(blocks: list[Any]) -> float:
         seconds = 0.0
         for block in blocks:
-            if isinstance(block, RepeatBlock):
+            if isinstance(block, (RepeatBlock, RepeatBlockV2)):
                 seconds += estimate_blocks(block.children) * block.iterations
             elif isinstance(block.end, TimeEnd):
                 seconds += block.end.seconds
@@ -184,7 +230,7 @@ def compile_workout(workout: WorkoutContent) -> dict[str, Any]:
 
     estimated_seconds = int(estimate_blocks(definition.blocks))
     sport_type = SPORT_TYPES[workout.sport]
-    return model_type(
+    payload = model_type(
         workoutName=workout.name,
         description=workout.description,
         estimatedDurationInSecs=estimated_seconds,
@@ -192,6 +238,11 @@ def compile_workout(workout: WorkoutContent) -> dict[str, Any]:
             WorkoutSegment(segmentOrder=1, sportType=sport_type, workoutSteps=output_steps)
         ],
     ).to_dict()
+    return CompilationResult(payload=payload, warnings=tuple(warnings))
+
+
+def compile_workout(workout: WorkoutContent) -> dict[str, Any]:
+    return compile_workout_with_report(workout).payload
 
 
 def _garmin_call[T](message: str, call: Callable[..., T], *args: Any) -> T:

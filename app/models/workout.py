@@ -124,7 +124,7 @@ class Workout(Base):
     def definition_model(self):
         from app.services.planning.workout_definition import parse_definition
 
-        return parse_definition(self.definition)
+        return parse_definition(self.definition, self.definition_version)
 
     @property
     def step_count(self) -> int:
@@ -208,7 +208,7 @@ class WorkoutRevision(Base):
     def definition_model(self):
         from app.services.planning.workout_definition import parse_definition
 
-        return parse_definition(self.definition)
+        return parse_definition(self.definition, self.definition_version)
 
     @property
     def step_count(self) -> int:

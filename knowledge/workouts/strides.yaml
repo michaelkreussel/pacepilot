@@ -1,0 +1,53 @@
+id: strides
+version: 1.0.0
+status: active
+name: Lockerer Lauf mit Steigerungen
+sport: running
+purpose: neuromuscular_activation
+intensity_domain: mixed
+rule_strength: heuristic
+eligibility:
+  min_consistent_running_weeks: 4
+  min_runs_per_week: 2
+  requirements:
+    - familiar_with_relaxed_fast_running
+    - no_active_safety_stop
+contraindications:
+  - active_pain_affecting_gait
+  - fever_or_systemic_illness
+  - acute_muscular_soreness
+structure:
+  kind: strides
+  easy_duration_minutes: {minimum: 20, default: 30, maximum: 60}
+  easy_rpe: {minimum: 2, maximum: 3}
+  repetitions: {minimum: 4, default: 6, maximum: 8}
+  stride_duration_seconds: {minimum: 15, default: 20, maximum: 25}
+  stride_rpe: {minimum: 6, maximum: 7}
+  recovery_duration_seconds: {minimum: 60, default: 90, maximum: 120}
+  session_rpe: {minimum: 2, maximum: 4}
+  instructions:
+    - Beschleunige kontrolliert mit sauberer Form; die Steigerungen sind kein Sprint.
+    - Beginne die nächste Wiederholung erst, wenn du dich vollständig bereit fühlst.
+progression_axes:
+  - repetitions
+  - stride_duration
+  - recovery_duration
+weekly_frequency_cap: 2
+fallback_targets:
+  - omit_strides_and_keep_easy_run
+evidence_refs:
+  - E-TID-001
+  - E-SRPE-001
+product_heuristic:
+  product_default: true
+  rationale: Repetition, duration, recovery, and RPE ranges are conservative coaching defaults within the report taxonomy.
+  status: initial_product_default
+  reviewed_on: 2026-08-24
+garmin_capabilities:
+  time_steps: true
+  repeat_blocks: true
+  rpe_target: false
+  local_instructions: false
+  degradation:
+    - rpe_target_to_no_device_target
+    - instructions_remain_in_pacepilot

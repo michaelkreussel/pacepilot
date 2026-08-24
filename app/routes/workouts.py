@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Annotated, Never
 from urllib.parse import urlencode
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -19,12 +20,14 @@ from app.services.garmin.client import (
 from app.services.planning.feedback_service import FeedbackService
 from app.services.planning.validator import WorkoutInput, WorkoutValidationError, validate_workout
 from app.services.planning.workout_definition import (
+    DefinitionValidationError,
     default_definition,
     definition_to_json,
     parse_definition,
 )
 from app.services.planning.workout_revision import (
     AcceptRevisionCommand,
+    RejectRevisionCommand,
     RevisionIdentity,
     ScheduleWorkoutCommand,
     UnscheduleWorkoutCommand,
@@ -60,6 +63,16 @@ class WorkoutFormError:
     definition: dict[str, object]
 
 
+def _definition_schema_message(exc: ValidationError) -> str:
+    for error in exc.errors():
+        location = ".".join(str(part) for part in error["loc"])
+        if error["type"] == "too_long" and "instructions" in error["loc"]:
+            return f"Zu viele Schrittanweisungen bei {location}: maximal fünf Zeilen."
+        if error["type"] == "string_too_long" and "instructions" in error["loc"]:
+            return f"Schrittanweisung bei {location} ist zu lang: maximal 300 Zeichen."
+    return "Die Workout-Struktur ist unvollständig oder enthält ungültige Felder."
+
+
 def _form_data(workout: WorkoutDetailView | None = None) -> dict[str, str]:
     revision = workout.current if workout else None
     return {
@@ -69,6 +82,7 @@ def _form_data(workout: WorkoutDetailView | None = None) -> dict[str, str]:
             revision.suggested_for.isoformat() if revision and revision.suggested_for else ""
         ),
         "description": revision.description or "" if revision else "",
+        "definition_version": str(revision.definition_version if revision else 1),
     }
 
 
@@ -79,17 +93,20 @@ async def _parse_workout_result(request: Request) -> WorkoutInput | WorkoutFormE
         "sport": str(form.get("sport", "running")),
         "scheduled_for": str(form.get("scheduled_for", "")),
         "description": str(form.get("description", "")).strip(),
+        "definition_version": str(form.get("definition_version", "1")),
     }
     fallback = definition_to_json(default_definition())
     try:
+        definition_version = int(form_data["definition_version"])
         raw_definition = json.loads(str(form.get("definition", "")))
-        definition = parse_definition(raw_definition)
+        definition = parse_definition(raw_definition, definition_version)
         workout = WorkoutInput(
             name=form_data["name"],
             sport=form_data["sport"],
             scheduled_for=_parse_optional_date(form_data["scheduled_for"]),
             description=form_data["description"],
             definition=definition,
+            definition_version=definition_version,
         )
         validate_workout(workout)
         return workout
@@ -100,16 +117,29 @@ async def _parse_workout_result(request: Request) -> WorkoutInput | WorkoutFormE
             form_data,
             fallback,
         )
-    except ValidationError:
+    except ValidationError as exc:
         return WorkoutFormError(
             "definition.schema_invalid",
-            "Die Workout-Struktur ist unvollständig.",
+            _definition_schema_message(exc),
             form_data,
-            fallback,
+            raw_definition if isinstance(raw_definition, dict) else fallback,
         )
     except WorkoutValidationError as exc:
         definition_data = definition_to_json(definition) if "definition" in locals() else fallback
         return WorkoutFormError(exc.code, str(exc), form_data, definition_data)
+    except (DefinitionValidationError, ValueError) as exc:
+        code = (
+            exc.code if isinstance(exc, DefinitionValidationError) else "definition.version_invalid"
+        )
+        message = (
+            str(exc) if isinstance(exc, DefinitionValidationError) else "Ungültige Formatversion."
+        )
+        return WorkoutFormError(
+            code,
+            message,
+            {**form_data, "definition_version": "1"},
+            fallback,
+        )
 
 
 WorkoutFormDep = Annotated[WorkoutInput | WorkoutFormError, Depends(_parse_workout_result)]
@@ -141,6 +171,7 @@ def new_workout(request: Request, _: CurrentUser) -> HTMLResponse:
             form_data=_form_data(),
             initial_definition=definition_to_json(default_definition()),
             error=None,
+            edit_idempotency_key=None,
         ),
     )
 
@@ -240,18 +271,21 @@ def edit_workout(workout_id: int, request: Request, service: WorkoutServiceDep) 
             form_data=_form_data(workout),
             initial_definition=workout.current.definition,
             error=None,
+            edit_idempotency_key=str(uuid4()),
         ),
     )
 
 
 @router.post("/{workout_id}", response_class=HTMLResponse)
-def update_workout(
+async def update_workout(
     workout_id: int,
     request: Request,
     data: WorkoutFormDep,
     service: WorkoutServiceDep,
 ) -> Response:
     workout = _get_workout(service, workout_id)
+    form = await request.form()
+    edit_idempotency_key = str(form.get("idempotency_key", "")) or str(uuid4())
     if isinstance(data, WorkoutFormError):
         return templates.TemplateResponse(
             request,
@@ -264,13 +298,37 @@ def update_workout(
                 form_data=data.form_data,
                 initial_definition=data.definition,
                 error=data.message,
+                edit_idempotency_key=edit_idempotency_key,
             ),
             status_code=422,
         )
 
     try:
-        service.update(workout_id, data)
-    except (GarminUnavailableError, WorkoutValidationError, WorkoutConflictError) as exc:
+        identity = None
+        if workout.source_type == "coach_single":
+            try:
+                identity = RevisionIdentity(
+                    revision_id=int(str(form["revision_id"])),
+                    revision_number=int(str(form["revision_number"])),
+                    content_hash=str(form["content_hash"]),
+                    lock_version=int(str(form["lock_version"])),
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise HTTPException(status_code=422, detail="Ungültige Revisionsangaben") from exc
+        service.update(
+            workout_id,
+            data,
+            expected_identity=identity,
+            idempotency_key=(
+                edit_idempotency_key if workout.source_type == "coach_single" else None
+            ),
+        )
+    except (
+        GarminUnavailableError,
+        WorkoutValidationError,
+        WorkoutTransitionError,
+        WorkoutConflictError,
+    ) as exc:
         return _operation_error_redirect(workout_id, exc)
     return RedirectResponse(f"/workouts/{workout.id}", status_code=303)
 
@@ -336,6 +394,34 @@ async def confirm_workout(
     except (WorkoutValidationError, WorkoutTransitionError) as exc:
         return _operation_error_redirect(workout_id, exc)
     return RedirectResponse(f"/workouts/{workout_id}", status_code=303)
+
+
+@router.post("/{workout_id}/reject", response_class=RedirectResponse, status_code=303)
+async def reject_workout(
+    workout_id: int,
+    request: Request,
+    service: WorkoutServiceDep,
+) -> Response:
+    _get_workout(service, workout_id)
+    form = await request.form()
+    try:
+        command = RejectRevisionCommand(
+            identity=RevisionIdentity(
+                revision_id=int(str(form["revision_id"])),
+                revision_number=int(str(form["revision_number"])),
+                content_hash=str(form["content_hash"]),
+                lock_version=int(str(form["lock_version"])),
+            )
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="Ungültige Revisionsangaben") from exc
+    try:
+        service.reject(workout_id, command)
+    except WorkoutNotFoundError as exc:
+        _raise_not_found(exc)
+    except (WorkoutTransitionError, WorkoutConflictError) as exc:
+        return _operation_error_redirect(workout_id, exc)
+    return RedirectResponse(f"/workouts/{workout_id}?notice=Vorschlag abgelehnt", status_code=303)
 
 
 @router.post("/{workout_id}/schedule", response_class=RedirectResponse, status_code=303)

@@ -5,6 +5,7 @@ from typing import Any, cast
 
 from sqlalchemy import select, update
 from sqlalchemy.engine import CursorResult
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -43,10 +44,15 @@ from app.services.planning.safety_triage import (
 from app.services.planning.validator import WorkoutInput, validate_workout
 from app.services.planning.workout_definition import definition_to_json
 from app.services.planning.workout_revision import (
+    STRUCTURAL_RULE_SET_VERSION,
     AcceptedWorkoutExecution,
     AcceptRevisionCommand,
+    RejectRevisionCommand,
+    RevisionIdentity,
+    RevisionMetadata,
     ScheduleWorkoutCommand,
     UnscheduleWorkoutCommand,
+    revision_content_hash,
     structural_validation_report,
     workout_content_hash,
 )
@@ -107,7 +113,7 @@ class WorkoutService:
             scheduled_for=None,
             description=data.description or None,
             status="draft",
-            definition_version=1,
+            definition_version=data.definition_version,
             definition=definition_to_json(data.definition),
             source_type="manual",
             approval_status="draft",
@@ -118,6 +124,7 @@ class WorkoutService:
         self.session.flush()
         revision = self._create_revision(workout, data, revision_number=1, parent_revision_id=None)
         self.session.flush()
+        self._record_structural_validation(workout, revision)
         workout.current_revision_id = revision.id
         workout.materialized_revision_id = revision.id
         self.session.add(WorkoutGarminBinding(workout_id=workout.id))
@@ -126,19 +133,240 @@ class WorkoutService:
         self.session.commit()
         return workout
 
-    def update(self, workout_id: int, data: WorkoutInput) -> Workout:
+    def create_proposal(
+        self,
+        data: WorkoutInput,
+        metadata: RevisionMetadata,
+        *,
+        idempotency_key: str,
+        request_fingerprint: str,
+    ) -> Workout:
+        existing = self.idempotent_proposal(
+            idempotency_key=idempotency_key,
+            request_fingerprint=request_fingerprint,
+        )
+        if existing is not None:
+            return existing
+
+        self.validate(data)
+        workout = Workout(
+            user_id=self.user.id,
+            name=data.name,
+            sport=data.sport,
+            scheduled_for=None,
+            description=data.description or None,
+            status="draft",
+            definition_version=data.definition_version,
+            definition=definition_to_json(data.definition),
+            source_type=metadata.source_type,
+            approval_status="proposed",
+            local_schedule_status="unscheduled",
+            lock_version=0,
+        )
+        self.session.add(workout)
+        self.session.flush()
+        revision = self._create_revision(
+            workout,
+            data,
+            revision_number=1,
+            parent_revision_id=None,
+            metadata=metadata,
+        )
+        self.session.flush()
+        self._record_structural_validation(workout, revision)
+        workout.current_revision_id = revision.id
+        workout.materialized_revision_id = revision.id
+        self.session.add(WorkoutGarminBinding(workout_id=workout.id))
+        self._event(workout, revision, "create", metadata={"source": metadata.source_type})
+        self._event(
+            workout,
+            revision,
+            "propose",
+            metadata={
+                "template_id": metadata.template_id or "",
+                "request_fingerprint": request_fingerprint,
+            },
+            idempotency_key=idempotency_key,
+        )
+        validation = self._validate_context(
+            workout, revision, self._safety_context(workout, revision)
+        )
+        if not validation.valid:
+            outcome = str(validation.report_json.get("outcome", "clarify"))
+            self.session.rollback()
+            raise WorkoutTransitionError(
+                (
+                    "Ein Sicherheitshinweis blockiert diesen Trainingsvorschlag."
+                    if outcome == TriageOutcome.SAFETY_STOP.value
+                    else "Vor einem Trainingsvorschlag fehlen eindeutige Sicherheitsangaben."
+                ),
+                code="workout.proposal_safety_blocked",
+            )
+        try:
+            self.session.commit()
+        except IntegrityError:
+            self.session.rollback()
+            winner = self.idempotent_proposal(
+                idempotency_key=idempotency_key,
+                request_fingerprint=request_fingerprint,
+            )
+            if winner is not None:
+                return winner
+            raise
+        return workout
+
+    def idempotent_proposal(
+        self, *, idempotency_key: str, request_fingerprint: str
+    ) -> Workout | None:
+        existing_event = self.session.scalar(
+            select(WorkoutEvent).where(
+                WorkoutEvent.owner_user_id == self.user.id,
+                WorkoutEvent.action == "propose",
+                WorkoutEvent.idempotency_key == idempotency_key,
+            )
+        )
+        if existing_event is None:
+            return None
+        if existing_event.safe_metadata_json.get("request_fingerprint") != request_fingerprint:
+            raise WorkoutConflictError(
+                "Dieser Wiederholungsschlüssel wurde bereits für einen anderen Vorschlag genutzt.",
+                code="proposal.idempotency_conflict",
+            )
+        return self.get(existing_event.workout_id)
+
+    def update(
+        self,
+        workout_id: int,
+        data: WorkoutInput,
+        *,
+        expected_identity: RevisionIdentity | None = None,
+        idempotency_key: str | None = None,
+    ) -> Workout:
         workout = self.get(workout_id)
+        self._ensure_generated_proposals_enabled(workout)
+        request_hash = workout_content_hash(data)
+        if workout.source_type == "coach_single" and idempotency_key:
+            existing_event = self.session.scalar(
+                select(WorkoutEvent).where(
+                    WorkoutEvent.owner_user_id == self.user.id,
+                    WorkoutEvent.action == "revise",
+                    WorkoutEvent.idempotency_key == idempotency_key,
+                )
+            )
+            if existing_event is not None:
+                if existing_event.safe_metadata_json.get("request_hash") != request_hash:
+                    raise WorkoutConflictError(
+                        "Dieser Wiederholungsschlüssel gehört zu einer anderen Bearbeitung.",
+                        code="workout.idempotency_conflict",
+                    )
+                return workout
         self.validate(data)
         current = self._current_revision(workout)
+        metadata = None
+        if workout.source_type == "coach_single":
+            if expected_identity is None or idempotency_key is None:
+                raise WorkoutConflictError(
+                    "Für generierte Vorschläge fehlen exakte Revisionsangaben.",
+                    code="workout.revision_identity_required",
+                )
+            if (
+                current.id != expected_identity.revision_id
+                or current.revision_number != expected_identity.revision_number
+                or current.content_hash != expected_identity.content_hash
+                or workout.lock_version != expected_identity.lock_version
+            ):
+                raise WorkoutConflictError(
+                    "Diese Workout-Revision ist nicht mehr aktuell.",
+                    code="workout.revision_stale",
+                )
+            expected_lock_version = expected_identity.lock_version
+            from app.services.planning.workout_proposals import edited_easy_run_metadata
+
+            metadata = edited_easy_run_metadata(self.session, self.user, current, data)
         revision = self._create_revision(
             workout,
             data,
             revision_number=current.revision_number + 1,
             parent_revision_id=current.id,
+            metadata=metadata,
         )
         self.session.flush()
+        self._record_structural_validation(workout, revision)
+        change_labels = self._change_labels(current, revision)
+        if workout.source_type == "coach_single":
+            result = cast(
+                "CursorResult[Any]",
+                self.session.execute(
+                    update(Workout)
+                    .where(
+                        Workout.id == workout.id,
+                        Workout.user_id == self.user.id,
+                        Workout.current_revision_id == current.id,
+                        Workout.lock_version == expected_lock_version,
+                        Workout.deleted_at.is_(None),
+                    )
+                    .values(
+                        current_revision_id=revision.id,
+                        materialized_revision_id=(
+                            revision.id
+                            if workout.accepted_revision_id is None
+                            else workout.materialized_revision_id
+                        ),
+                        approval_status="proposed",
+                        lock_version=Workout.lock_version + 1,
+                        **(
+                            {
+                                "name": revision.name,
+                                "sport": revision.sport,
+                                "description": revision.description,
+                                "definition_version": revision.definition_version,
+                                "definition": revision.definition,
+                            }
+                            if workout.accepted_revision_id is None
+                            else {}
+                        ),
+                    )
+                    .execution_options(synchronize_session=False)
+                ),
+            )
+            if result.rowcount != 1:
+                self.session.rollback()
+                replay = self.session.scalar(
+                    select(WorkoutEvent).where(
+                        WorkoutEvent.owner_user_id == self.user.id,
+                        WorkoutEvent.action == "revise",
+                        WorkoutEvent.idempotency_key == idempotency_key,
+                    )
+                )
+                if (
+                    replay is not None
+                    and replay.safe_metadata_json.get("request_hash") == request_hash
+                ):
+                    return self.get(workout_id)
+                raise WorkoutConflictError(
+                    "Das Workout wurde zwischenzeitlich geändert.", code="workout.lock_stale"
+                )
+            self._event(
+                workout,
+                revision,
+                "revise",
+                metadata={
+                    "parent_revision_id": current.id,
+                    "changed_fields": list(change_labels),
+                    "request_hash": request_hash,
+                },
+                idempotency_key=idempotency_key,
+            )
+            self._validate_context(workout, revision, self._safety_context(workout, revision))
+            self.session.commit()
+            self.session.refresh(workout)
+            return workout
         workout.current_revision_id = revision.id
-        workout.approval_status = "proposed" if workout.accepted_revision_id else "draft"
+        workout.approval_status = (
+            "proposed"
+            if workout.accepted_revision_id or workout.source_type == "coach_single"
+            else "draft"
+        )
         workout.lock_version += 1
         if workout.accepted_revision_id is None:
             workout.materialized_revision_id = revision.id
@@ -153,6 +381,7 @@ class WorkoutService:
 
     def accept(self, workout_id: int, command: AcceptRevisionCommand) -> Workout:
         workout = self.get(workout_id)
+        self._ensure_generated_proposals_enabled(workout)
         revision = self._current_revision(workout)
         identity = command.identity
         if (
@@ -172,9 +401,26 @@ class WorkoutService:
             )
         if workout.accepted_revision_id == revision.id and workout.approval_status == "accepted":
             return workout
+        if workout.approval_status == "rejected":
+            raise WorkoutTransitionError(
+                "Ein abgelehnter Vorschlag muss vor der Annahme bearbeitet werden.",
+                code="workout.proposal_rejected",
+            )
+        if workout.source_type == "coach_single":
+            from app.services.planning.workout_proposals import (
+                ensure_easy_run_device_target_current,
+            )
+
+            ensure_easy_run_device_target_current(self.session, self.user.id, revision)
         binding = self._binding(workout)
         self._ensure_garmin_state_known(binding)
-        validation = self._validate_context(workout, revision, safety_context)
+        validation = self._validate_context(
+            workout,
+            revision,
+            safety_context,
+            validation_kind="acceptance",
+            force=True,
+        )
         if not validation.valid:
             outcome = str(validation.report_json.get("outcome", "clarify"))
             message = (
@@ -227,18 +473,93 @@ class WorkoutService:
         if binding.active_remote_identity_id is not None:
             binding.content_status = "pending"
         binding.device_status = "not_requested"
-        self._event(workout, revision, "accept")
+        self.session.flush()
+        self._event(
+            workout,
+            revision,
+            "accept",
+            metadata={
+                "validation_run_id": validation.id,
+                "context_fingerprint": validation.context_fingerprint,
+            },
+        )
+        self.session.commit()
+        self.session.refresh(workout)
+        return workout
+
+    def reject(self, workout_id: int, command: RejectRevisionCommand) -> Workout:
+        workout = self.get(workout_id)
+        if workout.source_type != "coach_single" or workout.accepted_revision_id is not None:
+            raise WorkoutTransitionError(
+                "Nur ein noch nicht angenommener Coach-Vorschlag kann abgelehnt werden.",
+                code="workout.proposal_reject_invalid",
+            )
+        revision = self._current_revision(workout)
+        identity = command.identity
+        if (
+            revision.id != identity.revision_id
+            or revision.revision_number != identity.revision_number
+            or revision.content_hash != identity.content_hash
+        ):
+            raise WorkoutConflictError(
+                "Diese Workout-Revision ist nicht mehr aktuell.",
+                code="workout.revision_stale",
+            )
+        if workout.approval_status == "rejected":
+            return workout
+        result = cast(
+            "CursorResult[Any]",
+            self.session.execute(
+                update(Workout)
+                .where(
+                    Workout.id == workout.id,
+                    Workout.user_id == self.user.id,
+                    Workout.current_revision_id == revision.id,
+                    Workout.lock_version == identity.lock_version,
+                    Workout.deleted_at.is_(None),
+                )
+                .values(
+                    approval_status="rejected",
+                    lock_version=Workout.lock_version + 1,
+                )
+                .execution_options(synchronize_session=False)
+            ),
+        )
+        if result.rowcount != 1:
+            self.session.rollback()
+            raise WorkoutConflictError(
+                "Das Workout wurde zwischenzeitlich geändert.", code="workout.lock_stale"
+            )
+        self._event(workout, revision, "reject")
         self.session.commit()
         self.session.refresh(workout)
         return workout
 
     def schedule(self, workout_id: int, command: ScheduleWorkoutCommand) -> Workout:
         workout = self.get(workout_id)
+        self._ensure_generated_proposals_enabled(workout)
         if workout.accepted_revision_id != command.revision_id:
             raise WorkoutConflictError(
                 "Nur die exakt angenommene Revision kann eingeplant werden.",
                 code="workout.accepted_revision_mismatch",
             )
+        if (
+            workout.local_schedule_status == "scheduled"
+            and workout.scheduled_for == command.scheduled_for
+        ):
+            return workout
+        revision = self._revision(workout, command.revision_id)
+        if workout.source_type == "coach_single":
+            if command.scheduled_for < utcnow().date():
+                raise WorkoutTransitionError(
+                    "Ein Workout kann nicht in die Vergangenheit eingeplant werden.",
+                    code="workout.schedule_date_in_past",
+                )
+            if revision.suggested_for != command.scheduled_for:
+                raise WorkoutConflictError(
+                    "Der Termin entspricht nicht dem geprüften Vorschlagsdatum.",
+                    code="workout.schedule_date_mismatch",
+                )
         binding = self._binding(workout)
         self._ensure_garmin_state_known(binding)
         result = cast(
@@ -268,8 +589,17 @@ class WorkoutService:
             )
         if binding.active_remote_identity_id is not None:
             binding.calendar_status = "pending"
-        revision = self._revision(workout, command.revision_id)
-        self._event(workout, revision, "schedule")
+        self._event(
+            workout,
+            revision,
+            "schedule",
+            metadata={
+                "previous_date": workout.scheduled_for.isoformat()
+                if workout.scheduled_for
+                else None,
+                "scheduled_for": command.scheduled_for.isoformat(),
+            },
+        )
         self.session.commit()
         self.session.refresh(workout)
         return workout
@@ -281,6 +611,8 @@ class WorkoutService:
                 "Nur die exakt angenommene Revision kann aus dem Kalender entfernt werden.",
                 code="workout.accepted_revision_mismatch",
             )
+        if workout.local_schedule_status != "scheduled" and workout.scheduled_for is None:
+            return workout
         binding = self._binding(workout)
         self._ensure_garmin_state_known(binding)
         result = cast(
@@ -318,6 +650,7 @@ class WorkoutService:
 
     def publish(self, workout_id: int) -> Workout:
         workout = self.get(workout_id)
+        self._ensure_generated_garmin_enabled(workout)
         revision = self._accepted_revision(workout)
         binding = self._binding(workout)
         self._ensure_garmin_state_known(binding, allow={"content", "calendar"})
@@ -450,6 +783,7 @@ class WorkoutService:
 
     def push(self, workout_id: int) -> Workout:
         workout = self.get(workout_id)
+        self._ensure_generated_garmin_enabled(workout)
         revision = self._accepted_revision(workout)
         binding = self._binding(workout)
         self._validate_for_sync(workout, revision)
@@ -605,7 +939,9 @@ class WorkoutService:
         *,
         revision_number: int,
         parent_revision_id: int | None,
+        metadata: RevisionMetadata | None = None,
     ) -> WorkoutRevision:
+        details = metadata or RevisionMetadata()
         revision = WorkoutRevision(
             workout_id=workout.id,
             revision_number=revision_number,
@@ -614,12 +950,26 @@ class WorkoutService:
             sport=data.sport,
             suggested_for=data.scheduled_for,
             description=data.description or None,
-            definition_version=1,
+            definition_version=data.definition_version,
             definition=definition_to_json(data.definition),
-            validation_report_json=structural_validation_report(),
-            source_type="manual",
-            content_hash=workout_content_hash(data),
-            edit_source="manual",
+            purpose=details.purpose,
+            guidance_json=details.guidance_json,
+            load_estimate_json=details.load_estimate_json,
+            validation_report_json=(
+                details.validation_report_json or structural_validation_report()
+            ),
+            generation_context_json=details.generation_context_json,
+            source_type=details.source_type,
+            generator_version=details.generator_version,
+            template_id=details.template_id,
+            template_version=details.template_version,
+            rule_set_version=details.rule_set_version,
+            knowledge_base_version=details.knowledge_base_version,
+            content_hash="",
+            edit_source=details.edit_source,
+        )
+        revision.content_hash = (
+            workout_content_hash(data) if metadata is None else revision_content_hash(revision)
         )
         self.session.add(revision)
         return revision
@@ -718,6 +1068,28 @@ class WorkoutService:
                 code="garmin.state_unknown",
             )
 
+    def _ensure_generated_garmin_enabled(self, workout: Workout) -> None:
+        if workout.source_type != "coach_single":
+            return
+        from app.config import get_settings
+
+        if not get_settings().coach_garmin_sync_enabled:
+            raise WorkoutTransitionError(
+                "Die Garmin-Übertragung für Coach-Vorschläge ist noch nicht freigeschaltet.",
+                code="coach.garmin_sync_disabled",
+            )
+
+    def _ensure_generated_proposals_enabled(self, workout: Workout) -> None:
+        if workout.source_type != "coach_single":
+            return
+        from app.config import get_settings
+
+        if not get_settings().coach_workout_proposals_enabled:
+            raise WorkoutTransitionError(
+                "Aktionen für Coach-Vorschläge sind derzeit deaktiviert.",
+                code="coach.workout_proposals_disabled",
+            )
+
     def _execution(self, workout: Workout, revision: WorkoutRevision) -> AcceptedWorkoutExecution:
         binding = self._binding(workout)
         return AcceptedWorkoutExecution(
@@ -727,6 +1099,7 @@ class WorkoutService:
             name=revision.name,
             sport=revision.sport,
             description=revision.description,
+            definition_version=revision.definition_version,
             definition=revision.definition,
             scheduled_for=(
                 workout.scheduled_for if workout.local_schedule_status == "scheduled" else None
@@ -740,6 +1113,12 @@ class WorkoutService:
                 "Die angenommene Workout-Revision ist nicht mehr aktuell.",
                 code="workout.accepted_revision_mismatch",
             )
+        if workout.source_type == "coach_single":
+            from app.services.planning.workout_proposals import (
+                ensure_easy_run_device_target_current,
+            )
+
+            ensure_easy_run_device_target_current(self.session, self.user.id, revision)
         validation = self._validate_context(
             workout,
             revision,
@@ -778,26 +1157,32 @@ class WorkoutService:
         workout: Workout,
         revision: WorkoutRevision,
         safety_context: SafetyContext,
+        validation_kind: str = "contextual",
+        force: bool = False,
     ) -> WorkoutValidationRun:
         now = utcnow()
-        existing = self.session.scalar(
-            select(WorkoutValidationRun)
-            .where(
-                WorkoutValidationRun.workout_id == workout.id,
-                WorkoutValidationRun.revision_id == revision.id,
-                WorkoutValidationRun.validation_kind == "contextual",
-                WorkoutValidationRun.rule_set_version == SAFETY_RULE_SET_VERSION,
-                WorkoutValidationRun.context_fingerprint == safety_context.fingerprint,
-                WorkoutValidationRun.expires_at > now,
+        existing = (
+            None
+            if force
+            else self.session.scalar(
+                select(WorkoutValidationRun)
+                .where(
+                    WorkoutValidationRun.workout_id == workout.id,
+                    WorkoutValidationRun.revision_id == revision.id,
+                    WorkoutValidationRun.validation_kind == validation_kind,
+                    WorkoutValidationRun.rule_set_version == SAFETY_RULE_SET_VERSION,
+                    WorkoutValidationRun.context_fingerprint == safety_context.fingerprint,
+                    WorkoutValidationRun.expires_at > now,
+                )
+                .order_by(WorkoutValidationRun.evaluated_at.desc())
             )
-            .order_by(WorkoutValidationRun.evaluated_at.desc())
         )
         if existing is not None:
             return existing
         run = WorkoutValidationRun(
             workout_id=workout.id,
             revision_id=revision.id,
-            validation_kind="contextual",
+            validation_kind=validation_kind,
             rule_set_version=SAFETY_RULE_SET_VERSION,
             context_fingerprint=safety_context.fingerprint,
             feedback_ids_json=list(safety_context.feedback_ids),
@@ -808,6 +1193,41 @@ class WorkoutService:
         )
         self.session.add(run)
         return run
+
+    def _record_structural_validation(
+        self, workout: Workout, revision: WorkoutRevision
+    ) -> WorkoutValidationRun:
+        run = WorkoutValidationRun(
+            workout_id=workout.id,
+            revision_id=revision.id,
+            validation_kind="structural",
+            rule_set_version=STRUCTURAL_RULE_SET_VERSION,
+            context_fingerprint=revision.content_hash,
+            feedback_ids_json=[],
+            evaluated_at=utcnow(),
+            expires_at=None,
+            valid=True,
+            report_json=revision.validation_report_json or structural_validation_report(),
+        )
+        self.session.add(run)
+        return run
+
+    @staticmethod
+    def _change_labels(parent: WorkoutRevision, current: WorkoutRevision) -> tuple[str, ...]:
+        labels: list[str] = []
+        for label, old, new in (
+            ("name", parent.name, current.name),
+            ("sport", parent.sport, current.sport),
+            ("suggested_for", parent.suggested_for, current.suggested_for),
+            ("description", parent.description, current.description),
+            ("definition", parent.definition, current.definition),
+            ("purpose", parent.purpose, current.purpose),
+            ("guidance", parent.guidance_json, current.guidance_json),
+            ("load_estimate", parent.load_estimate_json, current.load_estimate_json),
+        ):
+            if old != new:
+                labels.append(label)
+        return tuple(labels)
 
     def _event(
         self,

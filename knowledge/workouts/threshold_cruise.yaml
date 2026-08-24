@@ -1,0 +1,54 @@
+id: threshold_cruise
+version: 1.0.0
+status: deferred
+name: Schwellenintervalle
+sport: running
+purpose: threshold_endurance
+intensity_domain: moderate
+rule_strength: heuristic
+eligibility:
+  min_consistent_running_weeks: 6
+  min_runs_per_week: 3
+  requirements:
+    - reliable_intensity_model
+    - quality_density_validation
+contraindications:
+  - active_pain_affecting_gait
+  - fever_or_systemic_illness
+  - insufficient_baseline
+structure:
+  kind: intervals
+  warmup_minutes: {minimum: 12, default: 15, maximum: 20}
+  repetitions: {minimum: 3, default: 4, maximum: 6}
+  work_minutes: {minimum: 4, default: 6, maximum: 10}
+  work_rpe: {minimum: 6, maximum: 8}
+  recovery_minutes: {minimum: 1, default: 2, maximum: 3}
+  cooldown_minutes: {minimum: 8, default: 10, maximum: 15}
+  total_work_minutes: {minimum: 15, default: 24, maximum: 40}
+  session_rpe: {minimum: 6, maximum: 8}
+  instructions:
+    - Laufe kontrolliert hart und gleichmäßig; dies ist kein Time Trial.
+progression_axes:
+  - total_work_duration
+  - repetition_duration
+  - recovery_duration
+weekly_frequency_cap: 1
+fallback_targets:
+  - rpe_and_talk_test
+  - disable_pace_in_heat_or_hills
+evidence_refs:
+  - E-HIIT-001
+  - E-TALK-TEST-001
+product_heuristic:
+  product_default: true
+  rationale: Exact work and recovery ranges are template defaults and remain disabled until intensity and density validation is complete.
+  status: initial_product_default
+  reviewed_on: 2026-08-24
+garmin_capabilities:
+  time_steps: true
+  repeat_blocks: true
+  rpe_target: false
+  local_instructions: false
+  degradation:
+    - rpe_target_to_no_device_target
+    - instructions_remain_in_pacepilot

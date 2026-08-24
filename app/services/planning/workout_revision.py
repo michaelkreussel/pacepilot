@@ -6,7 +6,7 @@ from datetime import date
 from app.models import WorkoutRevision
 from app.services.planning.validator import WorkoutInput
 from app.services.planning.workout_definition import (
-    WorkoutDefinition,
+    WorkoutDefinitionModel,
     definition_to_json,
     parse_definition,
 )
@@ -26,6 +26,27 @@ class RevisionIdentity:
 class AcceptRevisionCommand:
     identity: RevisionIdentity
     context_fingerprint: str
+
+
+@dataclass(frozen=True)
+class RejectRevisionCommand:
+    identity: RevisionIdentity
+
+
+@dataclass(frozen=True)
+class RevisionMetadata:
+    purpose: str | None = None
+    guidance_json: dict[str, object] | None = None
+    load_estimate_json: dict[str, object] | None = None
+    validation_report_json: dict[str, object] | None = None
+    generation_context_json: dict[str, object] | None = None
+    source_type: str = "manual"
+    generator_version: str | None = None
+    template_id: str | None = None
+    template_version: str | None = None
+    rule_set_version: str | None = None
+    knowledge_base_version: str | None = None
+    edit_source: str = "manual"
 
 
 @dataclass(frozen=True)
@@ -49,13 +70,14 @@ class AcceptedWorkoutExecution:
     name: str
     sport: str
     description: str | None
+    definition_version: int
     definition: dict[str, object]
     scheduled_for: date | None
     garmin_workout_id: str | None
 
     @property
-    def definition_model(self) -> WorkoutDefinition:
-        return parse_definition(self.definition)
+    def definition_model(self) -> WorkoutDefinitionModel:
+        return parse_definition(self.definition, self.definition_version)
 
 
 def workout_content_hash(data: WorkoutInput) -> str:
@@ -64,7 +86,7 @@ def workout_content_hash(data: WorkoutInput) -> str:
         sport=data.sport,
         suggested_for=data.scheduled_for,
         description=data.description or None,
-        definition_version=1,
+        definition_version=data.definition_version,
         definition=definition_to_json(data.definition),
     )
 

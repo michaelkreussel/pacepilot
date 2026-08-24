@@ -12,7 +12,7 @@ from app.models import (
     WorkoutRevision,
 )
 from app.services.planning.workout_definition import (
-    WorkoutDefinition,
+    WorkoutDefinitionModel,
     parse_definition,
     workout_metrics,
 )
@@ -35,10 +35,17 @@ class WorkoutRevisionView:
     load_estimate: dict[str, object] | None
     source_type: str
     context_fingerprint_value: str | None = None
+    validation_report: dict[str, object] | None = None
+    generation_context: dict[str, object] | None = None
+    generator_version: str | None = None
+    template_id: str | None = None
+    template_version: str | None = None
+    rule_set_version: str | None = None
+    knowledge_base_version: str | None = None
 
     @property
-    def definition_model(self) -> WorkoutDefinition:
-        return parse_definition(self.definition)
+    def definition_model(self) -> WorkoutDefinitionModel:
+        return parse_definition(self.definition, self.definition_version)
 
     @property
     def step_count(self) -> int:
@@ -55,7 +62,37 @@ class WorkoutRevisionView:
             "template": "Vorlage",
             "import": "Import",
             "ai": "KI",
+            "coach_single": "PacePilot-Vorschlag",
         }.get(self.source_type, self.source_type)
+
+    @property
+    def proposal_summary(self) -> dict[str, object] | None:
+        if self.source_type != "coach_single" or not self.generation_context:
+            return None
+        athlete = self.generation_context.get("athlete")
+        if not isinstance(athlete, dict):
+            return None
+        baseline = athlete.get("baseline")
+        intensity = athlete.get("intensity")
+        windows = baseline.get("windows") if isinstance(baseline, dict) else None
+        window = windows.get("28") if isinstance(windows, dict) else None
+        data_quality = window.get("data_quality") if isinstance(window, dict) else None
+        return {
+            "runs_28_days": window.get("runs") if isinstance(window, dict) else None,
+            "baseline_confidence": window.get("confidence") if isinstance(window, dict) else None,
+            "history_coverage_percent": (
+                data_quality.get("history_coverage_percent")
+                if isinstance(data_quality, dict)
+                else None
+            ),
+            "intensity_confidence": (
+                intensity.get("confidence") if isinstance(intensity, dict) else None
+            ),
+            "distance_known": bool(
+                self.load_estimate and self.load_estimate.get("distance_meters") is not None
+            ),
+            "device_target": self.guidance.get("device_target") if self.guidance else None,
+        }
 
     @property
     def context_fingerprint(self) -> str:
@@ -76,11 +113,14 @@ class WorkoutDetailView:
     garmin_calendar_status: str
     garmin_device_status: str
     garmin_workout_id: str | None
+    parent: WorkoutRevisionView | None = None
     garmin_last_operation: str | None = None
     garmin_last_operation_status: str | None = None
     garmin_last_error: str | None = None
     safety_report: dict[str, object] | None = None
     sync_safety_report: dict[str, object] | None = None
+    garmin_sync_allowed: bool = True
+    proposal_actions_allowed: bool = True
 
     @property
     def has_unaccepted_changes(self) -> bool:
@@ -96,24 +136,42 @@ class WorkoutDetailView:
         )
 
     @property
+    def garmin_compilation_warnings(self) -> tuple[object, ...]:
+        from app.services.garmin.workout_export import compile_workout_with_report
+
+        by_code = {
+            warning.code: warning for warning in compile_workout_with_report(self.current).warnings
+        }
+        return tuple(by_code.values())
+
+    @property
     def change_labels(self) -> tuple[str, ...]:
         if not self.accepted or not self.has_unaccepted_changes:
             return ()
+        return self._change_labels(self.accepted)
+
+    @property
+    def candidate_change_labels(self) -> tuple[str, ...]:
+        if self.accepted is not None or self.parent is None:
+            return ()
+        return self._change_labels(self.parent)
+
+    def _change_labels(self, comparison: WorkoutRevisionView) -> tuple[str, ...]:
         labels: list[str] = []
         for label, current_value, accepted_value in (
-            ("Name", self.current.name, self.accepted.name),
-            ("Sportart", self.current.sport, self.accepted.sport),
-            ("Datum", self.current.suggested_for, self.accepted.suggested_for),
-            ("Beschreibung", self.current.description, self.accepted.description),
+            ("Name", self.current.name, comparison.name),
+            ("Sportart", self.current.sport, comparison.sport),
+            ("Datum", self.current.suggested_for, comparison.suggested_for),
+            ("Beschreibung", self.current.description, comparison.description),
             (
                 "Formatversion",
                 self.current.definition_version,
-                self.accepted.definition_version,
+                comparison.definition_version,
             ),
-            ("Ablauf", self.current.definition, self.accepted.definition),
-            ("Zweck", self.current.purpose, self.accepted.purpose),
-            ("Coaching-Hinweise", self.current.guidance, self.accepted.guidance),
-            ("Belastung", self.current.load_estimate, self.accepted.load_estimate),
+            ("Ablauf", self.current.definition, comparison.definition),
+            ("Zweck", self.current.purpose, comparison.purpose),
+            ("Coaching-Hinweise", self.current.guidance, comparison.guidance),
+            ("Belastung", self.current.load_estimate, comparison.load_estimate),
         ):
             if current_value != accepted_value:
                 labels.append(label)
@@ -132,7 +190,7 @@ class CalendarWorkout:
     revision_number: int
     source_type: str
     has_unaccepted_changes: bool
-    definition: WorkoutDefinition
+    definition: WorkoutDefinitionModel
 
     @property
     def source_label(self) -> str:
@@ -162,6 +220,13 @@ def revision_view(
         load_estimate=revision.load_estimate_json,
         source_type=revision.source_type,
         context_fingerprint_value=context_fingerprint,
+        validation_report=revision.validation_report_json,
+        generation_context=revision.generation_context_json,
+        generator_version=revision.generator_version,
+        template_id=revision.template_id,
+        template_version=revision.template_version,
+        rule_set_version=revision.rule_set_version,
+        knowledge_base_version=revision.knowledge_base_version,
     )
 
 
@@ -185,6 +250,13 @@ def workout_detail_view(
     )
     if accepted is not None and accepted.workout_id != workout.id:
         raise ValueError("Workout accepted revision mismatch")
+    parent = (
+        session.get(WorkoutRevision, current.parent_revision_id)
+        if current.parent_revision_id is not None
+        else None
+    )
+    if parent is not None and parent.workout_id != workout.id:
+        raise ValueError("Workout parent revision mismatch")
     binding = session.scalar(
         select(WorkoutGarminBinding).where(WorkoutGarminBinding.workout_id == workout.id)
     )
@@ -202,6 +274,9 @@ def workout_detail_view(
         if binding is not None
         else None
     )
+    from app.config import get_settings
+
+    settings = get_settings()
     return WorkoutDetailView(
         id=workout.id,
         current=revision_view(current, context_fingerprint=context_fingerprint),
@@ -215,9 +290,16 @@ def workout_detail_view(
         garmin_calendar_status=binding.calendar_status if binding else "not_requested",
         garmin_device_status=binding.device_status if binding else "not_requested",
         garmin_workout_id=remote_id or workout.garmin_workout_id,
+        parent=revision_view(parent) if parent is not None else None,
         garmin_last_operation=(latest_operation.operation_type if latest_operation else None),
         garmin_last_operation_status=(latest_operation.status if latest_operation else None),
         garmin_last_error=binding.last_error_message if binding else None,
         safety_report=safety_report,
         sync_safety_report=sync_safety_report,
+        garmin_sync_allowed=(
+            workout.source_type != "coach_single" or settings.coach_garmin_sync_enabled
+        ),
+        proposal_actions_allowed=(
+            workout.source_type != "coach_single" or settings.coach_workout_proposals_enabled
+        ),
     )

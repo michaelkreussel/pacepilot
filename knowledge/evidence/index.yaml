@@ -1,0 +1,194 @@
+version: 1.0.0
+entries:
+  - id: E-TID-001
+    claim: Distance-running programs generally allocate most training below the first threshold.
+    source:
+      title: Training Periodization, Methods, Intensity Distribution, and Volume in Highly Trained and Elite Distance Runners
+      year: 2022
+      citation: Casado et al., International Journal of Sports Physiology and Performance 17(6)
+      doi: 10.1123/ijspp.2021-0435
+    evidence_level: A
+    study_design: systematic_review
+    population:
+      description: Highly trained and elite distance runners
+    limitations:
+      - elite_absolute_volume_does_not_transfer_to_recreational_runners
+      - observed_distribution_does_not_define_one_optimal_ratio
+    allowed_uses:
+      - support_predominantly_low_intensity_training
+      - bound_quality_frequency
+    forbidden_uses:
+      - prescribe_elite_absolute_volume
+      - enforce_a_universal_80_20_ratio
+    last_reviewed: 2026-08-24
+  - id: E-TALK-TEST-001
+    claim: The talk test is a practical marker for prescribing and monitoring exercise intensity.
+    source:
+      title: Consistency of the Talk Test for Exercise Prescription
+      year: 2004
+      citation: Persinger et al., Medicine and Science in Sports and Exercise 36(9)
+      url: https://pubmed.ncbi.nlm.nih.gov/15354048/
+    evidence_level: B
+    study_design: validation_study
+    population:
+      description: Adults performing graded exercise tests
+    limitations:
+      - not_running_only
+      - subjective_response_requires_clear_instruction
+    allowed_uses:
+      - fallback_intensity_target
+      - easy_intensity_guidance
+    forbidden_uses:
+      - medical_clearance
+      - exact_threshold_diagnosis
+    last_reviewed: 2026-08-24
+  - id: E-SRPE-001
+    claim: Session RPE is an ecologically useful subjective measure of internal training load.
+    source:
+      title: Session-RPE Method for Training Load Monitoring
+      year: 2017
+      citation: Haddad et al., Frontiers in Neuroscience
+      url: https://pubmed.ncbi.nlm.nih.gov/29163016/
+    evidence_level: A
+    study_design: narrative_review
+    population:
+      description: Athletes across multiple sports and performance levels
+    limitations:
+      - influenced_by_context_and_measurement_timing
+      - does_not_replace_external_load
+    allowed_uses:
+      - subjective_intensity_target
+      - load_estimate_with_uncertainty
+    forbidden_uses:
+      - sole_medical_risk_score
+      - exact_energy_expenditure
+    last_reviewed: 2026-08-24
+  - id: E-HIIT-001
+    claim: High-intensity interval prescription requires deliberate manipulation of work intensity and duration, recovery, repetitions, and series.
+    source:
+      title: High-Intensity Interval Training, Solutions to the Programming Puzzle, Part I
+      year: 2013
+      citation: Buchheit and Laursen, Sports Medicine 43
+      doi: 10.1007/s40279-013-0029-x
+    evidence_level: A
+    study_design: two_part_review
+    population:
+      description: Trained athletes across endurance and team sports
+    limitations:
+      - broad_population
+      - exact_session_design_remains_context_dependent
+    allowed_uses:
+      - model_work_and_recovery_separately
+      - conservative_interval_template_ranges
+    forbidden_uses:
+      - claim_one_interval_format_is_universally_optimal
+      - prescribe_without_baseline_validation
+    last_reviewed: 2026-08-24
+  - id: E-PROGRESSION-001
+    claim: A universal ten-percent weekly progression rule is not supported as an injury-prevention law.
+    source:
+      title: The Association Between Running Injuries and Training Parameters
+      year: 2022
+      citation: Fredette et al., Journal of Athletic Training 57(7)
+      doi: 10.4085/1062-6050-0195.21
+    evidence_level: B
+    study_design: systematic_review
+    population:
+      description: Runners represented in prospective and retrospective injury studies
+    limitations:
+      - heterogeneous_load_definitions
+      - injury_is_multifactorial
+    allowed_uses:
+      - reject_universal_ten_percent_rule
+      - require_baseline_relative_progression
+    forbidden_uses:
+      - define_a_safe_weekly_increase
+      - sole_injury_prediction
+    last_reviewed: 2026-08-24
+  - id: E-INJURY-SESSION-SPIKE-001
+    claim: Single-session distance above 110 percent of the longest run in the prior 30 days was associated with more self-reported overuse injuries.
+    source:
+      title: How Much Running Is Too Much?
+      year: 2025
+      citation: Frandsen et al., British Journal of Sports Medicine 59(17)
+      doi: 10.1136/bjsports-2024-109380
+    evidence_level: B
+    study_design: prospective_observational_cohort
+    population:
+      description: Predominantly experienced middle-aged male runners using Garmin devices
+      sample_size: 5205
+    limitations:
+      - observational_not_causal
+      - self_reported_injury
+      - limited_subgroup_generalization
+    allowed_uses:
+      - visible_warning
+      - conservative_alternative_ranking
+    forbidden_uses:
+      - claim_that_up_to_ten_percent_is_safe
+      - medical_prediction
+      - sole_injury_risk_score
+    last_reviewed: 2026-08-24
+  - id: E-ILLNESS-001
+    claim: Return to sport after acute respiratory illness should be symptom-oriented and conservative when systemic or cardiopulmonary warning signs exist.
+    source:
+      title: Acute Respiratory Illness and Return to Sport
+      year: 2022
+      citation: Snyders et al., British Journal of Sports Medicine 56(4)
+      doi: 10.1136/bjsports-2021-104719
+    evidence_level: A
+    study_design: systematic_review_and_meta_analysis
+    population:
+      description: Athletes with acute respiratory illness
+    limitations:
+      - heterogeneous_illness_definitions
+      - does_not_replace_medical_assessment
+    allowed_uses:
+      - conservative_training_stop
+      - request_clarification
+    forbidden_uses:
+      - diagnosis
+      - automated_medical_clearance
+    last_reviewed: 2026-08-24
+  - id: E-HEAT-001
+    claim: Environmental heat can require lower external pace while internal effort remains elevated.
+    source:
+      title: Consensus Recommendations on Training and Competing in the Heat
+      year: 2015
+      citation: Racinais et al., British Journal of Sports Medicine 49(18)
+      doi: 10.1136/bjsports-2015-094915
+    evidence_level: A
+    study_design: consensus_statement
+    population:
+      description: Athletes training or competing in hot environments
+    limitations:
+      - individual_heat_response_varies
+      - environmental_data_may_be_missing
+    allowed_uses:
+      - prefer_rpe_fallback_in_heat
+      - downshift_external_target
+    forbidden_uses:
+      - infer_heat_acclimation_without_data
+      - medical_clearance
+    last_reviewed: 2026-08-24
+  - id: E-WEARABLE-001
+    claim: Consumer wearable estimates of sleep, heart rate, and heart-rate variability have device- and metric-specific uncertainty.
+    source:
+      title: A Validation of Six Wearable Devices for Estimating Sleep, Heart Rate and Heart Rate Variability
+      year: 2022
+      citation: Miller et al., Sensors 22(16)
+      doi: 10.3390/s22166317
+    evidence_level: B
+    study_design: device_validation_study
+    population:
+      description: Healthy adults wearing consumer devices
+    limitations:
+      - device_specific_accuracy
+      - sleep_stage_accuracy_is_limited
+    allowed_uses:
+      - secondary_context_signal
+      - trend_interpretation
+    forbidden_uses:
+      - override_reported_red_flags
+      - medical_diagnosis
+    last_reviewed: 2026-08-24
