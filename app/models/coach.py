@@ -9,6 +9,7 @@ from app.models.user import utcnow
 
 if TYPE_CHECKING:
     from app.models.user import User
+    from app.models.workout import Workout
 
 
 class CoachConversation(Base):
@@ -26,6 +27,12 @@ class CoachConversation(Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
         order_by="CoachMessage.id",
+    )
+    assistant_runs: Mapped[list["CoachAssistantRun"]] = relationship(
+        back_populates="conversation",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="CoachAssistantRun.id",
     )
 
 
@@ -50,6 +57,46 @@ class CoachMessage(Base):
         passive_deletes=True,
         order_by="CoachToolCall.id",
     )
+    generated_run: Mapped["CoachAssistantRun | None"] = relationship(
+        back_populates="assistant_message",
+        foreign_keys="CoachAssistantRun.assistant_message_id",
+        uselist=False,
+        passive_deletes=True,
+    )
+
+
+class CoachAssistantRun(Base):
+    __tablename__ = "coach_assistant_runs"
+    __table_args__ = (
+        UniqueConstraint("assistant_message_id"),
+        UniqueConstraint("workout_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    conversation_id: Mapped[int] = mapped_column(
+        ForeignKey("coach_conversations.id", ondelete="CASCADE"), index=True
+    )
+    user_message_id: Mapped[int] = mapped_column(
+        ForeignKey("coach_messages.id", ondelete="CASCADE"), index=True
+    )
+    assistant_message_id: Mapped[int] = mapped_column(
+        ForeignKey("coach_messages.id", ondelete="CASCADE"), index=True
+    )
+    workout_id: Mapped[int | None] = mapped_column(
+        ForeignKey("workouts.id", ondelete="SET NULL"), index=True
+    )
+    status: Mapped[str] = mapped_column(String(20), default="streaming")
+    model_id: Mapped[str | None] = mapped_column(String(200))
+    request_id: Mapped[str | None] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+    conversation: Mapped[CoachConversation] = relationship(back_populates="assistant_runs")
+    user_message: Mapped[CoachMessage] = relationship(foreign_keys=[user_message_id])
+    assistant_message: Mapped[CoachMessage] = relationship(
+        back_populates="generated_run", foreign_keys=[assistant_message_id]
+    )
+    workout: Mapped["Workout | None"] = relationship()
 
 
 class CoachToolCall(Base):

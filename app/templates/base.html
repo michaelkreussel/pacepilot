@@ -14,7 +14,7 @@
   <script src="{{ url_for('static', path='/js/csrf.js') }}?v=20260820-1" defer></script>
   <script src="{{ url_for('static', path='/js/local-time.js') }}?v=20260809-1" defer></script>
   {% block head %}{% endblock %}
-  <link rel="stylesheet" href="{{ url_for('static', path='/css/tailwind.css') }}?v=20260824-17">
+  <link rel="stylesheet" href="{{ url_for('static', path='/css/tailwind.css') }}?v=20260824-18">
 </head>
 <body class="m-0 min-h-screen bg-background font-sans text-sm text-foreground">
   <div class="min-h-screen min-[1051px]:grid min-[1051px]:grid-cols-[248px_minmax(0,1fr)]" x-data="{ menuOpen: false, desktop: window.matchMedia('(min-width: 1051px)').matches }" x-init="const media = window.matchMedia('(min-width: 1051px)'); media.addEventListener('change', event => desktop = event.matches)">

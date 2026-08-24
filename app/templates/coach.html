@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}KI-Coach · PacePilot{% endblock %}
-{% block head %}<script src="{{ url_for('static', path='/js/coach.js') }}?v=20260820-1" defer></script>{% endblock %}
+{% block head %}<script src="{{ url_for('static', path='/js/coach.js') }}?v=20260824-2" defer></script>{% endblock %}
 {% block main_class %}flex h-dvh min-h-0 flex-col overflow-hidden{% endblock %}
 {% block content_class %}flex min-h-0 flex-1 flex-col overflow-hidden{% endblock %}
 {% block content %}
@@ -76,7 +76,7 @@
       <header class="shrink-0 border-b border-border bg-surface/90 px-3 py-2 backdrop-blur sm:px-5">
         <div class="mx-auto flex max-w-3xl items-center gap-3">
           <p class="min-w-0 flex-1 truncate text-sm font-semibold text-foreground" data-selected-conversation-title>{{ conversation.title }}</p>
-          <span class="inline-flex shrink-0 items-center gap-1 rounded-full bg-surface-muted px-2 py-0.5 text-[0.625rem] font-medium text-muted-foreground" title="Der Coach kann PacePilot-Daten nur lesen und keine Aktionen ausführen."><svg class="size-3 fill-none stroke-current stroke-[1.8]" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.5"/></svg>Nur lesend</span>
+           {% if features.coach_workout_proposals %}<span class="inline-flex shrink-0 items-center gap-1 rounded-full bg-primary-subtle px-2 py-0.5 text-[0.625rem] font-medium text-primary-emphasis" title="Der Coach kann einen unbestätigten Easy-Run-Vorschlag erstellen. Annahme, Planung und Garmin bleiben separate Aktionen."><svg class="size-3 fill-none stroke-current stroke-[1.8]" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v18M3 12h18" stroke-linecap="round"/></svg>Vorschläge möglich</span>{% else %}<span class="inline-flex shrink-0 items-center gap-1 rounded-full bg-surface-muted px-2 py-0.5 text-[0.625rem] font-medium text-muted-foreground" title="Der Coach kann PacePilot-Daten nur lesen und keine Aktionen ausführen."><svg class="size-3 fill-none stroke-current stroke-[1.8]" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.5"/></svg>Nur lesend</span>{% endif %}
         </div>
       </header>
 
@@ -112,7 +112,8 @@
                   {% if item.status == 'completed' %}<li class="relative pl-3" data-activity-final><span class="absolute -left-[0.9375rem] top-1 size-1.5 rounded-full bg-muted-foreground"></span><span class="font-medium text-foreground">Antwort formuliert</span></li>{% endif %}
                 </ol>
               </details>
-              <div class="whitespace-pre-wrap text-sm leading-6 text-foreground" data-answer-text>{{ item.content }}</div>
+               <div class="whitespace-pre-wrap text-sm leading-6 text-foreground" data-answer-text>{{ item.content }}</div>
+               <div data-proposal-artifacts>{% if proposal_cards.get(item.id) %}{% with card=proposal_cards[item.id] %}{% include "workouts/_coach_proposal_card.html" %}{% endwith %}{% endif %}</div>
               {% if item.status in ['failed', 'interrupted'] %}<p class="mt-2 text-xs text-danger-emphasis" role="status">Diese Antwort wurde nicht abgeschlossen.</p>{% endif %}
             </div>
           </div>
@@ -134,7 +135,7 @@
         {{ csrf_field() }}
         <div class="mx-auto flex max-w-3xl items-end gap-1.5 rounded-xl border border-input bg-background p-1.5 shadow-sm transition focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/20">
           <label class="sr-only" for="coach-message">Frage an den Coach</label>
-          <textarea class="max-h-40 min-h-9 flex-1 resize-none bg-transparent px-2 py-1.5 text-sm leading-5 text-foreground outline-none placeholder:text-muted-foreground" id="coach-message" name="message" rows="1" maxlength="4000" placeholder="Frage zu Gesundheit, Erholung oder Training ..." required {% if not configured %}disabled{% endif %}></textarea>
+           <textarea class="max-h-40 min-h-9 flex-1 resize-none bg-transparent px-2 py-1.5 text-sm leading-5 text-foreground outline-none placeholder:text-muted-foreground" id="coach-message" name="message" rows="1" maxlength="4000" placeholder="{% if features.coach_workout_proposals %}Frage zu Gesundheit, Training oder einem Laufvorschlag ...{% else %}Frage zu Gesundheit, Erholung oder Training ...{% endif %}" required {% if not configured %}disabled{% endif %}></textarea>
           <button class="inline-flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground transition hover:bg-primary-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-50" type="submit" aria-label="Nachricht senden" {% if not configured %}disabled{% endif %}><svg class="size-3.5 fill-none stroke-current stroke-2" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 7-7 7 7M12 5v14" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
         </div>
         <div class="mx-auto mt-1 flex max-w-3xl items-center justify-between gap-3 px-1 text-[0.625rem] leading-4 text-muted-foreground"><p>Antworten können Fehler enthalten. Prüfe wichtige Entscheidungen selbst.</p><p class="hidden shrink-0 sm:block">Enter senden · Shift + Enter neue Zeile</p></div>

@@ -14,6 +14,7 @@ def get_coach_agent() -> CoachAgent | None:
         api_key=settings.llm_api_key,
         model_id=settings.llm_model,
         timeout_seconds=settings.llm_timeout_seconds,
+        workout_proposals_enabled=settings.coach_workout_proposals_enabled,
     )
 
 

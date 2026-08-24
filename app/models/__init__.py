@@ -1,5 +1,5 @@
 from app.models.activity import Activity, ActivityExerciseSet, ActivitySplit, ActivityZone
-from app.models.coach import CoachConversation, CoachMessage, CoachToolCall
+from app.models.coach import CoachAssistantRun, CoachConversation, CoachMessage, CoachToolCall
 from app.models.feedback import PostSessionFeedback, PreSessionFeedback
 from app.models.fitness import DailyFitness
 from app.models.health import DailyHealth, SleepStage
@@ -23,6 +23,7 @@ __all__ = [
     "ActivitySplit",
     "ActivityZone",
     "CoachConversation",
+    "CoachAssistantRun",
     "CoachMessage",
     "CoachToolCall",
     "DailyDataStatus",

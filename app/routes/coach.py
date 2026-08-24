@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator, Sequence
+from dataclasses import dataclass
 from datetime import date, timedelta
 from time import monotonic
 from typing import Annotated
@@ -15,15 +16,17 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.auth import CurrentUser
 from app.config import get_settings
 from app.database import SessionDep
-from app.models import CoachMessage
+from app.models import CoachMessage, Workout, WorkoutRevision
 from app.models.user import utcnow
 from app.onboarding import require_data_access
 from app.repositories.coach import (
     complete_message,
     conversation_messages,
+    create_assistant_run,
     create_conversation,
     create_message,
     fail_message,
+    find_assistant_run,
     find_conversation,
     finish_tool_call,
     list_conversations,
@@ -36,6 +39,12 @@ from app.services.coach.agent import (
 )
 from app.services.coach.dependencies import CoachAgentDep
 from app.services.coach.tools import CoachRuntimeContext
+from app.services.planning.workout_definition import (
+    HeartRateRangeTarget,
+    RpeRangeTarget,
+    StepBlockV2,
+    workout_metrics,
+)
 from app.services.planning.workout_proposals import (
     EasyRunProposalRequest,
     RunningProposalService,
@@ -50,6 +59,94 @@ logger = logging.getLogger(__name__)
 
 MAX_HISTORY_MESSAGES = 20
 MAX_HISTORY_CHARACTERS = 12_000
+
+
+@dataclass(frozen=True)
+class CoachProposalCard:
+    workout_id: int
+    assistant_run_id: int
+    name: str
+    suggested_for: date | None
+    duration_minutes: int
+    target_label: str
+    status_label: str
+    status_description: str
+
+
+def _proposal_card(
+    session: Session, user_id: int, conversation_id: int, run_id: int
+) -> CoachProposalCard | None:
+    run = find_assistant_run(session, user_id, conversation_id, run_id)
+    if run is None or run.workout_id is None:
+        return None
+    workout = session.get(Workout, run.workout_id)
+    if (
+        workout is None
+        or workout.user_id != user_id
+        or workout.deleted_at is not None
+        or workout.source_type != "coach_single"
+        or workout.originating_conversation_id != conversation_id
+        or workout.originating_user_message_id != run.user_message_id
+        or workout.originating_assistant_message_id != run.assistant_message_id
+        or workout.current_revision_id is None
+    ):
+        return None
+    revision = session.get(WorkoutRevision, workout.current_revision_id)
+    if revision is None or revision.workout_id != workout.id:
+        return None
+    definition = revision.definition_model
+    target_label = "Lokale Intensitätsleitplanken"
+    if len(definition.blocks) == 1 and isinstance(definition.blocks[0], StepBlockV2):
+        target = definition.blocks[0].target
+        if isinstance(target, HeartRateRangeTarget):
+            target_label = f"HF {target.lower_bpm}–{target.upper_bpm} bpm"
+        elif isinstance(target, RpeRangeTarget):
+            target_label = f"RPE {target.lower_rpe}–{target.upper_rpe}"
+    if workout.approval_status == "rejected":
+        status_label = "Abgelehnt"
+        status_description = "Dieser Vorschlag wurde abgelehnt und wird nicht ausgeführt."
+    elif workout.status == "pushed":
+        status_label = "An Uhr gesendet"
+        status_description = "Die angenommene Revision wurde an das Garmin-Gerät gesendet."
+    elif workout.status == "published":
+        status_label = "Bei Garmin"
+        status_description = "Die angenommene Revision wurde zu Garmin übertragen."
+    elif workout.local_schedule_status == "scheduled":
+        status_label = "Eingeplant"
+        status_description = "Die angenommene Revision ist im lokalen Kalender eingeplant."
+    elif workout.accepted_revision_id is not None:
+        status_label = "Angenommen"
+        status_description = "Die geprüfte Revision wurde angenommen, aber nicht eingeplant."
+    else:
+        status_label = "Unbestätigt"
+        status_description = (
+            "Der deterministische Vorschlag ist weder angenommen noch eingeplant. "
+            "Prüfe ihn vor jeder weiteren Aktion."
+        )
+    return CoachProposalCard(
+        workout_id=workout.id,
+        assistant_run_id=run.id,
+        name=revision.name,
+        suggested_for=revision.suggested_for,
+        duration_minutes=round(workout_metrics(definition).duration_seconds / 60),
+        target_label=target_label,
+        status_label=status_label,
+        status_description=status_description,
+    )
+
+
+def _proposal_cards(
+    session: Session, user_id: int, conversation_id: int, messages: Sequence[CoachMessage]
+) -> dict[int, CoachProposalCard]:
+    cards: dict[int, CoachProposalCard] = {}
+    for message in messages:
+        run = message.generated_run
+        if run is None:
+            continue
+        card = _proposal_card(session, user_id, conversation_id, run.id)
+        if card is not None:
+            cards[message.id] = card
+    return cards
 
 
 def _has_active_response(session: Session, messages: Sequence[CoachMessage]) -> bool:
@@ -116,6 +213,9 @@ def _render_coach(
             conversations=conversations,
             conversation=selected,
             messages=messages,
+            proposal_cards=(
+                _proposal_cards(session, user.id, selected.id, messages) if selected else {}
+            ),
             today=date.today(),
             proposal_error=proposal_error,
             proposal_date=proposal_date or date.today().isoformat(),
@@ -149,6 +249,24 @@ def new_conversation(session: SessionDep, user: CurrentUser) -> RedirectResponse
     conversation = create_conversation(session, user.id)
     session.commit()
     return RedirectResponse(f"/coach/{conversation.id}", status_code=303)
+
+
+@router.get("/{conversation_id}/runs/{run_id}/proposal-card", response_class=HTMLResponse)
+def proposal_card(
+    conversation_id: int,
+    run_id: int,
+    request: Request,
+    session: SessionDep,
+    user: CurrentUser,
+) -> HTMLResponse:
+    card = _proposal_card(session, user.id, conversation_id, run_id)
+    if card is None:
+        raise HTTPException(status_code=404, detail="Vorschlag nicht gefunden")
+    return templates.TemplateResponse(
+        request,
+        "workouts/_coach_proposal_card.html",
+        context(request, card=card),
+    )
 
 
 @router.post("/workout-proposals/easy-run")
@@ -258,6 +376,27 @@ def _persist_tool_event(
         session.commit()
 
 
+def _proposal_event_payload(runtime: CoachRuntimeContext) -> dict[str, object]:
+    if runtime.conversation_id is None or runtime.assistant_run_id is None:
+        raise RuntimeError("Proposal event has no local assistant run")
+    with runtime.session_factory() as session:
+        card = _proposal_card(
+            session,
+            runtime.user_id,
+            runtime.conversation_id,
+            runtime.assistant_run_id,
+        )
+    if card is None:
+        raise RuntimeError("Proposal tool completed without a persisted artifact")
+    return {
+        "workout_id": card.workout_id,
+        "run_id": card.assistant_run_id,
+        "card_url": (
+            f"/coach/{runtime.conversation_id}/runs/{card.assistant_run_id}/proposal-card"
+        ),
+    }
+
+
 async def _stream_answer(
     *,
     request: Request,
@@ -268,6 +407,7 @@ async def _stream_answer(
 ) -> AsyncIterator[str]:
     started_at = monotonic()
     answer: list[str] = []
+    proposal_emitted = False
     logger.info(
         "AI coach stream started request_id=%s user_id=%s assistant_message_id=%s "
         "history_messages=%s",
@@ -276,7 +416,10 @@ async def _stream_answer(
         assistant_message_id,
         len(history),
     )
-    yield _event("run.started", {"message_id": assistant_message_id})
+    yield _event(
+        "run.started",
+        {"message_id": assistant_message_id, "run_id": runtime.assistant_run_id},
+    )
     try:
         async for event in agent.stream(history, runtime):
             if await request.is_disconnected():
@@ -297,6 +440,10 @@ async def _stream_answer(
                         "summary": event.summary,
                     },
                 )
+            elif event.type == "proposal_created":
+                if not proposal_emitted:
+                    yield _event("proposal.created", _proposal_event_payload(runtime))
+                    proposal_emitted = True
 
         content = "".join(answer).strip()
         with runtime.session_factory() as session:
@@ -368,13 +515,21 @@ async def ask_coach(
 
     if conversation.title == "Neuer Chat":
         conversation.title = message[:157] + ("..." if len(message) > 157 else "")
-    create_message(session, conversation, role="user", content=message)
+    user_message = create_message(session, conversation, role="user", content=message)
     assistant = create_message(
         session,
         conversation,
         role="assistant",
         status="streaming",
         model_id=get_settings().llm_model,
+    )
+    assistant_run = create_assistant_run(
+        session,
+        conversation,
+        user_message,
+        assistant,
+        model_id=get_settings().llm_model,
+        request_id=request.state.request_id,
     )
     session.commit()
 
@@ -384,6 +539,10 @@ async def ask_coach(
         as_of=date.today(),
         session_factory=factory,
         request_id=request.state.request_id,
+        conversation_id=conversation.id,
+        user_message_id=user_message.id,
+        assistant_message_id=assistant.id,
+        assistant_run_id=assistant_run.id,
     )
     history = [*_bounded_history(existing_messages), CoachHistoryMessage("user", message)]
     return StreamingResponse(

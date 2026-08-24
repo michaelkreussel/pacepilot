@@ -894,6 +894,9 @@ Exit-Kriterien:
 
 ### Phase 9 - LangChain-Integration als strukturiertes Artefakt
 
+**Status:** Abgeschlossen am 24. August 2026. Details und Gates stehen in
+`phase-9-completion.md` und `ai-coach-phase-9-gate-matrix.md`.
+
 **Ziel:** Der bestehende Coach kann deterministische Vorschlaege anfordern und erklaeren.
 
 Arbeiten:

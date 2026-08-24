@@ -175,6 +175,51 @@ def test_easy_run_proposal_is_deterministic_revisioned_and_unscheduled(
         assert conflict.value.code == "proposal.idempotency_conflict"
 
 
+def test_stale_idempotency_precheck_rolls_back_duplicate_proposal(
+    session_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
+    with session_factory() as session:
+        user = _user(session)
+        _history(session, user.id, date.today())
+        service = RunningProposalService(session, user)
+        request = _request(key="phase8-race-regression")
+        winner = service.create_easy_run(request)
+
+        original_idempotent_proposal = WorkoutService.idempotent_proposal
+        stale_checks = 0
+
+        def stale_idempotent_proposal(
+            workout_service: WorkoutService,
+            *,
+            idempotency_key: str,
+            request_fingerprint: str,
+        ) -> Workout | None:
+            nonlocal stale_checks
+            stale_checks += 1
+            if stale_checks <= 2:
+                return None
+            return original_idempotent_proposal(
+                workout_service,
+                idempotency_key=idempotency_key,
+                request_fingerprint=request_fingerprint,
+            )
+
+        monkeypatch.setattr(WorkoutService, "idempotent_proposal", stale_idempotent_proposal)
+        replay = service.create_easy_run(request)
+
+        assert replay.id == winner.id
+        assert session.scalar(select(func.count()).select_from(Workout)) == 1
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(WorkoutEvent)
+                .where(WorkoutEvent.action == "propose")
+            )
+            == 1
+        )
+
+
 def test_proposal_requires_recent_history_and_respects_safety_stop(
     session_factory, monkeypatch: pytest.MonkeyPatch
 ) -> None:

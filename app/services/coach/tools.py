@@ -4,11 +4,16 @@ from datetime import date, datetime, timedelta
 from typing import Annotated, Literal
 
 from langchain.tools import ToolRuntime, tool
+from langchain_core.tools import BaseTool
 from pydantic import Field
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.models import CoachMessage, User
+from app.repositories.coach import find_assistant_run
 from app.services.analytics.athlete_data import AthleteDataService
 from app.services.analytics.health_trends import MetricTrend
+from app.services.planning.workout_proposals import EasyRunProposalRequest, RunningProposalService
+from app.services.planning.workout_service import ProposalOrigin
 
 HealthMetric = Literal[
     "resting_hr",
@@ -34,6 +39,10 @@ class CoachRuntimeContext:
     as_of: date
     session_factory: sessionmaker[Session]
     request_id: str | None = None
+    conversation_id: int | None = None
+    user_message_id: int | None = None
+    assistant_message_id: int | None = None
+    assistant_run_id: int | None = None
 
 
 def _json_default(value: object) -> str:
@@ -198,6 +207,70 @@ def get_upcoming_workouts(
     return _json(tuple(asdict(workout) for workout in workouts))
 
 
+@tool
+def create_running_workout_proposal(
+    runtime: ToolRuntime[CoachRuntimeContext],
+    suggested_for: date,
+    available_minutes: Annotated[int, Field(ge=20, le=1440)],
+) -> str:
+    """Create one unaccepted Easy Run proposal through PacePilot's deterministic planner.
+
+    Use this only when the athlete explicitly wants a running-workout proposal and has supplied a
+    desired date plus available time. The result remains unscheduled and unaccepted. This tool
+    cannot accept, schedule, upload, push, or otherwise synchronize a workout.
+    """
+    context = runtime.context
+    if (
+        context.conversation_id is None
+        or context.user_message_id is None
+        or context.assistant_message_id is None
+        or context.assistant_run_id is None
+    ):
+        raise ValueError("Coach proposal runtime is incomplete")
+    conversation_id = context.conversation_id
+    user_message_id = context.user_message_id
+    assistant_message_id = context.assistant_message_id
+    assistant_run_id = context.assistant_run_id
+    with context.session_factory() as session:
+        run = find_assistant_run(session, context.user_id, conversation_id, assistant_run_id)
+        user_message = session.get(CoachMessage, user_message_id)
+        assistant_message = session.get(CoachMessage, assistant_message_id)
+        user = session.get(User, context.user_id)
+        if (
+            run is None
+            or user is None
+            or run.user_message_id != user_message_id
+            or run.assistant_message_id != assistant_message_id
+            or user_message is None
+            or user_message.conversation_id != conversation_id
+            or user_message.role != "user"
+            or assistant_message is None
+            or assistant_message.conversation_id != conversation_id
+            or assistant_message.role != "assistant"
+        ):
+            raise ValueError("Coach proposal runtime is invalid")
+        request = EasyRunProposalRequest(
+            suggested_for=suggested_for,
+            available_minutes=available_minutes,
+            idempotency_key=(f"coach-run:{assistant_run_id}:create_running_workout_proposal:v1"),
+        )
+        RunningProposalService(session, user, request_id=context.request_id).create_easy_run(
+            request,
+            origin=ProposalOrigin(
+                conversation_id=conversation_id,
+                user_message_id=user_message_id,
+                assistant_message_id=assistant_message_id,
+                assistant_run_id=assistant_run_id,
+            ),
+        )
+        return _json(
+            {
+                "status": "created",
+                "artifact": {"type": "workout_proposal"},
+            }
+        )
+
+
 COACH_TOOLS = (
     get_current_recovery_state,
     get_subjective_context,
@@ -209,6 +282,13 @@ COACH_TOOLS = (
     get_upcoming_workouts,
 )
 
+
+def coach_tools(*, workout_proposals_enabled: bool) -> tuple[BaseTool, ...]:
+    if workout_proposals_enabled:
+        return (*COACH_TOOLS, create_running_workout_proposal)
+    return COACH_TOOLS
+
+
 TOOL_LABELS = {
     "get_current_recovery_state": "Aktuelle Erholung prüfen",
     "get_subjective_context": "Subjektives Aktivitätsfeedback laden",
@@ -218,6 +298,7 @@ TOOL_LABELS = {
     "get_activity_details": "Trainingseinheit genauer analysieren",
     "get_health_day": "Gesundheitsdaten des Tages laden",
     "get_upcoming_workouts": "Geplante Einheiten prüfen",
+    "create_running_workout_proposal": "Easy-Run-Vorschlag erstellen",
 }
 
 
@@ -229,4 +310,8 @@ def describe_tool_call(tool_name: str, arguments: dict[str, object]) -> tuple[st
         return label, f"Datum: {arguments['day']}"
     if tool_name == "get_recent_activities" and "limit" in arguments:
         return label, f"Letzte {arguments['limit']} Einheiten"
+    if tool_name == "create_running_workout_proposal":
+        day = arguments.get("suggested_for")
+        minutes = arguments.get("available_minutes")
+        return label, f"{day} · {minutes} Minuten"
     return label, None

@@ -1,7 +1,8 @@
+import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator, Sequence
-from datetime import date
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -15,18 +16,22 @@ from langgraph.prebuilt import ToolNode
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.config import get_settings
 from app.logging import FILE_HANDLER, configure_logging
 from app.main import app
 from app.models import (
     Activity,
+    CoachAssistantRun,
     CoachConversation,
     CoachMessage,
     CoachToolCall,
     DailyHealth,
     User,
     Workout,
+    WorkoutEvent,
 )
 from app.models.user import utcnow
+from app.repositories.coach import create_assistant_run, create_message
 from app.routes.coach import _stream_answer
 from app.services.coach import agent as coach_agent_module
 from app.services.coach.agent import (
@@ -37,10 +42,13 @@ from app.services.coach.agent import (
 from app.services.coach.dependencies import get_coach_agent
 from app.services.coach.tools import (
     CoachRuntimeContext,
+    coach_tools,
+    create_running_workout_proposal,
     get_current_recovery_state,
     get_health_day,
     get_subjective_context,
 )
+from app.services.planning.workout_service import WorkoutConflictError
 
 
 class FakeCoachAgent:
@@ -110,9 +118,32 @@ def _new_chat(client: TestClient) -> int:
     return int(response.headers["location"].rsplit("/", 1)[1])
 
 
+def _running_history(session: Session, user_id: int) -> None:
+    for index, age in enumerate((0, 7, 14, 21, 28, 35)):
+        day = date.today() - timedelta(days=age)
+        session.add(
+            Activity(
+                user_id=user_id,
+                garmin_activity_id=f"coach-phase9-run-{index}",
+                name=f"Lauf {index}",
+                activity_type="running",
+                started_at=datetime.combine(day, time(8)),
+                duration_s=2400,
+                distance_m=6000,
+                average_hr=145,
+                max_hr=170,
+                synced_at=utcnow(),
+            )
+        )
+    session.flush()
+
+
 def test_coach_streams_and_persists_conversation(
-    client: TestClient, session_factory: sessionmaker[Session]
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", False)
     fake = FakeCoachAgent()
     app.dependency_overrides[get_coach_agent] = lambda: fake
     conversation_id = _new_chat(client)
@@ -164,6 +195,277 @@ def test_coach_streams_and_persists_conversation(
     assert page.index("Aktuelle Erholung prüfen") < page.index(
         "Du wirkst heute etwas weniger erholt"
     )
+
+
+def test_coach_tool_creates_one_durable_server_rendered_proposal(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
+
+    class ProposalAgent:
+        runtime: CoachRuntimeContext | None = None
+
+        async def stream(
+            self,
+            messages: Sequence[CoachHistoryMessage],
+            runtime: CoachRuntimeContext,
+        ) -> AsyncIterator[CoachEvent]:
+            del messages
+            self.runtime = runtime
+            function: Any = cast(Any, create_running_workout_proposal).func
+            first = function(
+                runtime=SimpleNamespace(context=runtime),
+                suggested_for=date.today() + timedelta(days=1),
+                available_minutes=45,
+            )
+            second = function(
+                runtime=SimpleNamespace(context=runtime),
+                suggested_for=date.today() + timedelta(days=1),
+                available_minutes=45,
+            )
+            assert json.loads(first)["artifact"] == json.loads(second)["artifact"]
+            yield CoachEvent(
+                "tool_started",
+                tool_call_id="provider-call-a",
+                tool_name="create_running_workout_proposal",
+                label="Easy-Run-Vorschlag erstellen",
+            )
+            yield CoachEvent(
+                "tool_completed",
+                tool_call_id="provider-call-a",
+                tool_name="create_running_workout_proposal",
+                label="Easy-Run-Vorschlag erstellen",
+            )
+            yield CoachEvent("proposal_created")
+            yield CoachEvent("proposal_created")
+            yield CoachEvent("answer_delta", text="Ich habe einen Vorschlag vorbereitet.")
+
+    fake = ProposalAgent()
+    app.dependency_overrides[get_coach_agent] = lambda: fake
+    with session_factory() as session:
+        user = session.scalar(select(User))
+        assert user is not None
+        _running_history(session, user.id)
+        session.commit()
+    conversation_id = _new_chat(client)
+
+    response = client.post(
+        f"/coach/{conversation_id}/messages",
+        data={"message": "Erstelle mir morgen einen lockeren Lauf für 45 Minuten."},
+    )
+
+    assert response.status_code == 200
+    assert response.text.count("event: proposal.created") == 1
+    assert '"card_url":"/coach/' in response.text
+    assert fake.runtime is not None
+    assert f'"run_id":{fake.runtime.assistant_run_id}' in response.text
+
+    function = cast(Any, create_running_workout_proposal).func
+    with session_factory() as session:
+        run = session.get(CoachAssistantRun, fake.runtime.assistant_run_id)
+        assert run is not None
+        assert run.status == "completed"
+        assert run.workout_id is not None
+        workout = session.get(Workout, run.workout_id)
+        assert workout is not None
+        assert workout.originating_conversation_id == conversation_id
+        assert workout.originating_user_message_id == run.user_message_id
+        assert workout.originating_assistant_message_id == run.assistant_message_id
+        assert workout.approval_status == "proposed"
+        assert workout.scheduled_for is None
+        assert workout.accepted_revision_id is None
+        assert (
+            session.scalar(
+                select(WorkoutEvent).where(
+                    WorkoutEvent.workout_id == workout.id,
+                    WorkoutEvent.action == "propose",
+                )
+            )
+            is not None
+        )
+        assert len(list(session.scalars(select(Workout)))) == 1
+        workout_id = workout.id
+
+    page = client.get(f"/coach/{conversation_id}")
+    assert page.status_code == 200
+    assert "Trainingsvorschlag" in page.text
+    assert "Unbestätigt" in page.text
+    assert f'href="/workouts/{workout_id}"' in page.text
+    card = client.get(
+        f"/coach/{conversation_id}/runs/{fake.runtime.assistant_run_id}/proposal-card"
+    )
+    assert card.status_code == 200
+    assert f'data-workout-id="{workout_id}"' in card.text
+    assert (
+        client.get(f"/coach/999/runs/{fake.runtime.assistant_run_id}/proposal-card").status_code
+        == 404
+    )
+
+    with session_factory() as session:
+        workout = session.get(Workout, workout_id)
+        assert workout is not None and workout.current_revision_id is not None
+        workout.accepted_revision_id = workout.current_revision_id
+        workout.approval_status = "accepted"
+        workout.local_schedule_status = "scheduled"
+        workout.scheduled_for = date.today() + timedelta(days=1)
+        session.commit()
+    updated_card = client.get(
+        f"/coach/{conversation_id}/runs/{fake.runtime.assistant_run_id}/proposal-card"
+    )
+    assert "Eingeplant" in updated_card.text
+    assert "im lokalen Kalender eingeplant" in updated_card.text
+    assert "weder angenommen noch eingeplant" not in updated_card.text
+
+    with pytest.raises(WorkoutConflictError) as conflict:
+        function(
+            runtime=SimpleNamespace(context=fake.runtime),
+            suggested_for=date.today() + timedelta(days=2),
+            available_minutes=45,
+        )
+    assert conflict.value.code == "proposal.idempotency_conflict"
+    with session_factory() as session:
+        assert len(list(session.scalars(select(Workout)))) == 1
+
+    deleted = client.post(f"/coach/{conversation_id}/delete", follow_redirects=False)
+    assert deleted.status_code == 303
+    with session_factory() as session:
+        assert session.get(CoachAssistantRun, fake.runtime.assistant_run_id) is None
+        workout = session.get(Workout, workout_id)
+        assert workout is not None
+        assert workout.originating_conversation_id is None
+        assert workout.originating_user_message_id is None
+        assert workout.originating_assistant_message_id is None
+
+
+def test_proposal_tool_schema_exposes_no_runtime_or_workout_definition() -> None:
+    schema_model: Any = create_running_workout_proposal.tool_call_schema
+    schema = schema_model.model_json_schema()
+    assert set(schema["properties"]) == {"suggested_for", "available_minutes"}
+    serialized = json.dumps(schema)
+    assert "user_id" not in serialized
+    assert "assistant_run_id" not in serialized
+    assert "idempotency" not in serialized
+    assert "WorkoutDefinition" not in serialized
+
+
+def test_agent_registers_exactly_one_bounded_mutation_tool() -> None:
+    read_only = {tool.name for tool in coach_tools(workout_proposals_enabled=False)}
+    enabled = {tool.name for tool in coach_tools(workout_proposals_enabled=True)}
+    assert enabled - read_only == {"create_running_workout_proposal"}
+    assert (
+        not {
+            "accept_workout",
+            "schedule_workout",
+            "publish_workout",
+            "push_workout",
+        }
+        & enabled
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure_mode", "expected_status"),
+    (("provider", "failed"), ("disconnect", "interrupted")),
+)
+async def test_proposal_survives_stream_failure_after_commit(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+    failure_mode: str,
+    expected_status: str,
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
+
+    class ConnectedRequest:
+        async def is_disconnected(self) -> bool:
+            return failure_mode == "disconnect"
+
+    class FailingAfterProposalAgent:
+        async def stream(
+            self,
+            messages: Sequence[CoachHistoryMessage],
+            runtime: CoachRuntimeContext,
+        ) -> AsyncIterator[CoachEvent]:
+            del messages
+            function: Any = cast(Any, create_running_workout_proposal).func
+            function(
+                runtime=SimpleNamespace(context=runtime),
+                suggested_for=date.today() + timedelta(days=1),
+                available_minutes=35,
+            )
+            yield CoachEvent("proposal_created")
+            if failure_mode == "provider":
+                raise RuntimeError("provider failed after proposal")
+
+    with session_factory() as session:
+        user = session.scalar(select(User))
+        assert user is not None
+        _running_history(session, user.id)
+        conversation = CoachConversation(user_id=user.id, title="Fehler nach Vorschlag")
+        session.add(conversation)
+        session.flush()
+        user_message = create_message(
+            session, conversation, role="user", content="Plane einen Lauf."
+        )
+        assistant_message = create_message(
+            session, conversation, role="assistant", status="streaming"
+        )
+        run = create_assistant_run(
+            session,
+            conversation,
+            user_message,
+            assistant_message,
+            model_id="test/model",
+            request_id="phase9-provider-failure",
+        )
+        session.commit()
+        user_id = user.id
+        conversation_id = conversation.id
+        user_message_id = user_message.id
+        assistant_message_id = assistant_message.id
+        run_id = run.id
+
+    runtime = CoachRuntimeContext(
+        user_id,
+        date.today(),
+        session_factory,
+        request_id="phase9-provider-failure",
+        conversation_id=conversation_id,
+        user_message_id=user_message_id,
+        assistant_message_id=assistant_message_id,
+        assistant_run_id=run_id,
+    )
+    stream = _stream_answer(
+        request=cast(Any, ConnectedRequest()),
+        agent=FailingAfterProposalAgent(),
+        history=[CoachHistoryMessage("user", "Plane einen Lauf.")],
+        runtime=runtime,
+        assistant_message_id=assistant_message_id,
+    )
+    events: list[str] = []
+    expected_error = RuntimeError if failure_mode == "provider" else asyncio.CancelledError
+    with pytest.raises(expected_error):
+        async for event in stream:
+            events.append(event)
+
+    assert any("event: proposal.created" in event for event in events) == (
+        failure_mode == "provider"
+    )
+    with session_factory() as session:
+        failed_run = session.get(CoachAssistantRun, run_id)
+        assert failed_run is not None
+        assert failed_run.status == expected_status
+        assert failed_run.workout_id is not None
+        workout_id = failed_run.workout_id
+        assert len(list(session.scalars(select(Workout)))) == 1
+
+    reloaded = client.get(f"/coach/{conversation_id}")
+    assert reloaded.status_code == 200
+    assert "Diese Antwort wurde nicht abgeschlossen" in reloaded.text
+    assert f'href="/workouts/{workout_id}"' in reloaded.text
 
 
 def test_follow_up_includes_bounded_conversation_history(client: TestClient) -> None:
@@ -497,6 +799,77 @@ async def test_langchain_backend_maps_tokens_and_tool_lifecycle(
     ]
     assert events[1].summary == "Zeitraum: 28 Tage"
     assert events[-1].text == "Deine HRV ist stabil."
+
+
+@pytest.mark.asyncio
+async def test_langchain_backend_maps_only_valid_proposal_artifact(
+    session_factory: sessionmaker[Session],
+) -> None:
+    class FakeGraph:
+        async def astream(self, *_: Any, **__: Any) -> AsyncIterator[dict[str, Any]]:
+            yield {
+                "type": "updates",
+                "ns": (),
+                "data": {
+                    "model": {
+                        "messages": [
+                            AIMessage(
+                                content="",
+                                tool_calls=[
+                                    {
+                                        "id": "proposal-call",
+                                        "name": "create_running_workout_proposal",
+                                        "args": {
+                                            "suggested_for": "2026-08-25",
+                                            "available_minutes": 45,
+                                        },
+                                        "type": "tool_call",
+                                    }
+                                ],
+                            )
+                        ]
+                    }
+                },
+            }
+            yield {
+                "type": "updates",
+                "ns": (),
+                "data": {
+                    "tools": {
+                        "messages": [
+                            ToolMessage(
+                                content=(
+                                    '{"status":"created","artifact":{"type":"workout_proposal"}}'
+                                ),
+                                tool_call_id="proposal-call",
+                                name="create_running_workout_proposal",
+                            )
+                        ]
+                    }
+                },
+            }
+            yield {
+                "type": "messages",
+                "ns": (),
+                "data": (
+                    AIMessageChunk(content="Der Vorschlag ist bereit."),
+                    {"langgraph_node": "model"},
+                ),
+            }
+
+    backend = LangChainCoachAgent.__new__(LangChainCoachAgent)
+    backend._model_id = "test/model"
+    backend._agent = FakeGraph()
+    events = [
+        event
+        async for event in backend.stream(
+            [CoachHistoryMessage("user", "Plane einen Easy Run.")],
+            CoachRuntimeContext(1, date(2026, 8, 24), session_factory),
+        )
+    ]
+
+    assert [event.type for event in events].count("proposal_created") == 1
+    assert events[-1] == CoachEvent("answer_delta", text="Der Vorschlag ist bereit.")
 
 
 @pytest.mark.asyncio

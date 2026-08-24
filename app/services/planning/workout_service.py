@@ -1,5 +1,6 @@
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, cast
 
@@ -9,6 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models import (
+    CoachAssistantRun,
     GarminAccount,
     User,
     Workout,
@@ -56,6 +58,15 @@ from app.services.planning.workout_revision import (
     structural_validation_report,
     workout_content_hash,
 )
+
+
+@dataclass(frozen=True)
+class ProposalOrigin:
+    conversation_id: int
+    user_message_id: int
+    assistant_message_id: int
+    assistant_run_id: int
+
 
 type GarminConnector = Callable[[Session, GarminAccount], Any]
 
@@ -140,12 +151,14 @@ class WorkoutService:
         *,
         idempotency_key: str,
         request_fingerprint: str,
+        origin: ProposalOrigin | None = None,
     ) -> Workout:
         existing = self.idempotent_proposal(
             idempotency_key=idempotency_key,
             request_fingerprint=request_fingerprint,
         )
         if existing is not None:
+            self.verify_proposal_origin(existing, origin)
             return existing
 
         self.validate(data)
@@ -162,9 +175,27 @@ class WorkoutService:
             approval_status="proposed",
             local_schedule_status="unscheduled",
             lock_version=0,
+            originating_conversation_id=origin.conversation_id if origin else None,
+            originating_user_message_id=origin.user_message_id if origin else None,
+            originating_assistant_message_id=origin.assistant_message_id if origin else None,
         )
         self.session.add(workout)
         self.session.flush()
+        if origin is not None:
+            run = self.session.get(CoachAssistantRun, origin.assistant_run_id)
+            if (
+                run is None
+                or run.conversation_id != origin.conversation_id
+                or run.user_message_id != origin.user_message_id
+                or run.assistant_message_id != origin.assistant_message_id
+                or run.workout_id not in {None, workout.id}
+            ):
+                self.session.rollback()
+                raise WorkoutConflictError(
+                    "Der Coach-Lauf ist nicht mehr aktuell.",
+                    code="proposal.origin_invalid",
+                )
+            run.workout_id = workout.id
         revision = self._create_revision(
             workout,
             data,
@@ -187,22 +218,23 @@ class WorkoutService:
                 "request_fingerprint": request_fingerprint,
             },
             idempotency_key=idempotency_key,
+            skip_existing=False,
         )
-        validation = self._validate_context(
-            workout, revision, self._safety_context(workout, revision)
-        )
-        if not validation.valid:
-            outcome = str(validation.report_json.get("outcome", "clarify"))
-            self.session.rollback()
-            raise WorkoutTransitionError(
-                (
-                    "Ein Sicherheitshinweis blockiert diesen Trainingsvorschlag."
-                    if outcome == TriageOutcome.SAFETY_STOP.value
-                    else "Vor einem Trainingsvorschlag fehlen eindeutige Sicherheitsangaben."
-                ),
-                code="workout.proposal_safety_blocked",
-            )
         try:
+            validation = self._validate_context(
+                workout, revision, self._safety_context(workout, revision)
+            )
+            if not validation.valid:
+                outcome = str(validation.report_json.get("outcome", "clarify"))
+                self.session.rollback()
+                raise WorkoutTransitionError(
+                    (
+                        "Ein Sicherheitshinweis blockiert diesen Trainingsvorschlag."
+                        if outcome == TriageOutcome.SAFETY_STOP.value
+                        else "Vor einem Trainingsvorschlag fehlen eindeutige Sicherheitsangaben."
+                    ),
+                    code="workout.proposal_safety_blocked",
+                )
             self.session.commit()
         except IntegrityError:
             self.session.rollback()
@@ -211,9 +243,26 @@ class WorkoutService:
                 request_fingerprint=request_fingerprint,
             )
             if winner is not None:
+                self.verify_proposal_origin(winner, origin)
                 return winner
             raise
         return workout
+
+    def verify_proposal_origin(self, workout: Workout, origin: ProposalOrigin | None) -> None:
+        if origin is None:
+            return
+        run = self.session.get(CoachAssistantRun, origin.assistant_run_id)
+        if (
+            workout.originating_conversation_id != origin.conversation_id
+            or workout.originating_user_message_id != origin.user_message_id
+            or workout.originating_assistant_message_id != origin.assistant_message_id
+            or run is None
+            or run.workout_id != workout.id
+        ):
+            raise WorkoutConflictError(
+                "Der vorhandene Vorschlag gehört nicht zu diesem Coach-Lauf.",
+                code="proposal.origin_mismatch",
+            )
 
     def idempotent_proposal(
         self, *, idempotency_key: str, request_fingerprint: str
@@ -1237,12 +1286,17 @@ class WorkoutService:
         *,
         metadata: dict[str, object] | None = None,
         idempotency_key: str | None = None,
+        skip_existing: bool = True,
     ) -> None:
-        if idempotency_key is not None and self.session.scalar(
-            select(WorkoutEvent.id).where(
-                WorkoutEvent.owner_user_id == workout.user_id,
-                WorkoutEvent.action == action,
-                WorkoutEvent.idempotency_key == idempotency_key,
+        if (
+            skip_existing
+            and idempotency_key is not None
+            and self.session.scalar(
+                select(WorkoutEvent.id).where(
+                    WorkoutEvent.owner_user_id == workout.user_id,
+                    WorkoutEvent.action == action,
+                    WorkoutEvent.idempotency_key == idempotency_key,
+                )
             )
         ):
             return

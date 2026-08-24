@@ -26,6 +26,7 @@ def test_initial_migration_matches_models(tmp_path: Path) -> None:
         "activity_zones",
         "alembic_version",
         "coach_conversations",
+        "coach_assistant_runs",
         "coach_messages",
         "coach_tool_calls",
         "daily_data_statuses",
@@ -184,7 +185,7 @@ def test_feedback_owner_migration_upgrades_applied_revision_22(tmp_path: Path) -
         ).one() == (1, 1)
         assert connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
-        ).scalar_one() == ("20260824_24")
+        ).scalar_one() == ("20260824_25")
 
 
 def test_application_migration_uses_absolute_project_paths(tmp_path: Path, monkeypatch) -> None:
@@ -244,7 +245,7 @@ def test_workout_revision_migration_resumes_after_added_columns(tmp_path: Path) 
             "SELECT version_num FROM alembic_version"
         ).scalar_one()
         integrity = connection.exec_driver_sql("PRAGMA integrity_check").scalar_one()
-    assert revision == "20260824_24"
+    assert revision == "20260824_25"
     assert integrity == "ok"
     assert "workout_revisions" in inspector.get_table_names()
 
@@ -273,7 +274,7 @@ def test_reverted_athlete_profile_revision_upgrades_to_head(tmp_path: Path) -> N
         revision = connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
         ).scalar_one()
-    assert revision == "20260824_24"
+    assert revision == "20260824_25"
 
 
 def test_principal_fingerprint_migration_upgrades_applied_phase_4_schema(

@@ -30,7 +30,11 @@ from app.services.planning.workout_definition import (
     WorkoutDefinitionV2,
 )
 from app.services.planning.workout_revision import RevisionMetadata
-from app.services.planning.workout_service import WorkoutService, WorkoutTransitionError
+from app.services.planning.workout_service import (
+    ProposalOrigin,
+    WorkoutService,
+    WorkoutTransitionError,
+)
 from app.services.planning.workout_templates import (
     ExpandedWorkoutTemplate,
     TemplateEligibilityContext,
@@ -296,7 +300,9 @@ class RunningProposalService:
         self.user = user
         self.request_id = request_id
 
-    def create_easy_run(self, request: EasyRunProposalRequest) -> Workout:
+    def create_easy_run(
+        self, request: EasyRunProposalRequest, *, origin: ProposalOrigin | None = None
+    ) -> Workout:
         request_fingerprint = _request_fingerprint(request)
         workout_service = WorkoutService(self.session, self.user, request_id=self.request_id)
         existing = workout_service.idempotent_proposal(
@@ -304,6 +310,7 @@ class RunningProposalService:
             request_fingerprint=request_fingerprint,
         )
         if existing is not None:
+            workout_service.verify_proposal_origin(existing, origin)
             return existing
         if not get_settings().coach_workout_proposals_enabled:
             raise WorkoutProposalError(
@@ -359,6 +366,7 @@ class RunningProposalService:
             metadata,
             idempotency_key=request.idempotency_key,
             request_fingerprint=request_fingerprint,
+            origin=origin,
         )
 
 

@@ -116,7 +116,10 @@
     answer.className = "whitespace-pre-wrap text-sm leading-6 text-foreground";
     answer.dataset.answerText = "";
 
-    body.append(activity, answer);
+    const artifacts = document.createElement("div");
+    artifacts.dataset.proposalArtifacts = "";
+
+    body.append(activity, answer, artifacts);
     row.append(avatar, body);
     article.append(row);
     return {
@@ -125,6 +128,7 @@
       activityLog,
       activitySummary,
       answer,
+      artifacts,
       answerStarted: false,
       article,
       body,
@@ -197,7 +201,26 @@
     error.textContent = message;
   };
 
-  const handleEvent = (name, data, assistant) => {
+  const addProposal = async (assistant, data) => {
+    if (assistant.artifacts.querySelector(`[data-workout-id="${CSS.escape(String(data.workout_id))}"]`)) return;
+    if (typeof data.card_url !== "string" || !data.card_url.startsWith(`/coach/${conversationId}/runs/`)) return;
+    try {
+      const response = await fetch(data.card_url, { headers: { Accept: "text/html" } });
+      if (!response.ok || !response.headers.get("content-type")?.includes("text/html")) throw new Error();
+      const documentFragment = new DOMParser().parseFromString(await response.text(), "text/html");
+      const card = documentFragment.body.firstElementChild;
+      if (!card?.matches("[data-proposal-card]") || card.dataset.workoutId !== String(data.workout_id)) throw new Error();
+      assistant.artifacts.append(document.importNode(card, true));
+    } catch (_) {
+      const notice = document.createElement("p");
+      notice.className = "mt-2 text-xs text-warning-emphasis";
+      notice.setAttribute("role", "status");
+      notice.textContent = "Der Vorschlag wurde gespeichert. Lade den Chat neu, um die Karte zu öffnen.";
+      assistant.artifacts.append(notice);
+    }
+  };
+
+  const handleEvent = async (name, data, assistant) => {
     if (name === "status") {
       setActivityStatus(assistant, currentToolLabel(assistant) || data.label);
     } else if (name === "tool.started") {
@@ -214,6 +237,8 @@
       assistant.answer.append(document.createTextNode(data.text));
     } else if (name === "answer.completed") {
       finishActivity(assistant);
+    } else if (name === "proposal.created") {
+      await addProposal(assistant, data);
     } else if (name === "error") {
       failActivity(assistant, data.message);
     }
@@ -253,7 +278,7 @@
         }
         if (dataLines.length) {
           if (["answer.completed", "error"].includes(eventName)) terminalEventReceived = true;
-          handleEvent(eventName, JSON.parse(dataLines.join("\n")), assistant);
+           await handleEvent(eventName, JSON.parse(dataLines.join("\n")), assistant);
         }
       }
       if (done) break;
