@@ -2,6 +2,7 @@ import json
 import logging
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
+from datetime import date, timedelta
 from time import monotonic
 from typing import Any, Literal, Protocol
 
@@ -49,9 +50,27 @@ Workout-Vorschläge:
 - Rufe danach create_running_workout_proposal auf. Konstruiere niemals selbst Workout-Schritte,
   Pace-, Distanz-, Herzfrequenz- oder Belastungswerte.
 - Das Werkzeug erzeugt ausschließlich einen unbestätigten, nicht eingeplanten Easy Run.
+- Löse relative Datumsangaben ausschließlich anhand des vertrauenswürdigen Serverkontexts auf.
+  Übergib dem Werkzeug immer das daraus berechnete ISO-Datum. Frage nur bei echter Mehrdeutigkeit
+  nach und erfinde kein Datum.
+- Wenn das Werkzeug `status: not_created` zurückgibt, wurde kein Vorschlag erzeugt. Erkläre den
+  sicheren Fehlertext knapp und frage nach der konkret fehlenden oder korrigierten Angabe.
 - Verweise nach erfolgreicher Erstellung auf die serverseitige Vorschlagskarte. Eine Chat-Aussage
   wie "passt" ist niemals Annahme, Planung oder Garmin-Freigabe.
 """
+
+
+def _date_context_message(as_of: date) -> dict[str, str]:
+    return {
+        "role": "system",
+        "content": (
+            "Vertrauenswürdiger PacePilot-Serverkontext: "
+            f"Heute ist {as_of.isoformat()}. "
+            f"'Morgen' ist {(as_of + timedelta(days=1)).isoformat()}. "
+            f"'Übermorgen' ist {(as_of + timedelta(days=2)).isoformat()}. "
+            "Dieser Kontext hat Vorrang vor Annahmen über das aktuelle Datum."
+        ),
+    }
 
 
 @dataclass(frozen=True)
@@ -127,7 +146,8 @@ class LangChainCoachAgent:
         tool_calls = 0
         tool_started_at: dict[str, float] = {}
         agent_messages = [
-            {"role": message.role, "content": message.content} for message in messages
+            _date_context_message(runtime.as_of),
+            *({"role": message.role, "content": message.content} for message in messages),
         ]
         produced_text = False
         logger.info(

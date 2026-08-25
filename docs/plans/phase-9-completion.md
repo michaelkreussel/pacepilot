@@ -32,6 +32,12 @@
 - Prompt and UI explain the exact boundary: the coach may request an unaccepted Easy Run proposal;
   acceptance, rejection, editing, scheduling, Garmin upload, calendar sync, and device push remain
   explicit existing UI actions.
+- Every model run receives a trusted server-date message that states the exact ISO dates for today,
+  tomorrow, and the day after tomorrow. Relative dates must be resolved from this context before the
+  typed proposal tool is called.
+- Expected proposal-domain failures such as a past date, missing history, safety stop, or idempotency
+  conflict return `status: not_created` with a safe code/message. They create no artifact and no
+  longer terminate the SSE response as an unhandled request error.
 - `COACH_WORKOUT_PROPOSALS_ENABLED` remains disabled by default. When disabled, the mutation tool is
   absent and the existing read-only coach behavior remains available.
 
@@ -75,7 +81,7 @@ identifiers.
 
 ```text
 uv run pytest tests/test_migrations.py  passed
-uv run pytest                           308 passed
+uv run pytest                           309 passed
 uv run ruff check .                    passed
 uv run ruff format --check .           passed
 uv run ty check                        passed

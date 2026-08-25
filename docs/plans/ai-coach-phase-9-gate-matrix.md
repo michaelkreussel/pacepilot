@@ -7,6 +7,8 @@
 |---|---|---|
 | Single mutation boundary | Conditional tool registry adds only `create_running_workout_proposal`; no accept, schedule, Garmin, or generic mutation tool exists | `test_agent_registers_exactly_one_bounded_mutation_tool` |
 | Minimal typed schema | Model supplies only `suggested_for` and `available_minutes`; runtime IDs and workout content remain injected/server-side | `test_proposal_tool_schema_exposes_no_runtime_or_workout_definition` |
+| Relative date context | Each run prepends trusted ISO values for today, tomorrow, and the day after tomorrow before conversation messages | `test_langchain_backend_maps_tokens_and_tool_lifecycle` |
+| Expected domain failure | Past or otherwise rejected proposal inputs return `not_created`, emit no artifact, persist no workout, and let SSE complete normally | `test_invalid_proposal_date_returns_completed_stream_without_artifact`, `test_coach_tool_creates_one_durable_server_rendered_proposal` |
 | Durable local run | User message, assistant message, and `CoachAssistantRun` commit before streaming; completion/failure/interruption update both message and run | `test_coach_streams_and_persists_conversation`, `test_proposal_survives_stream_failure_after_commit` |
 | User-scoped runtime | Tool validates authenticated user, conversation, triggering message, assistant message, and run before mutation | `test_coach_tool_creates_one_durable_server_rendered_proposal`, existing runtime scope tests |
 | Deterministic delegation | Tool calls `RunningProposalService`; Phase 8 baseline, safety, template, validation, HR target, and no-calendar rules remain authoritative | `test_coach_tool_creates_one_durable_server_rendered_proposal`, full `tests/test_workout_proposals.py` |

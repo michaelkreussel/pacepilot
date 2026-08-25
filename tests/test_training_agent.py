@@ -48,7 +48,6 @@ from app.services.coach.tools import (
     get_health_day,
     get_subjective_context,
 )
-from app.services.planning.workout_service import WorkoutConflictError
 
 
 class FakeCoachAgent:
@@ -215,6 +214,20 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
             del messages
             self.runtime = runtime
             function: Any = cast(Any, create_running_workout_proposal).func
+            rejected = json.loads(
+                function(
+                    runtime=SimpleNamespace(context=runtime),
+                    suggested_for=runtime.as_of - timedelta(days=1),
+                    available_minutes=45,
+                )
+            )
+            assert rejected == {
+                "status": "not_created",
+                "error": {
+                    "code": "proposal.date_in_past",
+                    "message": "Das vorgeschlagene Datum darf nicht in der Vergangenheit liegen.",
+                },
+            }
             first = function(
                 runtime=SimpleNamespace(context=runtime),
                 suggested_for=date.today() + timedelta(days=1),
@@ -318,13 +331,15 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
     assert "im lokalen Kalender eingeplant" in updated_card.text
     assert "weder angenommen noch eingeplant" not in updated_card.text
 
-    with pytest.raises(WorkoutConflictError) as conflict:
+    conflict = json.loads(
         function(
             runtime=SimpleNamespace(context=fake.runtime),
             suggested_for=date.today() + timedelta(days=2),
             available_minutes=45,
         )
-    assert conflict.value.code == "proposal.idempotency_conflict"
+    )
+    assert conflict["status"] == "not_created"
+    assert conflict["error"]["code"] == "proposal.idempotency_conflict"
     with session_factory() as session:
         assert len(list(session.scalars(select(Workout)))) == 1
 
@@ -337,6 +352,69 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
         assert workout.originating_conversation_id is None
         assert workout.originating_user_message_id is None
         assert workout.originating_assistant_message_id is None
+
+
+def test_invalid_proposal_date_returns_completed_stream_without_artifact(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
+
+    class InvalidDateAgent:
+        async def stream(
+            self,
+            messages: Sequence[CoachHistoryMessage],
+            runtime: CoachRuntimeContext,
+        ) -> AsyncIterator[CoachEvent]:
+            del messages
+            function: Any = cast(Any, create_running_workout_proposal).func
+            result = json.loads(
+                function(
+                    runtime=SimpleNamespace(context=runtime),
+                    suggested_for=runtime.as_of - timedelta(days=1),
+                    available_minutes=45,
+                )
+            )
+            assert result["status"] == "not_created"
+            assert result["error"]["code"] == "proposal.date_in_past"
+            yield CoachEvent(
+                "tool_started",
+                tool_call_id="invalid-date-call",
+                tool_name="create_running_workout_proposal",
+                label="Easy-Run-Vorschlag erstellen",
+            )
+            yield CoachEvent(
+                "tool_completed",
+                tool_call_id="invalid-date-call",
+                tool_name="create_running_workout_proposal",
+                label="Easy-Run-Vorschlag erstellen",
+            )
+            yield CoachEvent(
+                "answer_delta",
+                text="Das Datum liegt in der Vergangenheit. Welches zukünftige Datum meinst du?",
+            )
+
+    app.dependency_overrides[get_coach_agent] = lambda: InvalidDateAgent()
+    conversation_id = _new_chat(client)
+
+    response = client.post(
+        f"/coach/{conversation_id}/messages",
+        data={"message": "Erstelle mir gestern einen lockeren Lauf für 45 Minuten."},
+    )
+
+    assert response.status_code == 200
+    assert "event: answer.completed" in response.text
+    assert "event: proposal.created" not in response.text
+    assert "Welches zukünftige Datum meinst du?" in response.text
+    with session_factory() as session:
+        assert session.scalar(select(Workout)) is None
+        run = session.scalar(
+            select(CoachAssistantRun).where(CoachAssistantRun.conversation_id == conversation_id)
+        )
+        assert run is not None
+        assert run.status == "completed"
+        assert run.workout_id is None
 
 
 def test_proposal_tool_schema_exposes_no_runtime_or_workout_definition() -> None:
@@ -730,9 +808,23 @@ async def test_langchain_backend_maps_tokens_and_tool_lifecycle(
     session_factory: sessionmaker[Session],
 ) -> None:
     class FakeGraph:
-        async def astream(self, *_: Any, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
+        async def astream(
+            self, inputs: dict[str, Any], **kwargs: Any
+        ) -> AsyncIterator[dict[str, Any]]:
             assert kwargs["stream_mode"] == ["messages", "updates"]
             assert kwargs["version"] == "v2"
+            assert inputs["messages"][0] == {
+                "role": "system",
+                "content": (
+                    "Vertrauenswürdiger PacePilot-Serverkontext: Heute ist 2026-08-11. "
+                    "'Morgen' ist 2026-08-12. 'Übermorgen' ist 2026-08-13. Dieser Kontext "
+                    "hat Vorrang vor Annahmen über das aktuelle Datum."
+                ),
+            }
+            assert inputs["messages"][1] == {
+                "role": "user",
+                "content": "Wie ist meine HRV?",
+            }
             yield {
                 "type": "updates",
                 "ns": (),

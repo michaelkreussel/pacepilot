@@ -12,8 +12,13 @@ from app.models import CoachMessage, User
 from app.repositories.coach import find_assistant_run
 from app.services.analytics.athlete_data import AthleteDataService
 from app.services.analytics.health_trends import MetricTrend
-from app.services.planning.workout_proposals import EasyRunProposalRequest, RunningProposalService
-from app.services.planning.workout_service import ProposalOrigin
+from app.services.planning.workout_proposals import (
+    EasyRunProposalRequest,
+    RunningProposalService,
+    WorkoutProposalError,
+)
+from app.services.planning.workout_service import ProposalOrigin, WorkoutServiceError
+from app.services.planning.workout_templates import TemplateExpansionError
 
 HealthMetric = Literal[
     "resting_hr",
@@ -254,15 +259,23 @@ def create_running_workout_proposal(
             available_minutes=available_minutes,
             idempotency_key=(f"coach-run:{assistant_run_id}:create_running_workout_proposal:v1"),
         )
-        RunningProposalService(session, user, request_id=context.request_id).create_easy_run(
-            request,
-            origin=ProposalOrigin(
-                conversation_id=conversation_id,
-                user_message_id=user_message_id,
-                assistant_message_id=assistant_message_id,
-                assistant_run_id=assistant_run_id,
-            ),
-        )
+        try:
+            RunningProposalService(session, user, request_id=context.request_id).create_easy_run(
+                request,
+                origin=ProposalOrigin(
+                    conversation_id=conversation_id,
+                    user_message_id=user_message_id,
+                    assistant_message_id=assistant_message_id,
+                    assistant_run_id=assistant_run_id,
+                ),
+            )
+        except (WorkoutProposalError, TemplateExpansionError, WorkoutServiceError) as exc:
+            return _json(
+                {
+                    "status": "not_created",
+                    "error": {"code": exc.code, "message": str(exc)},
+                }
+            )
         return _json(
             {
                 "status": "created",
