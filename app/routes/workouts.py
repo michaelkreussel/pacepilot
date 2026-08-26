@@ -10,7 +10,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from pydantic import ValidationError
 
 from app.auth import CurrentUser
-from app.config import get_settings
+from app.config import coach_feature_enabled, get_settings
 from app.database import SessionDep
 from app.onboarding import require_planning_access
 from app.services.garmin.client import (
@@ -241,7 +241,7 @@ def _operation_error_redirect(
 
 
 def _adaptation_preview(service: WorkoutService, workout_id: int) -> DailyAdaptationPreview | None:
-    if not get_settings().coach_daily_adaptation_enabled:
+    if not coach_feature_enabled(get_settings().coach_daily_adaptation_enabled, service.user.id):
         return None
     try:
         return DailyAdaptationService(

@@ -16,6 +16,7 @@ from langchain_openrouter import ChatOpenRouter
 from app.services.coach.tools import CoachRuntimeContext, coach_tools, describe_tool_call
 
 logger = logging.getLogger(__name__)
+COACH_PROMPT_TEMPLATE_VERSION = "coach-prompt-v2"
 
 SYSTEM_PROMPT = """Du bist der vorsichtige, präzise Gesundheits- und Trainingscoach von PacePilot.
 

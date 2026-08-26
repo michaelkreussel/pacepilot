@@ -1,7 +1,11 @@
 import json
 import re
 
+import pytest
 from fastapi.testclient import TestClient
+
+from app.config import get_settings
+from app.rate_limits import SlidingWindowLimiter, limiter
 
 
 def _workout_data(csrf_token: str) -> dict[str, str]:
@@ -114,3 +118,57 @@ def test_csrf_rejects_oversized_form_with_header_token(client: TestClient) -> No
     )
 
     assert response.status_code == 413
+
+
+def test_dynamic_responses_have_security_and_no_store_headers(client: TestClient) -> None:
+    response = client.get("/")
+
+    assert response.headers["cache-control"] == "private, no-store, max-age=0"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["x-frame-options"] == "DENY"
+    assert response.headers["referrer-policy"] == "no-referrer"
+    assert response.headers["permissions-policy"] == "camera=(), microphone=(), geolocation=()"
+    assert "frame-ancestors 'none'" in response.headers["content-security-policy"]
+
+
+def test_static_responses_keep_cache_policy_separate(client: TestClient) -> None:
+    response = client.get("/static/js/theme.js")
+
+    assert response.status_code == 200
+    assert "cache-control" not in response.headers
+    assert response.headers["x-content-type-options"] == "nosniff"
+
+
+def test_sliding_window_rate_limiter_isolated_and_resets() -> None:
+    test_limiter = SlidingWindowLimiter()
+
+    assert test_limiter.check("coach", "user:1", 2, now=100).remaining == 1
+    assert test_limiter.check("coach", "user:1", 2, now=101).remaining == 0
+    blocked = test_limiter.check("coach", "user:1", 2, now=102)
+    other_user = test_limiter.check("coach", "user:2", 2, now=102)
+    reset = test_limiter.check("coach", "user:1", 2, now=161)
+
+    assert blocked.retry_after == 59
+    assert other_user.remaining == 1
+    assert reset.retry_after == 0
+
+
+def test_coach_rate_limit_runs_after_csrf_and_returns_retry_after(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_rate_limit_per_minute", 1)
+    limiter.clear()
+
+    invalid = client.post(
+        "/coach/conversations",
+        headers={"X-CSRF-Token": "invalid"},
+        follow_redirects=False,
+    )
+    accepted = client.post("/coach/conversations", follow_redirects=False)
+    limited = client.post("/coach/conversations", follow_redirects=False)
+
+    assert invalid.status_code == 403
+    assert accepted.status_code == 303
+    assert limited.status_code == 429
+    assert int(limited.headers["retry-after"]) > 0

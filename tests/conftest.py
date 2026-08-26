@@ -16,6 +16,7 @@ from app.database import Base, get_db
 from app.jobs import scheduler as scheduler_module
 from app.models import User
 from app.models.user import utcnow
+from app.rate_limits import limiter
 from app.services.garmin.health_backfill import GarminPacer
 
 app = main_module.app
@@ -25,9 +26,11 @@ app = main_module.app
 def reset_garmin_pacer() -> Generator[None]:
     GarminPacer._global_next_call_at = 0
     GarminPacer._global_cooldown_until = 0
+    limiter.clear()
     yield
     GarminPacer._global_next_call_at = 0
     GarminPacer._global_cooldown_until = 0
+    limiter.clear()
 
 
 def extract_csrf_token(html: str) -> str:
@@ -84,6 +87,7 @@ def client(
     monkeypatch.setattr(get_settings(), "scheduler_enabled", False)
     monkeypatch.setattr(get_settings(), "garmin_call_delay_seconds", 0)
     monkeypatch.setattr(main_module, "upgrade_database", lambda: None)
+    monkeypatch.setattr(main_module, "SessionLocal", session_factory)
     monkeypatch.setattr(scheduler_module, "SessionLocal", session_factory)
     app.dependency_overrides[get_db] = override_database
     app.dependency_overrides[get_current_user] = override_current_user
@@ -108,6 +112,7 @@ def unauthenticated_client(
     previous_overrides = dict(app.dependency_overrides)
     monkeypatch.setattr(get_settings(), "scheduler_enabled", False)
     monkeypatch.setattr(main_module, "upgrade_database", lambda: None)
+    monkeypatch.setattr(main_module, "SessionLocal", session_factory)
     monkeypatch.setattr(scheduler_module, "SessionLocal", session_factory)
     app.dependency_overrides[get_db] = override_database
     try:

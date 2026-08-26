@@ -12,24 +12,28 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from app.auth import AuthenticationRequired
 from app.config import get_settings
-from app.database import engine
-from app.http_security import RequestIdMiddleware, require_csrf
+from app.database import SessionLocal, engine
+from app.http_security import RequestIdMiddleware, SecurityHeadersMiddleware, require_csrf
 from app.jobs.scheduler import start_scheduler, stop_scheduler
 from app.logging import configure_logging
 from app.migrations import upgrade_database
 from app.onboarding import OnboardingAccessRequired
+from app.rate_limits import require_rate_limit
 from app.routes import (
+    account,
     activities,
     auth,
     coach,
     dashboard,
     feedback,
+    observability,
     onboarding,
     plans,
     profile,
     settings,
     workouts,
 )
+from app.services.account_lifecycle import repair_account_lifecycle
 from app.services.planning.registry import get_knowledge_registry
 
 
@@ -50,6 +54,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     app_settings.garmin_token_dir.mkdir(parents=True, exist_ok=True)
     get_knowledge_registry()
     upgrade_database()
+    with SessionLocal() as session:
+        repair_account_lifecycle(session)
     start_scheduler()
     try:
         yield
@@ -63,7 +69,7 @@ app = FastAPI(
     title=settings_config.app_name,
     lifespan=lifespan,
     openapi_url=None if settings_config.environment == "production" else "/openapi.json",
-    dependencies=[Depends(require_csrf)],
+    dependencies=[Depends(require_csrf), Depends(require_rate_limit)],
 )
 app.add_middleware(
     SessionMiddleware,
@@ -73,9 +79,12 @@ app.add_middleware(
     https_only=settings_config.session_https_only,
 )
 app.add_middleware(RequestIdMiddleware)
+app.add_middleware(SecurityHeadersMiddleware)
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 app.include_router(auth.router)
+app.include_router(account.router)
 app.include_router(onboarding.router)
+app.include_router(observability.router)
 app.include_router(dashboard.router)
 app.include_router(profile.router)
 app.include_router(activities.router)

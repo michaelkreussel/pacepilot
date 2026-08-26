@@ -6,6 +6,8 @@ from fastapi import HTTPException, Request
 from starlette.datastructures import Headers, MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from app.config import get_settings
+
 CSRF_FORM_FIELD = "_csrf_token"
 CSRF_HEADER = "X-CSRF-Token"
 CSRF_SESSION_KEY = "_csrf_token"
@@ -80,3 +82,34 @@ class RequestIdMiddleware:
             await send(message)
 
         await self.app(scope, receive, send_with_request_id)
+
+
+class SecurityHeadersMiddleware:
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        path = str(scope.get("path", ""))
+
+        async def send_with_security_headers(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                headers["X-Content-Type-Options"] = "nosniff"
+                headers["X-Frame-Options"] = "DENY"
+                headers["Referrer-Policy"] = "no-referrer"
+                headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+                headers["Content-Security-Policy"] = (
+                    "base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'"
+                )
+                if get_settings().environment == "production":
+                    headers["Strict-Transport-Security"] = "max-age=31536000"
+                if not path.startswith("/static/"):
+                    headers["Cache-Control"] = "private, no-store, max-age=0"
+                    headers["Pragma"] = "no-cache"
+            await send(message)
+
+        await self.app(scope, receive, send_with_security_headers)

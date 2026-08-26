@@ -311,6 +311,46 @@ def scheduled_workout_ids(client: Any, workout_id: str, scheduled_for: date) -> 
     )
     scheduled_ids: list[str] = []
 
+    if not isinstance(calendar, (dict, list)):
+        raise WorkoutValidationError(
+            "Garmin hat ein unbekanntes Kalenderformat geliefert. Die Operation wurde zum "
+            "Schutz vor Duplikaten gestoppt.",
+            code="garmin.contract_drift",
+        )
+
+    collection_keys = {"items", "calendar", "calendarItems", "scheduledWorkouts"}
+
+    def contract_items(value: Any, *, root: bool = False) -> list[Any]:
+        if isinstance(value, list):
+            if any(not isinstance(item, dict) for item in value):
+                raise WorkoutValidationError(
+                    "Garmin hat ein unbekanntes Kalenderformat geliefert. Die Operation wurde "
+                    "zum Schutz vor Duplikaten gestoppt.",
+                    code="garmin.contract_drift",
+                )
+            return value
+        if isinstance(value, dict):
+            recognized = [child for key, child in value.items() if key in collection_keys]
+            if not recognized:
+                if root:
+                    raise WorkoutValidationError(
+                        "Garmin hat ein unbekanntes Kalenderformat geliefert. Die Operation wurde "
+                        "zum Schutz vor Duplikaten gestoppt.",
+                        code="garmin.contract_drift",
+                    )
+                return [value]
+            result: list[Any] = []
+            for child in recognized:
+                result.extend(contract_items(child))
+            return result
+        raise WorkoutValidationError(
+            "Garmin hat ein unbekanntes Kalenderformat geliefert. Die Operation wurde zum "
+            "Schutz vor Duplikaten gestoppt.",
+            code="garmin.contract_drift",
+        )
+
+    calendar_items = contract_items(calendar, root=True)
+
     def collect(value: Any) -> None:
         if isinstance(value, dict):
             if (
@@ -326,7 +366,7 @@ def scheduled_workout_ids(client: Any, workout_id: str, scheduled_for: date) -> 
             for child in value:
                 collect(child)
 
-    collect(calendar)
+    collect(calendar_items)
     return scheduled_ids
 
 

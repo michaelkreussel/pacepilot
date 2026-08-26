@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.config import (
     DEFERRED_QUALITY_TEMPLATE_IDS,
+    coach_feature_enabled,
     deferred_quality_templates_enabled,
     get_settings,
 )
@@ -427,7 +428,7 @@ class RunningProposalService:
         if existing is not None:
             workout_service.verify_proposal_origin(existing, origin)
             return existing
-        if not get_settings().coach_workout_proposals_enabled:
+        if not coach_feature_enabled(get_settings().coach_workout_proposals_enabled, self.user.id):
             raise WorkoutProposalError(
                 "Trainingsvorschläge sind noch nicht freigeschaltet.",
                 code="proposal.feature_disabled",

@@ -13,11 +13,15 @@ on:
 
 permissions:
   contents: read
-  packages: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   quality:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - name: Check out repository
@@ -34,6 +38,12 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen
 
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Verify committed CSS
+        run: npm run build:css && git diff --exit-code -- app/static/css/tailwind.css
+
       - name: Run tests
         run: uv run pytest
 
@@ -46,10 +56,31 @@ jobs:
       - name: Run type checks
         run: uv run ty check
 
-  publish:
+  image-build:
     needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  publish:
+    needs: [quality, image-build]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
 
     steps:
       - name: Check out repository

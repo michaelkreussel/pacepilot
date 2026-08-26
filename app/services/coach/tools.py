@@ -37,6 +37,7 @@ HealthMetric = Literal[
     "acute_load",
     "chronic_load",
 ]
+COACH_TOOL_CONTRACT_VERSION = "coach-tools-v2"
 
 
 @dataclass(frozen=True)

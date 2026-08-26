@@ -46,6 +46,9 @@ class RevisionMetadata:
     template_version: str | None = None
     rule_set_version: str | None = None
     knowledge_base_version: str | None = None
+    model_provider: str | None = None
+    model_id: str | None = None
+    prompt_template_version: str | None = None
     edit_source: str = "manual"
 
 

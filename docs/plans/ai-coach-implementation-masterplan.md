@@ -1071,6 +1071,10 @@ Exit-Kriterien:
 
 ### Phase 13 - Produktionshaertung
 
+**Status:** Abgeschlossen am 26. August 2026. Details und Gates stehen in
+`phase-13-completion.md` und `ai-coach-phase-13-gate-matrix.md`. Der Browser-Pass wurde wegen der
+ausdrücklichen Nutzeranweisung nicht ausgeführt und ist als Restrisiko dokumentiert.
+
 **Ziel:** Kontrollierter Rollout, Betrieb und Datenschutz.
 
 Arbeiten:

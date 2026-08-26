@@ -603,6 +603,6 @@ def test_german_feedback_forms_routes_and_export(
     exported = client.get("/settings/feedback/export")
     assert exported.status_code == 200
     assert "pacepilot-subjektives-feedback.json" in exported.headers["content-disposition"]
-    assert exported.headers["cache-control"] == "no-store"
+    assert exported.headers["cache-control"] == "private, no-store, max-age=0"
     assert len(exported.json()["pre_session_feedback"]) == 1
     assert len(exported.json()["post_session_feedback"]) == 1

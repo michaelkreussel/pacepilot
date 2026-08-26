@@ -3,7 +3,7 @@ from typing import Literal
 import pytest
 from pydantic import ValidationError
 
-from app.config import Settings
+from app.config import Settings, coach_feature_enabled, get_settings
 
 
 def test_production_requires_secure_session_configuration() -> None:
@@ -91,3 +91,25 @@ def test_history_gate_bypass_is_development_only() -> None:
             environment="test",
             coach_planner_history_gates_enabled=False,
         )
+
+
+def test_coach_rollout_allowlist_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "coach_rollout_user_ids", "2, 4")
+
+    assert coach_feature_enabled(True, 2) is True
+    assert coach_feature_enabled(True, 3) is False
+    assert coach_feature_enabled(False, 2) is False
+
+    monkeypatch.setattr(settings, "coach_rollout_user_ids", "invalid")
+    assert coach_feature_enabled(True, 2) is False
+
+
+def test_empty_optional_metrics_token_is_normalized() -> None:
+    settings = Settings(_env_file=None, metrics_bearer_token="")
+
+    assert settings.metrics_bearer_token is None
+    with pytest.raises(ValidationError, match="METRICS_BEARER_TOKEN"):
+        Settings(_env_file=None, metrics_bearer_token="too-short")

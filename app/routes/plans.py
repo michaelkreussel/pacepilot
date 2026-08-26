@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth import CurrentUser
-from app.config import get_settings
+from app.config import coach_feature_enabled, get_settings
 from app.database import SessionDep
 from app.models import (
     AthleteGoal,
@@ -92,7 +92,7 @@ def new_training_cycle(
     user: CurrentUser,
     error: Annotated[str | None, Query(max_length=500)] = None,
 ) -> HTMLResponse:
-    if not get_settings().coach_plan_generation_enabled:
+    if not coach_feature_enabled(get_settings().coach_plan_generation_enabled, user.id):
         raise HTTPException(status_code=404, detail="Seite nicht gefunden")
     goals = list(
         session.scalars(
@@ -131,7 +131,7 @@ def generate_week_plan(
     user: CurrentUser,
     week_start: str = Form(),
 ) -> RedirectResponse:
-    if not get_settings().coach_plan_generation_enabled:
+    if not coach_feature_enabled(get_settings().coach_plan_generation_enabled, user.id):
         raise HTTPException(status_code=404, detail="Seite nicht gefunden")
     try:
         starts_on = date.fromisoformat(week_start)
@@ -153,7 +153,7 @@ def generate_training_cycle(
     goal_id: int | None = Form(None),
     event_type: str | None = Form(None),
 ) -> RedirectResponse:
-    if not get_settings().coach_plan_generation_enabled:
+    if not coach_feature_enabled(get_settings().coach_plan_generation_enabled, user.id):
         raise HTTPException(status_code=404, detail="Seite nicht gefunden")
     try:
         candidate = plan_training_cycle(
@@ -176,7 +176,7 @@ def generate_training_cycle(
 def accept_training_cycle(
     cycle_id: int, revision_id: int, session: SessionDep, user: CurrentUser
 ) -> RedirectResponse:
-    if not get_settings().coach_plan_generation_enabled:
+    if not coach_feature_enabled(get_settings().coach_plan_generation_enabled, user.id):
         raise HTTPException(status_code=404, detail="Seite nicht gefunden")
     try:
         accept_training_cycle_revision(session, user, cycle_id=cycle_id, revision_id=revision_id)
@@ -189,7 +189,7 @@ def accept_training_cycle(
 def training_cycle_detail(
     cycle_id: int, request: Request, session: SessionDep, user: CurrentUser
 ) -> HTMLResponse:
-    if not get_settings().coach_plan_generation_enabled:
+    if not coach_feature_enabled(get_settings().coach_plan_generation_enabled, user.id):
         raise HTTPException(status_code=404, detail="Seite nicht gefunden")
     loaded = get_training_cycle(session, user.id, cycle_id)
     if loaded is None:

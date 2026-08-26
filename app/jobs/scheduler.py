@@ -12,6 +12,7 @@ from app.database import SessionLocal
 from app.models import (
     GarminAccount,
     SyncRun,
+    Workout,
     WorkoutGarminAttempt,
     WorkoutGarminBinding,
     WorkoutGarminOperation,
@@ -176,6 +177,80 @@ def repair_interrupted_syncs() -> None:
         session.commit()
 
 
+def repair_stale_garmin_operations() -> None:
+    """Classify operations that remain pending while the process keeps running."""
+    cutoff = utcnow() - timedelta(minutes=get_settings().garmin_operation_stale_minutes)
+    with SessionLocal() as session:
+        pending_operations = list(
+            session.scalars(
+                select(WorkoutGarminOperation).where(
+                    WorkoutGarminOperation.status == "pending",
+                    WorkoutGarminOperation.created_at <= cutoff,
+                )
+            )
+        )
+        if not pending_operations:
+            return
+        for operation in pending_operations:
+            account_id = session.scalar(
+                select(GarminAccount.id)
+                .join(Workout, Workout.user_id == GarminAccount.user_id)
+                .where(Workout.id == operation.workout_id)
+            )
+            if account_id is None:
+                continue
+            try:
+                with garmin_account_slot(account_id):
+                    session.refresh(operation)
+                    if operation.status != "pending":
+                        continue
+                    pending_attempts = list(
+                        session.scalars(
+                            select(WorkoutGarminAttempt).where(
+                                WorkoutGarminAttempt.operation_id == operation.id,
+                                WorkoutGarminAttempt.status == "pending",
+                            )
+                        )
+                    )
+                    if any(attempt.started_at > cutoff for attempt in pending_attempts):
+                        continue
+                    repaired_at = utcnow()
+                    attempted = bool(pending_attempts)
+                    for attempt in pending_attempts:
+                        attempt.status = "unknown"
+                        attempt.completed_at = repaired_at
+                        attempt.error_code = "garmin.operation_stale"
+                        attempt.error_message = "Garmin-Operation hat das Zeitlimit überschritten"
+                    operation.status = "unknown" if attempted else "retryable"
+                    operation.completed_at = repaired_at if attempted else None
+                    operation.error_code = (
+                        "garmin.operation_stale" if attempted else "garmin.operation_not_started"
+                    )
+                    binding = session.get(WorkoutGarminBinding, operation.binding_id)
+                    if binding is not None:
+                        axis = (
+                            "content_status"
+                            if operation.operation_type in {"upload", "update", "delete"}
+                            else "calendar_status"
+                            if operation.operation_type in {"schedule", "unschedule"}
+                            else "device_status"
+                        )
+                        setattr(binding, axis, "unknown" if attempted else "retryable")
+                        binding.last_error_code = operation.error_code
+                        binding.last_error_message = (
+                            "Der Ausgang der Garmin-Operation muss geprüft werden."
+                            if attempted
+                            else (
+                                "Die Garmin-Operation wurde nicht gestartet und kann "
+                                "wiederholt werden."
+                            )
+                        )
+                    session.commit()
+            except GarminAccountBusyError:
+                session.rollback()
+                continue
+
+
 def start_scheduler() -> None:
     settings = get_settings()
     if scheduler.running:
@@ -188,6 +263,15 @@ def start_scheduler() -> None:
         "interval",
         minutes=settings.sync_interval_minutes,
         id="garmin-sync",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        repair_stale_garmin_operations,
+        "interval",
+        minutes=5,
+        id="garmin-operation-repair",
         replace_existing=True,
         max_instances=1,
         coalesce=True,

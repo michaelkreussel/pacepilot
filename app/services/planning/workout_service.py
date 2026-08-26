@@ -2,7 +2,7 @@ import hashlib
 import json
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from typing import Any, cast
 
@@ -184,6 +184,7 @@ class WorkoutService:
         )
         self.session.add(workout)
         self.session.flush()
+        revision_metadata = metadata
         if origin is not None:
             run = self.session.get(CoachAssistantRun, origin.assistant_run_id)
             if (
@@ -199,12 +200,20 @@ class WorkoutService:
                     code="proposal.origin_invalid",
                 )
             run.workout_id = workout.id
+            from app.services.coach.agent import COACH_PROMPT_TEMPLATE_VERSION
+
+            revision_metadata = replace(
+                metadata,
+                model_provider="openrouter",
+                model_id=run.model_id,
+                prompt_template_version=COACH_PROMPT_TEMPLATE_VERSION,
+            )
         revision = self._create_revision(
             workout,
             data,
             revision_number=1,
             parent_revision_id=None,
-            metadata=metadata,
+            metadata=revision_metadata,
         )
         self.session.flush()
         self._record_structural_validation(workout, revision)
@@ -1877,6 +1886,9 @@ class WorkoutService:
             template_version=details.template_version,
             rule_set_version=details.rule_set_version,
             knowledge_base_version=details.knowledge_base_version,
+            model_provider=details.model_provider,
+            model_id=details.model_id,
+            prompt_template_version=details.prompt_template_version,
             content_hash="",
             edit_source=details.edit_source,
         )
@@ -2060,11 +2072,25 @@ class WorkoutService:
             return
         from app.config import (
             DEFERRED_QUALITY_TEMPLATE_IDS,
+            coach_feature_enabled,
             deferred_quality_templates_enabled,
             get_settings,
         )
 
-        if not get_settings().coach_garmin_sync_enabled:
+        settings = get_settings()
+        source_enabled = (
+            coach_feature_enabled(settings.coach_daily_adaptation_enabled, self.user.id)
+            if revision.source_type == "coach_daily_adaptation"
+            else coach_feature_enabled(settings.coach_plan_generation_enabled, self.user.id)
+            if revision.source_type == "coach_weekly_plan"
+            else coach_feature_enabled(settings.coach_workout_proposals_enabled, self.user.id)
+        )
+        if not source_enabled:
+            raise WorkoutTransitionError(
+                "Die erzeugende Coach-Funktion ist derzeit deaktiviert.",
+                code="coach.source_feature_disabled",
+            )
+        if not coach_feature_enabled(settings.coach_garmin_sync_enabled, self.user.id):
             raise WorkoutTransitionError(
                 "Die Garmin-Übertragung für Coach-Vorschläge ist noch nicht freigeschaltet.",
                 code="coach.garmin_sync_disabled",
@@ -2104,6 +2130,7 @@ class WorkoutService:
     def _ensure_generated_proposals_enabled(self, workout: Workout) -> None:
         from app.config import (
             DEFERRED_QUALITY_TEMPLATE_IDS,
+            coach_feature_enabled,
             deferred_quality_templates_enabled,
             get_settings,
         )
@@ -2141,30 +2168,31 @@ class WorkoutService:
                     code="proposal.quality_spacing_violation",
                 )
         if revision.source_type == "coach_daily_adaptation":
-            if not settings.coach_daily_adaptation_enabled:
+            if not coach_feature_enabled(settings.coach_daily_adaptation_enabled, self.user.id):
                 raise WorkoutTransitionError(
                     "Aktionen für tägliche Anpassungen sind derzeit deaktiviert.",
                     code="adaptation.feature_disabled",
                 )
             return
         if revision.source_type == "coach_weekly_plan":
-            if not settings.coach_plan_generation_enabled:
+            if not coach_feature_enabled(settings.coach_plan_generation_enabled, self.user.id):
                 raise WorkoutTransitionError(
                     "Aktionen für Wochenplan-Vorschläge sind derzeit deaktiviert.",
                     code="plan.feature_disabled",
                 )
             return
-        if revision.source_type == "coach_single" and not settings.coach_workout_proposals_enabled:
+        if revision.source_type == "coach_single" and not coach_feature_enabled(
+            settings.coach_workout_proposals_enabled, self.user.id
+        ):
             raise WorkoutTransitionError(
                 "Aktionen für Coach-Vorschläge sind derzeit deaktiviert.",
                 code="coach.workout_proposals_disabled",
             )
 
-    @staticmethod
-    def _ensure_daily_adaptation_enabled() -> None:
-        from app.config import get_settings
+    def _ensure_daily_adaptation_enabled(self) -> None:
+        from app.config import coach_feature_enabled, get_settings
 
-        if not get_settings().coach_daily_adaptation_enabled:
+        if not coach_feature_enabled(get_settings().coach_daily_adaptation_enabled, self.user.id):
             raise WorkoutTransitionError(
                 "Die tägliche Trainingsanpassung ist noch nicht freigeschaltet.",
                 code="adaptation.feature_disabled",

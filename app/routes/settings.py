@@ -11,7 +11,7 @@ from sqlalchemy import select
 from app.auth import CurrentUser
 from app.database import SessionDep
 from app.jobs.scheduler import queue_account_sync
-from app.models import GarminAccount, SyncEvent, SyncRun
+from app.models import GarminAccount, SyncEvent, SyncRun, Workout, WorkoutGarminOperation
 from app.models.user import utcnow
 from app.onboarding import require_notice_acknowledged
 from app.repositories.users import get_or_create_garmin_account
@@ -101,6 +101,18 @@ def _sync_view(
                 event = latest_by_resource.get(str(metric["key"]))
                 if event is not None:
                     metric["status"] = event.status
+    unresolved_operations = list(
+        session.scalars(
+            select(WorkoutGarminOperation)
+            .join(Workout, Workout.id == WorkoutGarminOperation.workout_id)
+            .where(
+                Workout.user_id == account.user_id,
+                WorkoutGarminOperation.status.in_({"pending", "unknown"}),
+            )
+            .order_by(WorkoutGarminOperation.created_at.desc())
+            .limit(20)
+        )
+    )
     return {
         "account": account,
         "sync_run": sync_run,
@@ -114,6 +126,7 @@ def _sync_view(
         "current_metrics": current_metrics,
         "metric_labels": METRIC_LABELS,
         "cooldown_seconds": rate_limit_cooldown_remaining(session, account),
+        "unresolved_operations": unresolved_operations,
     }
 
 

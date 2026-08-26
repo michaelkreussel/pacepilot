@@ -177,8 +177,14 @@ Settings are read from environment variables and, for local development, from `.
 | `GARMIN_ACTIVITY_INITIAL_ENRICHMENT` | `0` | Activity details enriched during the first sync |
 | `GARMIN_ACTIVITY_ENRICHMENT_PER_SYNC` | `5` | Older activity details enriched per subsequent sync |
 | `GARMIN_RATE_LIMIT_COOLDOWN_SECONDS` | `300` | Global pause after a Garmin HTTP 429 response |
+| `GARMIN_OPERATION_STALE_MINUTES` | `15` | Marks abandoned pending Garmin attempts as unknown |
 | `SCHEDULER_ENABLED` | `true` | Enables periodic background synchronization |
 | `LOG_LEVEL` | `INFO` | Console and rotating file log level |
+| `MUTATION_RATE_LIMIT_PER_MINUTE` | `120` | Per-user limit for general unsafe requests |
+| `COACH_RATE_LIMIT_PER_MINUTE` | `12` | Per-user limit for Coach mutations |
+| `AUTH_RATE_LIMIT_PER_MINUTE` | `20` | Per-client limit for OAuth and Garmin authentication |
+| `ACCOUNT_EXPORT_RATE_LIMIT_PER_MINUTE` | `2` | Per-user limit for complete ZIP exports |
+| `METRICS_BEARER_TOKEN` | unset | Optional 32+ character token for privacy-safe `/api/metrics` |
 | `SESSION_SECRET` | unset | Secret used to sign sessions; minimum 32 characters |
 | `SESSION_HTTPS_ONLY` | `false` | Sends session cookies only over HTTPS |
 | `PUBLIC_BASE_URL` | unset | Public application origin used for OAuth redirects |
@@ -197,6 +203,7 @@ Settings are read from environment variables and, for local development, from `.
 | `COACH_PLAN_GENERATION_ENABLED` | `false` | Enables future coach week and multi-week plans |
 | `COACH_PLANNER_HISTORY_GATES_ENABLED` | `true` | Enforces observed week/frequency eligibility; development can disable it for planner testing |
 | `COACH_DEFERRED_QUALITY_TEMPLATES_ENABLED` | `false` | Development-only override for testing deferred threshold and VO2max templates |
+| `COACH_ROLLOUT_USER_IDS` | unset | Optional comma-separated internal cohort; malformed values fail closed |
 
 Production mode requires `SESSION_SECRET` and `SESSION_HTTPS_ONLY=true`. Configuring only one half
 of an OAuth provider's client ID and secret pair also prevents startup.
@@ -258,12 +265,17 @@ directory, and raw-data directory accordingly.
 - Application logs are written to the console and `DATA_DIR/logs/pacepilot.log`. Coach logs contain
   identifiers and tool names, but not question text, answer text, or health values.
 - Enabling the coach sends prompts, bounded conversation history, and selected athlete data to
-  OpenRouter. The coach is read-only and cannot create, confirm, publish, or push workouts.
+  OpenRouter. If proposals are enabled, its single bounded mutation tool can create only an
+  unaccepted and unscheduled server-side proposal; it cannot accept, schedule, publish, or push it.
 - The web interface loads some assets from third-party CDNs. Activity maps request OpenStreetMap
   tiles, which exposes the viewed map area to the tile provider.
 - Disconnecting Garmin removes token files but retains imported data. The separate Garmin-data
   deletion action removes imported Garmin rows and raw files, but retains the application account,
   local workouts, and coach chats.
+- The complete ZIP export contains all user-scoped database rows and raw activity files, but never
+  token files, session secrets, shared logs, or host backups. Local account deletion removes the
+  database account, local Garmin tokens and raw files; data and workouts already held by Garmin or
+  external backups remain outside PacePilot's deletion boundary.
 
 ## Security Considerations
 
@@ -275,7 +287,9 @@ consider these current limitations:
 - Identities from different OAuth providers are not automatically linked by email address.
 - Requests using unsafe HTTP methods require a synchronizer token bound to the signed session;
   OAuth login initiation uses a protected POST.
-- There is no complete user-account deletion interface.
+- Dynamic responses use `no-store`, standard browser security headers, per-user/client rate limits,
+  and stale Garmin-operation detection. A minimal CSP protects framing, forms, objects, and base URLs;
+  the remaining third-party assets prevent a strict `default-src 'self'` policy for now.
 - Application data is not encrypted at rest by PacePilot.
 
 ## Development

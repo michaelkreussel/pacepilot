@@ -336,6 +336,7 @@ def workout_detail_view(
     )
     from app.config import (
         DEFERRED_QUALITY_TEMPLATE_IDS,
+        coach_feature_enabled,
         deferred_quality_templates_enabled,
         get_settings,
     )
@@ -349,6 +350,13 @@ def workout_detail_view(
     deferred_quality_actions_allowed = (
         current.template_id not in DEFERRED_QUALITY_TEMPLATE_IDS
         or deferred_quality_templates_enabled()
+    )
+    source_feature_enabled = (
+        coach_feature_enabled(settings.coach_daily_adaptation_enabled, workout.user_id)
+        if current.source_type == "coach_daily_adaptation"
+        else coach_feature_enabled(settings.coach_plan_generation_enabled, workout.user_id)
+        if current.source_type == "coach_weekly_plan"
+        else coach_feature_enabled(settings.coach_workout_proposals_enabled, workout.user_id)
     )
     return WorkoutDetailView(
         id=workout.id,
@@ -375,14 +383,21 @@ def workout_detail_view(
         garmin_last_error=binding.last_error_message if binding else None,
         safety_report=safety_report,
         sync_safety_report=sync_safety_report,
-        garmin_sync_allowed=(not current_is_generated or settings.coach_garmin_sync_enabled),
+        garmin_sync_allowed=(
+            not current_is_generated
+            or (
+                source_feature_enabled
+                and coach_feature_enabled(settings.coach_garmin_sync_enabled, workout.user_id)
+            )
+        ),
         proposal_actions_allowed=(
             (
-                settings.coach_daily_adaptation_enabled
+                coach_feature_enabled(settings.coach_daily_adaptation_enabled, workout.user_id)
                 if current.source_type == "coach_daily_adaptation"
-                else settings.coach_plan_generation_enabled
+                else coach_feature_enabled(settings.coach_plan_generation_enabled, workout.user_id)
                 if current.source_type == "coach_weekly_plan"
-                else not current_is_generated or settings.coach_workout_proposals_enabled
+                else not current_is_generated
+                or coach_feature_enabled(settings.coach_workout_proposals_enabled, workout.user_id)
             )
             and deferred_quality_actions_allowed
         ),

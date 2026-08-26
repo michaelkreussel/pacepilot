@@ -1,0 +1,26 @@
+{
+  "source": "synthetic",
+  "fixture_schema_version": 1,
+  "cases": [
+    {
+      "name": "empty_month",
+      "payload": {"items": []},
+      "expected_ids": []
+    },
+    {
+      "name": "nested_scheduled_workout",
+      "payload": {
+        "calendar": {
+          "items": [
+            {
+              "scheduledWorkoutId": "synthetic-schedule-1",
+              "workoutId": "synthetic-workout-1",
+              "date": "2026-01-15"
+            }
+          ]
+        }
+      },
+      "expected_ids": ["synthetic-schedule-1"]
+    }
+  ]
+}

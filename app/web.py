@@ -8,7 +8,7 @@ from jinja2 import pass_context
 from jinja2.runtime import Context
 from markupsafe import Markup, escape
 
-from app.config import get_settings
+from app.config import coach_feature_enabled, get_settings
 from app.http_security import get_csrf_token
 from app.onboarding import onboarding_state
 
@@ -99,16 +99,23 @@ cast(dict[str, Any], templates.env.globals)["csrf_field"] = csrf_field
 def context(request: Request, **values: Any) -> dict[str, Any]:
     current_user = getattr(request.state, "current_user", None)
     settings = get_settings()
+    user_id = current_user.id if current_user is not None else 0
     return {
         "request": request,
         "current_user": current_user,
         "onboarding": onboarding_state(current_user) if current_user is not None else None,
         "csrf_token": get_csrf_token(request),
         "features": {
-            "coach_workout_proposals": settings.coach_workout_proposals_enabled,
-            "coach_garmin_sync": settings.coach_garmin_sync_enabled,
-            "coach_daily_adaptation": settings.coach_daily_adaptation_enabled,
-            "coach_plan_generation": settings.coach_plan_generation_enabled,
+            "coach_workout_proposals": coach_feature_enabled(
+                settings.coach_workout_proposals_enabled, user_id
+            ),
+            "coach_garmin_sync": coach_feature_enabled(settings.coach_garmin_sync_enabled, user_id),
+            "coach_daily_adaptation": coach_feature_enabled(
+                settings.coach_daily_adaptation_enabled, user_id
+            ),
+            "coach_plan_generation": coach_feature_enabled(
+                settings.coach_plan_generation_enabled, user_id
+            ),
             "coach_planner_history_gates": settings.coach_planner_history_gates_enabled,
             "coach_deferred_quality_templates": (
                 settings.environment == "development"

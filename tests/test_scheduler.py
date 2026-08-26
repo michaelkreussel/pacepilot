@@ -23,10 +23,10 @@ from app.services.planning.workout_definition import default_definition
 def test_scheduler_does_not_sync_immediately_on_startup(monkeypatch: Any) -> None:
     class FakeScheduler:
         running = False
-        job_kwargs: dict[str, object] = {}
+        jobs: list[dict[str, object]] = []
 
         def add_job(self, *_args: object, **kwargs: object) -> None:
-            self.job_kwargs = kwargs
+            self.jobs.append(kwargs)
 
         def start(self) -> None:
             self.running = True
@@ -37,14 +37,23 @@ def test_scheduler_does_not_sync_immediately_on_startup(monkeypatch: Any) -> Non
     monkeypatch.setattr(
         scheduler_module,
         "get_settings",
-        lambda: SimpleNamespace(scheduler_enabled=True, sync_interval_minutes=60),
+        lambda: SimpleNamespace(
+            scheduler_enabled=True,
+            sync_interval_minutes=60,
+            garmin_operation_stale_minutes=15,
+        ),
     )
 
     scheduler_module.start_scheduler()
 
     assert fake_scheduler.running
-    assert fake_scheduler.job_kwargs["minutes"] == 60
-    assert "next_run_time" not in fake_scheduler.job_kwargs
+    assert [job["id"] for job in fake_scheduler.jobs] == [
+        "garmin-sync",
+        "garmin-operation-repair",
+    ]
+    assert fake_scheduler.jobs[0]["minutes"] == 60
+    assert fake_scheduler.jobs[1]["minutes"] == 5
+    assert all("next_run_time" not in job for job in fake_scheduler.jobs)
 
 
 def test_startup_repair_runs_when_periodic_scheduler_is_disabled(monkeypatch: Any) -> None:
@@ -207,6 +216,96 @@ def test_interrupted_operation_without_attempt_is_retryable(
         binding = session.get(WorkoutGarminBinding, binding_id)
         assert operation is not None and operation.status == "retryable"
         assert binding is not None and binding.content_status == "retryable"
+
+
+def test_stale_pending_attempt_becomes_unknown_while_process_is_running(
+    session_factory: sessionmaker[Session], monkeypatch: Any
+) -> None:
+    old = datetime.now(UTC).replace(tzinfo=None) - timedelta(minutes=20)
+    with session_factory() as session:
+        user = User(display_name="Stale")
+        session.add(user)
+        session.flush()
+        session.add(GarminAccount(user_id=user.id, sync_status="connected"))
+        workout = Workout(
+            user_id=user.id,
+            name="Run",
+            sport="running",
+            status="confirmed",
+            definition=default_definition().model_dump(mode="json"),
+        )
+        session.add(workout)
+        session.flush()
+        revision = WorkoutRevision(
+            workout_id=workout.id,
+            revision_number=1,
+            name="Run",
+            sport="running",
+            definition_version=1,
+            definition=default_definition().model_dump(mode="json"),
+            content_hash="e" * 64,
+        )
+        binding = WorkoutGarminBinding(workout_id=workout.id)
+        session.add_all([revision, binding])
+        session.flush()
+        operation = WorkoutGarminOperation(
+            workout_id=workout.id,
+            binding_id=binding.id,
+            operation_type="upload",
+            revision_id=revision.id,
+            idempotency_key="f" * 64,
+            status="pending",
+            created_at=old,
+        )
+        session.add(operation)
+        session.flush()
+        attempt = WorkoutGarminAttempt(
+            operation_id=operation.id,
+            attempt_number=1,
+            attempt_kind="execute",
+            status="pending",
+            started_at=old,
+        )
+        fresh_operation = WorkoutGarminOperation(
+            workout_id=workout.id,
+            binding_id=binding.id,
+            operation_type="upload",
+            revision_id=revision.id,
+            idempotency_key="1" * 64,
+            status="pending",
+            created_at=old,
+        )
+        session.add_all([attempt, fresh_operation])
+        session.flush()
+        fresh_attempt = WorkoutGarminAttempt(
+            operation_id=fresh_operation.id,
+            attempt_number=1,
+            attempt_kind="execute",
+            status="pending",
+            started_at=datetime.now(UTC).replace(tzinfo=None),
+        )
+        session.add(fresh_attempt)
+        session.commit()
+        operation_id = operation.id
+        attempt_id = attempt.id
+        fresh_operation_id = fresh_operation.id
+
+    monkeypatch.setattr(scheduler_module, "SessionLocal", session_factory)
+    monkeypatch.setattr(
+        scheduler_module,
+        "get_settings",
+        lambda: SimpleNamespace(garmin_operation_stale_minutes=15),
+    )
+    scheduler_module.repair_stale_garmin_operations()
+
+    with session_factory() as session:
+        operation = session.get(WorkoutGarminOperation, operation_id)
+        attempt = session.get(WorkoutGarminAttempt, attempt_id)
+        fresh_operation = session.get(WorkoutGarminOperation, fresh_operation_id)
+        assert operation is not None and operation.status == "unknown"
+        assert operation.error_code == "garmin.operation_stale"
+        assert attempt is not None and attempt.status == "unknown"
+        assert fresh_operation is not None and fresh_operation.status == "pending"
 
 
 def test_periodic_sync_only_queues_accounts_with_an_expired_successful_sync(

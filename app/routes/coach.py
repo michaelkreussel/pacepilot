@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.auth import CurrentUser
 from app.config import (
     DEFERRED_QUALITY_TEMPLATE_IDS,
+    coach_feature_enabled,
     deferred_quality_templates_enabled,
     get_settings,
 )
@@ -314,7 +315,7 @@ def planning_shadow(
     user: CurrentUser,
     week: str | None = None,
 ) -> HTMLResponse:
-    if not get_settings().coach_plan_generation_enabled:
+    if not coach_feature_enabled(get_settings().coach_plan_generation_enabled, user.id):
         raise HTTPException(status_code=404, detail="Seite nicht gefunden")
     today = date.today()
     week_start = today - timedelta(days=today.weekday())

@@ -10,7 +10,7 @@ from enum import StrEnum
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.config import get_settings
+from app.config import coach_feature_enabled, get_settings
 from app.models import (
     PreSessionFeedback,
     User,
@@ -216,7 +216,7 @@ class DailyAdaptationService:
         allow_open_candidate: bool = False,
         expected_replacement_id: int | None = None,
     ) -> DailyAdaptationPreview:
-        if not get_settings().coach_daily_adaptation_enabled:
+        if not coach_feature_enabled(get_settings().coach_daily_adaptation_enabled, self.user.id):
             raise DailyAdaptationError(
                 "Die tägliche Trainingsanpassung ist noch nicht freigeschaltet.",
                 code="adaptation.feature_disabled",
