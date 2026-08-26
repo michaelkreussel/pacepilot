@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.models import GarminAccount, SyncRun, User
+from app.models import CoachConversation, GarminAccount, SyncRun, User
 from app.onboarding import complete_onboarding
 
 
@@ -60,6 +60,21 @@ def test_new_user_resumes_onboarding_and_unlocks_areas_progressively(
 
     assert client.get("/activities").status_code == 200
     assert client.get("/").status_code == 200
+
+
+def test_coach_requires_completed_data_onboarding(
+    client: TestClient, session_factory: sessionmaker[Session]
+) -> None:
+    _reset_onboarding(session_factory)
+
+    page = client.get("/coach", follow_redirects=False)
+    create = client.post("/coach/conversations", follow_redirects=False)
+
+    assert page.status_code == create.status_code == 303
+    assert page.headers["location"] == "/onboarding?blocked=data"
+    assert create.headers["location"] == "/onboarding?blocked=data"
+    with session_factory() as session:
+        assert list(session.scalars(select(CoachConversation))) == []
 
 
 def test_review_and_help_do_not_reset_completed_onboarding(
