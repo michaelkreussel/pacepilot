@@ -1,0 +1,54 @@
+id: vo2_intervals
+version: 1.0.0
+status: deferred
+name: VO₂max-Intervalle
+sport: running
+purpose: upper_aerobic_power
+intensity_domain: high
+rule_strength: heuristic
+eligibility:
+  min_consistent_running_weeks: 8
+  min_runs_per_week: 3
+  requirements:
+    - reliable_current_performance_model
+    - quality_density_validation
+contraindications:
+  - active_pain_affecting_gait
+  - fever_or_systemic_illness
+  - insufficient_baseline
+structure:
+  kind: intervals
+  warmup_minutes: {minimum: 15, default: 18, maximum: 20}
+  repetitions: {minimum: 3, default: 5, maximum: 8}
+  work_minutes: {minimum: 2, default: 3, maximum: 5}
+  work_rpe: {minimum: 8, maximum: 9}
+  recovery_minutes: {minimum: 2, default: 3, maximum: 5}
+  cooldown_minutes: {minimum: 10, default: 12, maximum: 15}
+  total_work_minutes: {minimum: 10, default: 15, maximum: 25}
+  session_rpe: {minimum: 7, maximum: 9}
+  instructions:
+    - Laufe alle Wiederholungen gleichmäßig und kontrolliert; nicht sprinten.
+progression_axes:
+  - total_work_duration
+  - repetition_duration
+  - recovery_duration
+weekly_frequency_cap: 1
+fallback_targets:
+  - defer_until_reliable_intensity_model
+  - use_fartlek_in_unstable_conditions
+evidence_refs:
+  - E-HIIT-001
+  - E-SRPE-001
+product_heuristic:
+  product_default: true
+  rationale: Exact interval values and eligibility thresholds are conservative defaults and remain disabled pending dedicated tests.
+  status: initial_product_default
+  reviewed_on: 2026-08-24
+garmin_capabilities:
+  time_steps: true
+  repeat_blocks: true
+  rpe_target: false
+  local_instructions: false
+  degradation:
+    - rpe_target_to_no_device_target
+    - instructions_remain_in_pacepilot

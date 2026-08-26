@@ -73,6 +73,7 @@
   {% endif %}
 
   <form class="mt-4" method="post" action="/settings/garmin/sync">
+    {{ csrf_field() }}
     <button class="inline-flex w-full items-center justify-center rounded-lg border border-transparent bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto" type="submit" {% if sync_active %}disabled{% endif %}>
       {% if sync_active %}Synchronisierung läuft …{% elif not onboarding.complete %}Erste Synchronisierung starten{% else %}Jetzt synchronisieren{% endif %}
     </button>

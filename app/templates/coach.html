@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}KI-Coach · PacePilot{% endblock %}
-{% block head %}<script src="{{ url_for('static', path='/js/coach.js') }}?v=20260820-1" defer></script>{% endblock %}
+{% block head %}<script src="{{ url_for('static', path='/js/coach.js') }}?v=20260824-2" defer></script>{% endblock %}
 {% block main_class %}flex h-dvh min-h-0 flex-col overflow-hidden{% endblock %}
 {% block content_class %}flex min-h-0 flex-1 flex-col overflow-hidden{% endblock %}
 {% block content %}
@@ -17,6 +17,31 @@
       </div>
     </div>
     <p class="mt-1 flex items-start gap-1.5 text-[0.625rem] leading-4 text-warning-emphasis"><svg class="mt-px size-3 shrink-0 fill-none stroke-current stroke-2" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v5m0 3h.01" stroke-linecap="round"/></svg><span><strong class="font-semibold">Keine medizinische Diagnose.</strong> Fragen und abgerufene Daten werden an den konfigurierten Modellanbieter übertragen.</span></p>
+    {% if features.coach_workout_proposals %}
+    <details class="group mt-2 rounded-lg border border-primary/20 bg-primary-subtle/60 px-3 py-2" {% if proposal_error %}open{% endif %}>
+      <summary class="flex cursor-pointer list-none items-center justify-between gap-3 text-xs font-semibold text-primary-emphasis marker:hidden [&::-webkit-details-marker]:hidden"><span>Workout vorschlagen</span><span class="text-[0.625rem] font-medium group-open:hidden">Deterministisch · noch nicht eingeplant</span><span class="hidden text-[0.625rem] font-medium group-open:inline">Schließen</span></summary>
+      <form class="mt-3 grid gap-3 border-t border-primary/15 pt-3 sm:grid-cols-[minmax(10rem,1fr)_minmax(10rem,1fr)_minmax(10rem,1fr)_auto] sm:items-end" method="post" action="/coach/workout-proposals/running">
+        {{ csrf_field() }}
+        <input type="hidden" name="idempotency_key" value="{{ proposal_idempotency_key }}">
+        <label class="grid gap-1 text-xs font-semibold text-foreground">Workout-Typ<select class="rounded-lg border border-input bg-surface px-3 py-2 text-sm font-normal" name="template_id" required>{% for template in proposal_templates %}<option value="{{ template.id }}"{% if template.id == proposal_template_id %} selected{% endif %}>{{ template.label }}</option>{% endfor %}</select></label>
+        <label class="grid gap-1 text-xs font-semibold text-foreground">Wunschdatum<input class="rounded-lg border border-input bg-surface px-3 py-2 text-sm font-normal" type="date" name="suggested_for" min="{{ today.isoformat() }}" value="{{ proposal_date }}" required></label>
+        <label class="grid gap-1 text-xs font-semibold text-foreground">Verfügbare Zeit<input class="rounded-lg border border-input bg-surface px-3 py-2 text-sm font-normal" type="number" name="available_minutes" min="20" max="1440" step="1" value="{{ proposal_minutes }}" aria-describedby="proposal-time-help" required><span class="font-normal text-muted-foreground" id="proposal-time-help">Mindestens 20 Minuten; der gewählte Workout-Typ bestimmt seine erforderliche Gesamtdauer.</span></label>
+        <button class="inline-flex min-h-10 items-center justify-center rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition hover:bg-primary-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" type="submit">Vorschlag erstellen</button>
+      </form>
+      <p class="mt-2 text-[0.6875rem] leading-5 text-muted-foreground">PacePilot nutzt Laufhistorie, Zeitbudget und aktuelle Sicherheitsangaben. Der Vorschlag bleibt unbestätigt und wird nicht automatisch in den Kalender geschrieben.</p>
+      {% if proposal_error %}<p class="mt-2 rounded-md bg-danger-subtle px-3 py-2 text-xs text-danger-emphasis" role="alert">{{ proposal_error }}</p>{% endif %}
+    </details>
+    {% endif %}
+    {% if features.coach_plan_generation %}
+    <div class="mt-2 flex flex-wrap items-center gap-2 rounded-lg border border-border bg-surface-muted px-3 py-2 text-xs">
+      <span class="font-semibold text-foreground">Planung</span>
+      <a class="rounded-md border border-border bg-surface px-2.5 py-1.5 font-semibold text-foreground transition hover:bg-secondary" href="/coach/planning-shadow">Wochenplan prüfen</a>
+      <a class="rounded-md border border-border bg-surface px-2.5 py-1.5 font-semibold text-foreground transition hover:bg-secondary" href="/plans/cycles/new">Mehrwochenplan erstellen</a>
+      <span class="text-muted-foreground">Einzelvorschläge und Planvorschauen bleiben bis zur Annahme unverbindlich.</span>
+      {% if features.coach_deferred_quality_templates %}<span class="w-full font-semibold text-warning-emphasis">Development-Testmodus: Schwellen- und VO₂max-Vorlagen sind freigeschaltet.</span>{% endif %}
+      {% if not features.coach_planner_history_gates %}<span class="w-full font-semibold text-warning-emphasis">Testmodus: Wochen- und Frequenz-Gates sind deaktiviert.</span>{% endif %}
+    </div>
+    {% endif %}
   </header>
 
   <div class="grid min-h-0 flex-1 grid-rows-[auto_minmax(0,1fr)] min-[1051px]:grid-cols-[228px_minmax(0,1fr)] min-[1051px]:grid-rows-1">
@@ -28,6 +53,7 @@
             <span class="text-[0.625rem] text-muted-foreground">{{ conversations|length }}</span>
           </div>
           <form method="post" action="/coach/conversations">
+            {{ csrf_field() }}
             <button class="inline-flex size-9 items-center justify-center rounded-lg border border-border bg-surface text-foreground shadow-sm transition hover:border-primary/30 hover:bg-primary-subtle hover:text-primary-emphasis focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring min-[1051px]:size-8" type="submit" aria-label="Neuen Chat starten" title="Neuen Chat starten">
               <svg class="size-4 fill-none stroke-current stroke-[1.8]" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" stroke-linecap="round" stroke-linejoin="round"/><path d="M18.4 2.6a2.1 2.1 0 0 1 3 3L12 15l-4 1 1-4Z" stroke-linecap="round" stroke-linejoin="round"/></svg>
             </button>
@@ -42,6 +68,7 @@
             <time class="mt-0.5 block text-[0.625rem] text-muted-foreground" datetime="{{ item.updated_at.isoformat() }}Z" data-local-datetime>{{ item.updated_at.strftime('%d.%m.%Y, %H:%M') }}</time>
           </a>
           <form class="grid place-items-center" method="post" action="/coach/{{ item.id }}/delete" onsubmit="return confirm('Diesen Chat und alle enthaltenen Nachrichten wirklich löschen?')">
+            {{ csrf_field() }}
             {% if conversation %}<input type="hidden" name="selected_conversation_id" value="{{ conversation.id }}">{% endif %}
             <button class="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground transition hover:bg-danger-subtle hover:text-danger-emphasis focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-40" type="submit" aria-label="Chat löschen" title="Chat löschen" data-delete-chat="{{ item.id }}" {% if active and response_running %}disabled{% endif %}>
               <svg class="size-3.5 fill-none stroke-current stroke-[1.8]" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m-8 0 1 13h8l1-13M10 11v5m4-5v5" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -60,7 +87,7 @@
       <header class="shrink-0 border-b border-border bg-surface/90 px-3 py-2 backdrop-blur sm:px-5">
         <div class="mx-auto flex max-w-3xl items-center gap-3">
           <p class="min-w-0 flex-1 truncate text-sm font-semibold text-foreground" data-selected-conversation-title>{{ conversation.title }}</p>
-          <span class="inline-flex shrink-0 items-center gap-1 rounded-full bg-surface-muted px-2 py-0.5 text-[0.625rem] font-medium text-muted-foreground" title="Der Coach kann PacePilot-Daten nur lesen und keine Aktionen ausführen."><svg class="size-3 fill-none stroke-current stroke-[1.8]" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.5"/></svg>Nur lesend</span>
+           {% if features.coach_workout_proposals %}<span class="inline-flex shrink-0 items-center gap-1 rounded-full bg-primary-subtle px-2 py-0.5 text-[0.625rem] font-medium text-primary-emphasis" title="Der Coach kann einen unbestätigten Easy-Run-Vorschlag erstellen. Annahme, Planung und Garmin bleiben separate Aktionen."><svg class="size-3 fill-none stroke-current stroke-[1.8]" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v18M3 12h18" stroke-linecap="round"/></svg>Vorschläge möglich</span>{% else %}<span class="inline-flex shrink-0 items-center gap-1 rounded-full bg-surface-muted px-2 py-0.5 text-[0.625rem] font-medium text-muted-foreground" title="Der Coach kann PacePilot-Daten nur lesen und keine Aktionen ausführen."><svg class="size-3 fill-none stroke-current stroke-[1.8]" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.5"/></svg>Nur lesend</span>{% endif %}
         </div>
       </header>
 
@@ -96,7 +123,8 @@
                   {% if item.status == 'completed' %}<li class="relative pl-3" data-activity-final><span class="absolute -left-[0.9375rem] top-1 size-1.5 rounded-full bg-muted-foreground"></span><span class="font-medium text-foreground">Antwort formuliert</span></li>{% endif %}
                 </ol>
               </details>
-              <div class="whitespace-pre-wrap text-sm leading-6 text-foreground" data-answer-text>{{ item.content }}</div>
+               <div class="whitespace-pre-wrap text-sm leading-6 text-foreground" data-answer-text>{{ item.content }}</div>
+               <div data-proposal-artifacts>{% if proposal_cards.get(item.id) %}{% with card=proposal_cards[item.id] %}{% include "workouts/_coach_proposal_card.html" %}{% endwith %}{% endif %}</div>
               {% if item.status in ['failed', 'interrupted'] %}<p class="mt-2 text-xs text-danger-emphasis" role="status">Diese Antwort wurde nicht abgeschlossen.</p>{% endif %}
             </div>
           </div>
@@ -115,9 +143,10 @@
       </div>
 
       <form class="shrink-0 border-t border-border bg-surface/95 px-3 py-2 backdrop-blur sm:px-5" data-coach-form action="/coach/{{ conversation.id }}/messages" method="post">
+        {{ csrf_field() }}
         <div class="mx-auto flex max-w-3xl items-end gap-1.5 rounded-xl border border-input bg-background p-1.5 shadow-sm transition focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/20">
           <label class="sr-only" for="coach-message">Frage an den Coach</label>
-          <textarea class="max-h-40 min-h-9 flex-1 resize-none bg-transparent px-2 py-1.5 text-sm leading-5 text-foreground outline-none placeholder:text-muted-foreground" id="coach-message" name="message" rows="1" maxlength="4000" placeholder="Frage zu Gesundheit, Erholung oder Training ..." required {% if not configured %}disabled{% endif %}></textarea>
+           <textarea class="max-h-40 min-h-9 flex-1 resize-none bg-transparent px-2 py-1.5 text-sm leading-5 text-foreground outline-none placeholder:text-muted-foreground" id="coach-message" name="message" rows="1" maxlength="4000" placeholder="{% if features.coach_workout_proposals %}Frage zu Gesundheit, Training oder einem Laufvorschlag ...{% else %}Frage zu Gesundheit, Erholung oder Training ...{% endif %}" required {% if not configured %}disabled{% endif %}></textarea>
           <button class="inline-flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground transition hover:bg-primary-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-50" type="submit" aria-label="Nachricht senden" {% if not configured %}disabled{% endif %}><svg class="size-3.5 fill-none stroke-current stroke-2" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 7-7 7 7M12 5v14" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
         </div>
         <div class="mx-auto mt-1 flex max-w-3xl items-center justify-between gap-3 px-1 text-[0.625rem] leading-4 text-muted-foreground"><p>Antworten können Fehler enthalten. Prüfe wichtige Entscheidungen selbst.</p><p class="hidden shrink-0 sm:block">Enter senden · Shift + Enter neue Zeile</p></div>

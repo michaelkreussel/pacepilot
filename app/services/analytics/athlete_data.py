@@ -3,6 +3,7 @@ from datetime import date, datetime, timedelta
 
 from sqlalchemy.orm import Session
 
+from app.repositories.activities import list_activities_on_or_before
 from app.repositories.health import find_health_day
 from app.repositories.workouts import workouts_between
 from app.services.analytics.fitness_trends import (
@@ -18,6 +19,13 @@ from app.services.analytics.health_trends import (
     get_health_trends,
     get_hrv_baseline,
 )
+from app.services.analytics.running_baseline import RunningBaseline, get_running_baseline
+from app.services.analytics.running_intensity import (
+    PerformanceAnchorInput,
+    RunningShadowAnalysis,
+    build_running_shadow_analysis,
+)
+from app.services.analytics.subjective_feedback import effective_activity_feedback
 from app.services.analytics.training_trends import (
     ActivityDetails,
     RecentWorkout,
@@ -88,6 +96,23 @@ class UpcomingWorkout:
     distance_meters: float | None
 
 
+@dataclass(frozen=True)
+class ActivityFeedbackSummary:
+    activity_id: int
+    started_at: datetime
+    name: str
+    effort: float | None
+    effort_source: str | None
+    feel: int | None
+    feel_source: str | None
+
+
+@dataclass(frozen=True)
+class SubjectiveContext:
+    as_of: date
+    recent_activity_feedback: tuple[ActivityFeedbackSummary, ...]
+
+
 class AthleteDataService:
     """Compact deterministic athlete context for UI and future coach consumers."""
 
@@ -152,6 +177,41 @@ class AthleteDataService:
     def get_activity_details(self, activity_id: int) -> ActivityDetails | None:
         return get_activity_details(self.session, self.user_id, activity_id, as_of=self.as_of)
 
+    def get_running_baseline(self) -> RunningBaseline:
+        return get_running_baseline(self.session, self.user_id, as_of=self.as_of)
+
+    def get_running_shadow_analysis(
+        self, *, performance_anchors: tuple[PerformanceAnchorInput, ...] = ()
+    ) -> RunningShadowAnalysis:
+        baseline = self.get_running_baseline()
+        return build_running_shadow_analysis(
+            self.session,
+            self.user_id,
+            baseline,
+            performance_anchors=performance_anchors,
+        )
+
+    def get_subjective_context(self, *, activity_limit: int = 5) -> SubjectiveContext:
+        through = datetime.combine(self.as_of, datetime.max.time())
+        activities = list_activities_on_or_before(
+            self.session, self.user_id, through, activity_limit
+        )
+        feedback = effective_activity_feedback(self.session, self.user_id, activities)
+        recent = tuple(
+            ActivityFeedbackSummary(
+                activity.id,
+                activity.started_at,
+                activity.name,
+                feedback[activity.id].effort,
+                feedback[activity.id].effort_source,
+                feedback[activity.id].feel,
+                feedback[activity.id].feel_source,
+            )
+            for activity in activities
+            if feedback[activity.id].effort is not None or feedback[activity.id].feel is not None
+        )
+        return SubjectiveContext(self.as_of, recent)
+
     def get_health_day(self, day: date) -> HealthDaySummary | None:
         health = find_health_day(self.session, self.user_id, day)
         if health is None:
@@ -199,7 +259,7 @@ class AthleteDataService:
         for workout in workouts_between(self.session, self.user_id, self.as_of, end):
             if workout.scheduled_for is None:
                 continue
-            metrics = workout_metrics(workout.definition_model)
+            metrics = workout_metrics(workout.definition)
             upcoming.append(
                 UpcomingWorkout(
                     workout_id=workout.id,

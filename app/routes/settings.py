@@ -11,11 +11,15 @@ from sqlalchemy import select
 from app.auth import CurrentUser
 from app.database import SessionDep
 from app.jobs.scheduler import queue_account_sync
-from app.models import GarminAccount, SyncEvent, SyncRun
+from app.models import GarminAccount, SyncEvent, SyncRun, Workout, WorkoutGarminOperation
 from app.models.user import utcnow
 from app.onboarding import require_notice_acknowledged
 from app.repositories.users import get_or_create_garmin_account
-from app.services.garmin.account_data import delete_garmin_data, disconnect_garmin_account
+from app.services.garmin.account_data import (
+    delete_garmin_data,
+    disconnect_garmin_account,
+    record_connected_principal,
+)
 from app.services.garmin.client import (
     GarminMfaExpiredError,
     GarminUnavailableError,
@@ -27,6 +31,7 @@ from app.services.garmin.client import (
 )
 from app.services.garmin.locks import GarminAccountBusyError
 from app.services.garmin.sync import METRIC_LABELS, rate_limit_cooldown_remaining
+from app.services.planning.feedback_service import FeedbackService
 from app.web import context, templates
 
 router = APIRouter(prefix="/settings", dependencies=[Depends(require_notice_acknowledged)])
@@ -96,6 +101,18 @@ def _sync_view(
                 event = latest_by_resource.get(str(metric["key"]))
                 if event is not None:
                     metric["status"] = event.status
+    unresolved_operations = list(
+        session.scalars(
+            select(WorkoutGarminOperation)
+            .join(Workout, Workout.id == WorkoutGarminOperation.workout_id)
+            .where(
+                Workout.user_id == account.user_id,
+                WorkoutGarminOperation.status.in_({"pending", "unknown"}),
+            )
+            .order_by(WorkoutGarminOperation.created_at.desc())
+            .limit(20)
+        )
+    )
     return {
         "account": account,
         "sync_run": sync_run,
@@ -109,6 +126,7 @@ def _sync_view(
         "current_metrics": current_metrics,
         "metric_labels": METRIC_LABELS,
         "cooldown_seconds": rate_limit_cooldown_remaining(session, account),
+        "unresolved_operations": unresolved_operations,
     }
 
 
@@ -133,6 +151,7 @@ def settings_page(
             account.sync_status = "not_connected"
             session.commit()
     values = _sync_view(session, account, _latest_sync(session, user.id))
+    feedback_service = FeedbackService(session, user)
     return templates.TemplateResponse(
         request,
         "settings.html",
@@ -142,6 +161,8 @@ def settings_page(
             error=error,
             notice=notice,
             mfa_required=mfa_required,
+            pre_session_feedback=feedback_service.all_pre_session(),
+            post_session_feedback=feedback_service.all_post_session(),
             **values,
         ),
     )
@@ -264,6 +285,7 @@ def connect_account(
         session.commit()
         return RedirectResponse("/settings", status_code=303)
 
+    record_connected_principal(session, account, normalized_email)
     account.email = normalized_email
     account.connected_at = datetime.now(UTC).replace(tzinfo=None)
     account.sync_status = "connected"
@@ -306,6 +328,7 @@ def verify_garmin_mfa(
         )
 
     request.session.pop(GARMIN_MFA_SESSION_KEY, None)
+    record_connected_principal(session, account, email)
     account.email = email
     account.connected_at = datetime.now(UTC).replace(tzinfo=None)
     account.sync_status = "connected"

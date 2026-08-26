@@ -84,7 +84,9 @@ def _filtered_activity_query(
 
 def find_activity(session: Session, user_id: int, activity_id: int) -> Activity | None:
     return session.scalar(
-        select(Activity).where(Activity.user_id == user_id, Activity.id == activity_id)
+        select(Activity)
+        .options(selectinload(Activity.zones))
+        .where(Activity.user_id == user_id, Activity.id == activity_id)
     )
 
 

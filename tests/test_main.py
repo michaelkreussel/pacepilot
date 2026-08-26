@@ -1,10 +1,15 @@
 from pathlib import Path
 from typing import Any
+from uuid import UUID, uuid4
 
 import pytest
+from fastapi import FastAPI
+from fastapi.responses import PlainTextResponse
+from fastapi.testclient import TestClient
 
 from app import main as main_module
 from app.config import get_settings
+from app.http_security import RequestIdMiddleware
 
 
 @pytest.mark.asyncio
@@ -50,3 +55,41 @@ async def test_lifespan_aborts_before_scheduler_when_migration_fails(
             pass
 
     assert not started
+
+
+def test_request_id_is_generated_for_every_response(client: TestClient) -> None:
+    response = client.get("/api/health")
+
+    assert str(UUID(response.headers["X-Request-ID"])) == response.headers["X-Request-ID"]
+
+
+def test_valid_request_id_is_preserved(client: TestClient) -> None:
+    request_id = str(uuid4())
+
+    response = client.get("/api/health", headers={"X-Request-ID": request_id})
+
+    assert response.headers["X-Request-ID"] == request_id
+
+
+def test_invalid_request_id_is_replaced_on_error_response(client: TestClient) -> None:
+    response = client.get("/does-not-exist", headers={"X-Request-ID": "not-a-uuid"})
+
+    assert response.status_code == 404
+    assert response.headers["X-Request-ID"] != "not-a-uuid"
+    assert str(UUID(response.headers["X-Request-ID"])) == response.headers["X-Request-ID"]
+
+
+def test_unhandled_error_response_includes_request_id() -> None:
+    error_app = FastAPI()
+    error_app.add_middleware(RequestIdMiddleware)
+    error_app.add_exception_handler(Exception, main_module.unhandled_exception)
+
+    @error_app.get("/boom", response_class=PlainTextResponse)
+    def boom() -> str:
+        raise RuntimeError("boom")
+
+    with TestClient(error_app, raise_server_exceptions=False) as error_client:
+        response = error_client.get("/boom")
+
+    assert response.status_code == 500
+    assert str(UUID(response.headers["X-Request-ID"])) == response.headers["X-Request-ID"]

@@ -1,4 +1,4 @@
-function workoutBuilder(initialDefinition, initialSport) {
+function workoutBuilder(initialDefinition, initialSport, initialDefinitionVersion = 1) {
   const clone = (value) => JSON.parse(JSON.stringify(value));
   const definition = clone(initialDefinition);
   const expanded = [];
@@ -6,6 +6,7 @@ function workoutBuilder(initialDefinition, initialSport) {
 
   return {
     definition,
+    definitionVersion: Number(initialDefinitionVersion) || 1,
     sport: initialSport,
     expanded,
     dragSource: null,
@@ -17,14 +18,25 @@ function workoutBuilder(initialDefinition, initialSport) {
     serializedDefinition() {
       return JSON.stringify(this.definition);
     },
+    promoteToV2() {
+      if (this.definitionVersion === 2) return;
+      const promoteBlocks = (blocks) => blocks.forEach((block) => {
+        if (block.kind === "repeat") promoteBlocks(block.children);
+        else if (!Array.isArray(block.instructions)) block.instructions = [];
+      });
+      promoteBlocks(this.definition.blocks);
+      this.definitionVersion = 2;
+    },
     newStep(stepType = "interval") {
-      return {
+      const step = {
         id: makeId(),
         kind: "step",
         step_type: stepType,
         end: { type: "time", seconds: stepType === "recovery" ? 60 : 300 },
         target: { type: "none" },
       };
+      if (this.definitionVersion === 2) step.instructions = [];
+      return step;
     },
     addStep(stepType, parentId = null) {
       const step = this.newStep(stepType);
@@ -174,8 +186,17 @@ function workoutBuilder(initialDefinition, initialSport) {
         pace_range: { type: "pace_range", fastest_seconds_per_km: 300, slowest_seconds_per_km: 330 },
         heart_rate_range: { type: "heart_rate_range", lower_bpm: 120, upper_bpm: 150 },
         heart_rate_zone: { type: "heart_rate_zone", zone: 2 },
+        rpe_range: { type: "rpe_range", lower_rpe: 2, upper_rpe: 3 },
       };
+      if (type === "rpe_range") this.promoteToV2();
       step.target = targets[type];
+    },
+    instructionText(step) {
+      return (step.instructions || []).join("\n");
+    },
+    setInstructions(step, value) {
+      this.promoteToV2();
+      step.instructions = value.split("\n").map((line) => line.trim()).filter(Boolean);
     },
     minutes(step) {
       return Math.round((step.end.seconds / 60) * 10) / 10;
@@ -203,7 +224,11 @@ function workoutBuilder(initialDefinition, initialSport) {
         ? `Pace ${this.formatPace(block.target.fastest_seconds_per_km)}–${this.formatPace(block.target.slowest_seconds_per_km)}`
         : block.target.type === "heart_rate_range"
           ? `HF ${block.target.lower_bpm}–${block.target.upper_bpm} bpm`
-          : block.target.type === "heart_rate_zone" ? `HF-Zone ${block.target.zone}` : "Kein Ziel";
+          : block.target.type === "heart_rate_zone"
+            ? `HF-Zone ${block.target.zone}`
+            : block.target.type === "rpe_range"
+              ? `RPE ${block.target.lower_rpe}–${block.target.upper_rpe}/10`
+              : "Kein Ziel";
       return `${end} · ${target}`;
     },
     leafCount() {

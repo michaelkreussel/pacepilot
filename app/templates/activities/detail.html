@@ -9,6 +9,8 @@
 {% block content %}
 <a class="inline-flex text-sm font-semibold text-primary transition hover:text-primary-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" href="/activities">← Alle Aktivitäten</a>
 <div class="mb-8 mt-6"><div><p class="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">{{ activity.activity_type|replace('_', ' ') }}</p><h1 class="mt-2 font-display text-3xl font-semibold tracking-tight">{{ activity.name }}</h1><p class="mt-2 text-xs text-muted-foreground">{{ activity.started_at|datetime }}</p></div></div>
+{% if error %}<div class="mb-4 rounded-lg border border-danger/25 bg-danger-subtle px-4 py-3 text-sm text-danger-emphasis" role="alert">{{ error }}</div>{% endif %}
+{% if notice %}<div class="mb-4 rounded-lg border border-success/25 bg-success-subtle px-4 py-3 text-sm text-success-emphasis" role="status">{{ notice }}</div>{% endif %}
 
 {% set summary = activity_data.summary %}
 <section class="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-4">
@@ -26,6 +28,25 @@
   {% if activity.elevation_gain_m and not activity_data.is_strength %}<article class="rounded-xl border border-border bg-surface p-4 sm:p-5"><span class="text-xs text-muted-foreground">Höhenmeter</span><strong class="mt-3 block font-display text-xl font-semibold tracking-tight">{{ activity.elevation_gain_m|round|int }} m</strong></article>{% endif %}
 </section>
 
+<section class="mt-6 rounded-xl border border-border bg-surface p-4 sm:p-5" aria-labelledby="post-session-title">
+  <p class="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">Nach der Einheit</p>
+  <h2 class="mt-1 text-lg font-semibold" id="post-session-title">Wie lief dein Training?</h2>
+  <p class="mt-1 max-w-3xl text-sm leading-6 text-muted-foreground">Garmin-Feedback wird automatisch verwendet. Fehlt es, kannst du die zwei Angaben hier ergänzen.</p>
+  <div class="mt-4 grid gap-3 sm:grid-cols-2">
+    <div class="rounded-lg bg-surface-muted p-4"><div class="flex items-center justify-between gap-3"><span class="text-xs text-muted-foreground">Anstrengung</span>{% if effective_feedback.effort_source %}<span class="rounded-full bg-surface px-2 py-1 text-[0.6875rem] font-semibold text-muted-foreground">{{ 'Garmin' if effective_feedback.effort_source == 'garmin' else 'Manuell' }}</span>{% endif %}</div><strong class="mt-2 block font-display text-2xl font-semibold">{{ effective_feedback.effort|round(1) if effective_feedback.effort is not none else 'Noch offen' }}{% if effective_feedback.effort is not none %}<small class="text-sm text-muted-foreground"> / 10</small>{% endif %}</strong></div>
+    <div class="rounded-lg bg-surface-muted p-4"><div class="flex items-center justify-between gap-3"><span class="text-xs text-muted-foreground">Gefühl</span>{% if effective_feedback.feel_source %}<span class="rounded-full bg-surface px-2 py-1 text-[0.6875rem] font-semibold text-muted-foreground">{{ 'Garmin' if effective_feedback.feel_source == 'garmin' else 'Manuell' }}</span>{% endif %}</div><strong class="mt-2 block text-lg font-semibold">{{ {1:'😞 Sehr schlecht',2:'🙁 Schlecht',3:'😐 Okay',4:'🙂 Gut',5:'😄 Sehr gut'}.get(effective_feedback.feel, 'Noch offen') }}</strong></div>
+  </div>
+  {% if effective_feedback.effort_source != 'garmin' or effective_feedback.feel_source != 'garmin' %}
+  <details class="group mt-4 border-t border-border pt-4" {{ 'open' if effective_feedback.effort is none or effective_feedback.feel is none else '' }}><summary class="cursor-pointer list-none text-sm font-semibold text-primary marker:hidden [&::-webkit-details-marker]:hidden">{{ 'Manuelle Angaben ändern' if effective_feedback.effort_source == 'manual' or effective_feedback.feel_source == 'manual' else 'Feedback ergänzen' }} <span aria-hidden="true">+</span></summary>
+    <form class="subjective-feedback-form mt-4 grid gap-5" method="post" action="/activities/{{ activity.id }}/feedback/post-session">{{ csrf_field() }}
+      {% if effective_feedback.effort_source != 'garmin' %}<fieldset><legend class="text-sm font-semibold">Wie anstrengend war es?</legend><div class="mt-2 grid grid-cols-5 gap-2 sm:grid-cols-10">{% for value in range(1, 11) %}<label class="cursor-pointer"><input class="peer sr-only" type="radio" name="session_rpe" value="{{ value }}" {{ 'checked' if effective_feedback.effort == value else '' }} required><span class="grid min-h-10 place-items-center rounded-lg border border-input bg-surface text-sm font-semibold peer-checked:border-primary peer-checked:bg-primary peer-checked:text-primary-foreground">{{ value }}</span></label>{% endfor %}</div></fieldset>{% endif %}
+      {% if effective_feedback.feel_source != 'garmin' %}<fieldset><legend class="text-sm font-semibold">Wie hast du dich gefühlt?</legend><div class="mt-2 grid gap-2 sm:grid-cols-5">{% for value, icon, label in [(1,'😞','Sehr schlecht'),(2,'🙁','Schlecht'),(3,'😐','Okay'),(4,'🙂','Gut'),(5,'😄','Sehr gut')] %}<label class="cursor-pointer"><input class="peer sr-only" type="radio" name="overall_feel" value="{{ value }}" {{ 'checked' if effective_feedback.feel == value else '' }} required><span class="flex min-h-16 items-center justify-center gap-2 rounded-lg border border-input bg-surface px-2 text-center text-sm font-semibold peer-checked:border-primary peer-checked:bg-primary-subtle peer-checked:text-primary-emphasis"><span class="text-xl" aria-hidden="true">{{ icon }}</span>{{ label }}</span></label>{% endfor %}</div></fieldset>{% endif %}
+      <button class="inline-flex w-fit items-center justify-center rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:bg-primary-hover" type="submit">Feedback speichern</button>
+    </form>
+  </details>
+  {% endif %}
+</section>
+
 {% set has_detailed_stats = (activity_data.is_running and summary.timer_time is not none) or summary.average_cadence is not none or summary.average_power is not none or (activity_data.is_running and (summary.stride_length_cm is not none or summary.ground_contact_ms is not none or summary.vertical_oscillation_cm is not none or summary.vertical_ratio is not none)) %}
 {% if has_detailed_stats %}
 <details class="group mt-4 overflow-hidden rounded-xl border border-border bg-surface">
@@ -40,6 +61,28 @@
     {% if activity_data.is_running and summary.vertical_ratio is not none %}<article><span class="text-xs text-muted-foreground">Ø Vertikales Verhältnis</span><strong class="mt-2 block text-sm font-semibold">{{ summary.vertical_ratio|round(1) }} %</strong></article>{% endif %}
   </section>
 </details>
+{% endif %}
+
+{% if activity_zone_groups %}
+<section class="mt-6">
+  <div class="mb-4 flex flex-col items-start justify-between gap-2 sm:flex-row sm:items-end"><div><p class="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">Garmin-Zonen</p><h2 class="mt-1 text-lg font-semibold">Herzfrequenzzonen dieser Aktivität</h2></div><span class="text-xs text-muted-foreground">Zeit und Anteil der erfassten Zonenzeit</span></div>
+  {% if not activity_zones_complete %}<p class="mb-4 rounded-lg border border-warning-border bg-warning-subtle px-3 py-2 text-sm text-warning-foreground">Die Zonen dieser Aktivität werden noch vervollständigt. Die angezeigten Werte sind vorläufig.</p>{% endif %}
+  {% for group in activity_zone_groups %}
+  <article class="rounded-xl border border-border bg-surface p-4 sm:p-5">
+    <div class="mb-4 flex items-baseline justify-between gap-3"><h3 class="font-semibold">{{ group.title }}</h3><span class="text-xs text-muted-foreground">{{ group.total_seconds|precise_duration }}</span></div>
+    <div class="space-y-4">
+      {% for zone in group.zones %}
+      <div>
+        <div class="mb-1.5 flex items-end justify-between gap-4 text-sm"><span><strong class="font-semibold">Zone {{ zone.number }}</strong><small class="ml-2 text-xs text-muted-foreground">{{ zone.range }}</small></span><span class="shrink-0 text-right"><strong class="font-semibold">{{ zone.seconds|precise_duration }}</strong><small class="ml-2 text-xs text-muted-foreground">{{ zone.percent|string|replace('.', ',') }} %</small></span></div>
+        <progress class="zone-progress block h-2 w-full overflow-hidden rounded-full" value="{{ zone.seconds }}" max="{{ group.total_seconds or 1 }}" aria-label="Herzfrequenzzone {{ zone.number }}: {{ zone.percent|string|replace('.', ',') }} Prozent"></progress>
+      </div>
+      {% endfor %}
+    </div>
+  </article>
+  {% endfor %}
+</section>
+{% elif not activity_zones_complete and (activity.min_hr is not none or activity.average_hr is not none or activity.max_hr is not none) %}
+<section class="mt-6 rounded-xl border border-warning-border bg-warning-subtle p-4 sm:p-5"><p class="text-xs font-semibold uppercase tracking-[0.14em] text-warning-foreground">Garmin-Zonen</p><h2 class="mt-2 text-lg font-semibold">HF-Zonendaten werden vervollständigt</h2><p class="mt-2 text-sm leading-6 text-warning-foreground">Beim nächsten Garmin-Sync werden die verfügbaren Herzfrequenzzonen für diese Aktivität ergänzt.</p></section>
 {% endif %}
 
 {% set has_charts = activity_data.series.heart_rate or activity_data.series.speed or activity_data.series.cadence %}

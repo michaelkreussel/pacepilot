@@ -12,11 +12,21 @@ from app.models import (
     ActivityExerciseSet,
     ActivitySplit,
     ActivityZone,
+    GarminAccount,
     GarminSyncState,
     User,
+    Workout,
+    WorkoutGarminBinding,
+    WorkoutGarminRemoteIdentity,
 )
-from app.services.garmin.activity_backfill import _parse_datetime, sync_activity_history
+from app.services.garmin.activity_backfill import (
+    _map_activity_summary,
+    _map_detail_summary,
+    _parse_datetime,
+    sync_activity_history,
+)
 from app.services.garmin.activity_details import load_activity_details
+from app.services.planning.workout_definition import default_definition
 
 
 def _activity(
@@ -61,6 +71,26 @@ def _activity(
 def test_provider_timestamps_are_normalized_to_naive_utc() -> None:
     assert _parse_datetime(0) == datetime(1970, 1, 1)
     assert _parse_datetime("2026-08-08T12:00:00+02:00") == datetime(2026, 8, 8, 10)
+
+
+def test_activity_summary_clears_removed_garmin_feedback() -> None:
+    activity = Activity(
+        user_id=1,
+        garmin_activity_id="1",
+        name="Run",
+        activity_type="running",
+        started_at=datetime(2026, 8, 8, 10),
+        workout_rpe=8,
+        workout_feel=4,
+    )
+
+    _map_activity_summary(
+        activity,
+        _activity(1, "2026-08-08 10:00:00", "running", name="Run"),
+    )
+
+    assert activity.workout_rpe is None
+    assert activity.workout_feel is None
 
 
 class FakeActivityGarmin:
@@ -173,6 +203,55 @@ def _user(session: Session, name: str = "Activity") -> User:
     return user
 
 
+def test_activity_matches_removed_remote_identity_for_own_account(
+    session_factory: sessionmaker[Session],
+) -> None:
+    with session_factory() as session:
+        users = [_user(session, name) for name in ("Owner", "Other")]
+        for user in users:
+            account = GarminAccount(user_id=user.id)
+            workout = Workout(
+                user_id=user.id,
+                name="Run",
+                sport="running",
+                status="published",
+                definition=default_definition().model_dump(mode="json"),
+            )
+            session.add_all([account, workout])
+            session.flush()
+            binding = WorkoutGarminBinding(workout_id=workout.id)
+            session.add(binding)
+            session.flush()
+            identity = WorkoutGarminRemoteIdentity(
+                binding_id=binding.id,
+                garmin_account_id=account.id,
+                garmin_workout_id="999",
+                status="removed",
+                removed_at=datetime(2026, 8, 20),
+            )
+            session.add(identity)
+        session.flush()
+        activity = Activity(
+            user_id=users[0].id,
+            garmin_activity_id="activity-1",
+            name="Run",
+            activity_type="running",
+            started_at=datetime(2026, 8, 22),
+        )
+        session.add(activity)
+        session.flush()
+
+        _map_detail_summary(
+            session,
+            activity,
+            {"metadataDTO": {"associatedWorkoutId": 999}},
+        )
+
+        owner_workout = session.scalar(select(Workout).where(Workout.user_id == users[0].id))
+        assert owner_workout is not None
+        assert activity.workout_id == owner_workout.id
+
+
 def test_activity_backfill_imports_details_and_skips_unchanged(
     session_factory: sessionmaker[Session], monkeypatch: Any, tmp_path: Path
 ) -> None:
@@ -202,9 +281,10 @@ def test_activity_backfill_imports_details_and_skips_unchanged(
         assert recent is not None
         assert recent.vo2max == 54.0
         assert recent.workout_rpe == 5
-        assert recent.workout_feel == 75
+        assert recent.workout_feel == 4
         assert recent.details_complete is True
         assert recent.splits_complete is True
+        assert recent.zones_complete is True
         assert recent.raw_file is not None and f"user-{user.id}" in recent.raw_file
         assert recent.details_file is not None and Path(recent.details_file).is_file()
         normalized = load_activity_details(
@@ -310,6 +390,7 @@ def test_initial_activity_sync_stores_summaries_then_enriches_with_a_budget(
         assert initial.enrichment_deferred == 3
         assert not any(call[0] == "details" for call in client.calls)
         assert all(not activity.details_complete for activity in session.scalars(select(Activity)))
+        assert all(not activity.zones_complete for activity in session.scalars(select(Activity)))
 
         client.calls.clear()
         follow_up = sync_activity_history(
@@ -326,6 +407,45 @@ def test_initial_activity_sync_stores_summaries_then_enriches_with_a_budget(
         assert [call for call in client.calls if call[0] == "details"] == [("details", "3")]
         enriched = session.scalar(select(Activity).where(Activity.garmin_activity_id == "3"))
         assert enriched is not None and enriched.details_complete is True
+
+
+def test_activity_sync_repairs_missing_zone_enrichment_without_refetching_details(
+    session_factory: sessionmaker[Session], monkeypatch: Any, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(get_settings(), "data_dir", tmp_path)
+    client = FakeActivityGarmin()
+
+    with session_factory() as session:
+        user = _user(session)
+        sync_activity_history(
+            session,
+            client,
+            user.id,
+            delay=0,
+            initial_enrichment_limit=1000,
+        )
+        activity = session.scalar(select(Activity).where(Activity.garmin_activity_id == "3"))
+        assert activity is not None
+        activity.zones.clear()
+        activity.zones_complete = False
+        session.commit()
+        client.calls.clear()
+
+        result = sync_activity_history(
+            session,
+            client,
+            user.id,
+            delay=0,
+            incremental_enrichment_limit=1,
+        )
+
+        session.refresh(activity)
+        assert result.activities_enriched == 1
+        assert activity.zones_complete is True
+        assert len(activity.zones) == 10
+        assert ("hr_zones", "3") in client.calls
+        assert ("power_zones", "3") in client.calls
+        assert not any(call[0] == "details" for call in client.calls)
 
 
 def test_changed_summary_invalidates_details_when_enrichment_is_deferred(
@@ -360,6 +480,7 @@ def test_changed_summary_invalidates_details_when_enrichment_is_deferred(
         assert changed is not None
         assert changed.details_complete is False
         assert changed.splits_complete is False
+        assert changed.zones_complete is False
         assert changed.details_file is None
         assert changed.splits == []
         assert changed.zones == []

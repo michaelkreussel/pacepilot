@@ -1,0 +1,220 @@
+from datetime import date, datetime, timedelta
+
+import pytest
+from sqlalchemy.exc import IntegrityError
+
+from app.models import (
+    Activity,
+    AthleteAvailability,
+    AthleteGoal,
+    AthletePlanningProfile,
+    GarminSyncState,
+    PerformanceAnchor,
+    User,
+)
+from app.services.analytics import AthleteDataService
+from app.services.analytics.running_intensity import PerformanceAnchorInput
+
+
+def _user(session, name: str = "Planner") -> User:
+    user = User(display_name=name)
+    session.add(user)
+    session.flush()
+    return user
+
+
+def _history(session, user_id: int, as_of: date) -> None:
+    for index, age in enumerate((0, 7, 14, 21, 28, 35)):
+        session.add(
+            Activity(
+                user_id=user_id,
+                garmin_activity_id=f"planning-run-{index}",
+                name=f"Run {index}",
+                activity_type="running",
+                started_at=datetime.combine(as_of - timedelta(days=age), datetime.min.time()),
+                duration_s=2400,
+                distance_m=6000,
+                aerobic_training_effect=2.0,
+                workout_rpe=3,
+            )
+        )
+    session.add(
+        GarminSyncState(
+            user_id=user_id,
+            resource="activities",
+            status="ok",
+            backfill_complete=True,
+            oldest_synced_date=as_of - timedelta(days=365),
+            newest_synced_date=as_of,
+        )
+    )
+    session.flush()
+
+
+def test_planning_inputs_are_user_scoped_and_validated(session_factory) -> None:
+    with session_factory() as session:
+        first = _user(session, "First")
+        second = _user(session, "Second")
+        session.add_all(
+            [
+                AthletePlanningProfile(
+                    user_id=first.id,
+                    experience_level="intermediate",
+                    preferred_long_run_weekday=5,
+                ),
+                AthletePlanningProfile(user_id=second.id, experience_level=None),
+                AthleteGoal(
+                    user_id=first.id,
+                    event_type="10k",
+                    event_name="Stadtlauf",
+                    target_date=date(2026, 10, 11),
+                ),
+                AthleteGoal(user_id=first.id, event_type="half_marathon"),
+                AthleteGoal(user_id=second.id, event_type="general_fitness"),
+                AthleteAvailability(
+                    user_id=first.id, weekday=0, available=True, available_minutes=60
+                ),
+                AthleteAvailability(
+                    user_id=first.id, weekday=5, available=True, available_minutes=120
+                ),
+                AthleteAvailability(user_id=second.id, weekday=0, available=False),
+                PerformanceAnchor(
+                    user_id=first.id,
+                    kind="race",
+                    distance_m=10_000,
+                    duration_s=2_700,
+                    achieved_on=date(2026, 6, 15),
+                ),
+                PerformanceAnchor(
+                    user_id=first.id,
+                    kind="time_trial",
+                    distance_m=5_000,
+                    duration_s=1_350,
+                    achieved_on=date(2026, 7, 20),
+                    reliable=False,
+                    notes="Kopfwind",
+                ),
+            ]
+        )
+        session.commit()
+
+        assert session.get(AthletePlanningProfile, second.id).experience_level is None
+        goals_first = session.query(AthleteGoal).filter(AthleteGoal.user_id == first.id).all()
+        assert len(goals_first) == 2
+        anchors_second = (
+            session.query(PerformanceAnchor).filter(PerformanceAnchor.user_id == second.id).all()
+        )
+        assert anchors_second == []
+
+        session.add(
+            AthleteAvailability(user_id=first.id, weekday=0, available=True, available_minutes=45)
+        )
+        with pytest.raises(IntegrityError):
+            session.commit()
+        session.rollback()
+
+    for invalid in (
+        lambda: AthleteAvailability(user_id=1, weekday=7, available=False),
+        lambda: AthleteAvailability(user_id=1, weekday=0, available=True),
+        lambda: AthleteAvailability(user_id=1, weekday=0, available=True, available_minutes=0),
+        lambda: AthleteAvailability(user_id=1, weekday=0, available=True, available_minutes=2000),
+        lambda: AthleteGoal(user_id=1, event_type="ultra"),
+        lambda: AthleteGoal(user_id=1, event_type="10k", status="deleted"),
+        lambda: AthletePlanningProfile(user_id=1, preferred_long_run_weekday=8),
+        lambda: AthletePlanningProfile(user_id=1, experience_level="elite"),
+        lambda: PerformanceAnchor(
+            user_id=1,
+            kind="swim",
+            distance_m=1000,
+            duration_s=1000,
+            achieved_on=date(2026, 1, 1),
+        ),
+        lambda: PerformanceAnchor(
+            user_id=1,
+            kind="race",
+            distance_m=0,
+            duration_s=1000,
+            achieved_on=date(2026, 1, 1),
+        ),
+        lambda: PerformanceAnchor(
+            user_id=1,
+            kind="race",
+            distance_m=1000,
+            duration_s=-5,
+            achieved_on=date(2026, 1, 1),
+        ),
+    ):
+        with session_factory() as session:
+            session.add(invalid())
+            with pytest.raises(IntegrityError):
+                session.commit()
+
+
+def test_persisted_anchors_feed_intensity_guidance(session_factory) -> None:
+    as_of = date.today()
+    with session_factory() as session:
+        user = _user(session)
+        _history(session, user.id, as_of)
+        session.add(
+            PerformanceAnchor(
+                user_id=user.id,
+                kind="race",
+                distance_m=5_000,
+                duration_s=1_500,
+                achieved_on=as_of - timedelta(days=30),
+            )
+        )
+        session.commit()
+
+        anchors = session.query(PerformanceAnchor).filter_by(user_id=user.id).all()
+        shadow = AthleteDataService(session, user.id, as_of=as_of).get_running_shadow_analysis(
+            performance_anchors=tuple(
+                PerformanceAnchorInput(
+                    kind=anchor.kind,
+                    achieved_on=anchor.achieved_on,
+                    distance_m=anchor.distance_m,
+                    duration_s=anchor.duration_s,
+                    reliable=anchor.reliable,
+                )
+                for anchor in anchors
+            )
+        )
+
+        assert shadow.intensity.mode == "pace_anchor"
+        assert shadow.intensity.pace_anchor is not None
+        assert shadow.intensity.pace_anchor.source == "race_performance"
+        assert shadow.intensity.pace_anchor.speed_mps == pytest.approx(5000 / 1500, abs=0.01)
+
+
+def test_stale_anchor_is_ignored_with_warning(session_factory) -> None:
+    as_of = date.today()
+    with session_factory() as session:
+        user = _user(session)
+        _history(session, user.id, as_of)
+        session.add(
+            PerformanceAnchor(
+                user_id=user.id,
+                kind="race",
+                distance_m=5_000,
+                duration_s=1_500,
+                achieved_on=as_of - timedelta(days=200),
+            )
+        )
+        session.commit()
+        anchors = session.query(PerformanceAnchor).filter_by(user_id=user.id).all()
+
+        shadow = AthleteDataService(session, user.id, as_of=as_of).get_running_shadow_analysis(
+            performance_anchors=tuple(
+                PerformanceAnchorInput(
+                    kind=anchor.kind,
+                    achieved_on=anchor.achieved_on,
+                    distance_m=anchor.distance_m,
+                    duration_s=anchor.duration_s,
+                    reliable=anchor.reliable,
+                )
+                for anchor in anchors
+            )
+        )
+
+        assert shadow.intensity.pace_anchor is None
+        assert "performance_anchor_outside_180_day_window" in shadow.intensity.warnings

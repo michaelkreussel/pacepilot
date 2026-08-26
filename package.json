@@ -1,0 +1,11 @@
+{
+  "name": "pacepilot",
+  "private": true,
+  "scripts": {
+    "build:css": "tailwindcss -i ./app/static/css/tailwind.input.css -o ./app/static/css/tailwind.css --minify"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "4.3.3",
+    "tailwindcss": "4.3.3"
+  }
+}

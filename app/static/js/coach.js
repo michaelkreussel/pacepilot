@@ -116,7 +116,10 @@
     answer.className = "whitespace-pre-wrap text-sm leading-6 text-foreground";
     answer.dataset.answerText = "";
 
-    body.append(activity, answer);
+    const artifacts = document.createElement("div");
+    artifacts.dataset.proposalArtifacts = "";
+
+    body.append(activity, answer, artifacts);
     row.append(avatar, body);
     article.append(row);
     return {
@@ -125,6 +128,7 @@
       activityLog,
       activitySummary,
       answer,
+      artifacts,
       answerStarted: false,
       article,
       body,
@@ -197,7 +201,26 @@
     error.textContent = message;
   };
 
-  const handleEvent = (name, data, assistant) => {
+  const addProposal = async (assistant, data) => {
+    if (assistant.artifacts.querySelector(`[data-workout-id="${CSS.escape(String(data.workout_id))}"]`)) return;
+    if (typeof data.card_url !== "string" || !data.card_url.startsWith(`/coach/${conversationId}/runs/`)) return;
+    try {
+      const response = await fetch(data.card_url, { headers: { Accept: "text/html" } });
+      if (!response.ok || !response.headers.get("content-type")?.includes("text/html")) throw new Error();
+      const documentFragment = new DOMParser().parseFromString(await response.text(), "text/html");
+      const card = documentFragment.body.firstElementChild;
+      if (!card?.matches("[data-proposal-card]") || card.dataset.workoutId !== String(data.workout_id)) throw new Error();
+      assistant.artifacts.append(document.importNode(card, true));
+    } catch (_) {
+      const notice = document.createElement("p");
+      notice.className = "mt-2 text-xs text-warning-emphasis";
+      notice.setAttribute("role", "status");
+      notice.textContent = "Der Vorschlag wurde gespeichert. Lade den Chat neu, um die Karte zu öffnen.";
+      assistant.artifacts.append(notice);
+    }
+  };
+
+  const handleEvent = async (name, data, assistant) => {
     if (name === "status") {
       setActivityStatus(assistant, currentToolLabel(assistant) || data.label);
     } else if (name === "tool.started") {
@@ -214,6 +237,8 @@
       assistant.answer.append(document.createTextNode(data.text));
     } else if (name === "answer.completed") {
       finishActivity(assistant);
+    } else if (name === "proposal.created") {
+      await addProposal(assistant, data);
     } else if (name === "error") {
       failActivity(assistant, data.message);
     }
@@ -231,10 +256,14 @@
       }
       throw new Error(message);
     }
+    if (response.redirected || !response.headers.get("content-type")?.includes("text/event-stream")) {
+      throw new Error("Der Coach hat keine gültige Streaming-Antwort geliefert.");
+    }
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    let terminalEventReceived = false;
     while (true) {
       const { value, done } = await reader.read();
       buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
@@ -247,9 +276,15 @@
           if (line.startsWith("event:")) eventName = line.slice(6).trim();
           if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
         }
-        if (dataLines.length) handleEvent(eventName, JSON.parse(dataLines.join("\n")), assistant);
+        if (dataLines.length) {
+          if (["answer.completed", "error"].includes(eventName)) terminalEventReceived = true;
+           await handleEvent(eventName, JSON.parse(dataLines.join("\n")), assistant);
+        }
       }
       if (done) break;
+    }
+    if (!terminalEventReceived) {
+      throw new Error("Die Streaming-Antwort wurde vorzeitig beendet.");
     }
   };
 
@@ -282,7 +317,10 @@
       const response = await fetch(form.action, {
         method: "POST",
         body,
-        headers: { Accept: "text/event-stream" },
+        headers: {
+          Accept: "text/event-stream",
+          "X-CSRF-Token": form.elements.namedItem("_csrf_token").value,
+        },
       });
       await consumeEvents(response, assistant);
     } catch (error) {

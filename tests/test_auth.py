@@ -1,3 +1,4 @@
+import re
 from typing import Any
 
 from fastapi.responses import RedirectResponse
@@ -74,8 +75,15 @@ def test_logout_clears_session(unauthenticated_client: TestClient, monkeypatch: 
     fake_client = FakeGoogleClient()
     monkeypatch.setattr(oauth, "create_client", lambda _provider: fake_client)
     unauthenticated_client.get("/auth/google/callback")
+    page = unauthenticated_client.get("/onboarding")
+    match = re.search(r'name="_csrf_token" value="([^"]+)"', page.text)
+    assert match is not None
 
-    response = unauthenticated_client.post("/logout", follow_redirects=False)
+    response = unauthenticated_client.post(
+        "/logout",
+        headers={"X-CSRF-Token": match.group(1)},
+        follow_redirects=False,
+    )
 
     assert response.status_code == 303
     assert response.headers["location"] == "/login"
@@ -91,6 +99,13 @@ class RecordingClient:
         return RedirectResponse("https://example.com/authorize", status_code=302)
 
 
+def _csrf_header(client: TestClient) -> dict[str, str]:
+    page = client.get("/login")
+    match = re.search(r'<meta name="csrf-token" content="([^"]+)"', page.text)
+    assert match is not None
+    return {"X-CSRF-Token": match.group(1)}
+
+
 def test_oauth_login_uses_public_base_url_for_redirect_uri(
     unauthenticated_client: TestClient, monkeypatch: Any
 ) -> None:
@@ -102,7 +117,11 @@ def test_oauth_login_uses_public_base_url_for_redirect_uri(
         lambda provider: recording if provider == "google" else None,
     )
 
-    response = unauthenticated_client.get("/auth/google/login", follow_redirects=False)
+    response = unauthenticated_client.post(
+        "/auth/google/login",
+        headers=_csrf_header(unauthenticated_client),
+        follow_redirects=False,
+    )
 
     assert response.status_code == 302
     assert recording.redirect_uri == "https://example.com/auth/google/callback"
@@ -119,6 +138,10 @@ def test_oauth_login_redirect_uri_falls_back_to_request_url(
         lambda provider: recording if provider == "google" else None,
     )
 
-    unauthenticated_client.get("/auth/google/login", follow_redirects=False)
+    unauthenticated_client.post(
+        "/auth/google/login",
+        headers=_csrf_header(unauthenticated_client),
+        follow_redirects=False,
+    )
 
     assert recording.redirect_uri == "http://testserver/auth/google/callback"

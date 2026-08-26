@@ -1,0 +1,48 @@
+id: recovery_run
+version: 1.0.0
+status: active
+name: Regenerationslauf
+sport: running
+purpose: low_load_recovery
+intensity_domain: low
+rule_strength: heuristic
+eligibility:
+  min_consistent_running_weeks: 4
+  requirements:
+    - easy_running_is_habitual_and_recovery_supportive
+    - no_active_safety_stop
+contraindications:
+  - active_pain_affecting_gait
+  - fever_or_systemic_illness
+  - extra_running_day_is_not_habitual
+structure:
+  kind: continuous
+  duration_minutes: {minimum: 15, default: 25, maximum: 45}
+  rpe: {minimum: 1, maximum: 2}
+  session_rpe: {minimum: 1, maximum: 2}
+  instructions:
+    - Laufe bewusst sehr locker; Gehen oder ein Ruhetag sind gleichwertige Alternativen.
+    - Beende den Lauf, wenn er sich nicht erholsam anfühlt.
+progression_axes:
+  - duration
+weekly_frequency_cap: 4
+fallback_targets:
+  - rest_day
+  - easy_walk
+evidence_refs:
+  - E-TID-001
+  - E-TALK-TEST-001
+  - E-SRPE-001
+product_heuristic:
+  product_default: true
+  rationale: Recovery running is optional; eligibility and the exact duration range are conservative product defaults.
+  status: initial_product_default
+  reviewed_on: 2026-08-24
+garmin_capabilities:
+  time_steps: true
+  repeat_blocks: true
+  rpe_target: false
+  local_instructions: false
+  degradation:
+    - rpe_target_to_no_device_target
+    - instructions_remain_in_pacepilot

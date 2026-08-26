@@ -1,3 +1,4 @@
+import re
 from collections.abc import Generator
 from typing import Annotated
 
@@ -12,10 +13,30 @@ from app import main as main_module
 from app.auth import get_current_user
 from app.config import get_settings
 from app.database import Base, get_db
+from app.jobs import scheduler as scheduler_module
 from app.models import User
 from app.models.user import utcnow
+from app.rate_limits import limiter
+from app.services.garmin.health_backfill import GarminPacer
 
 app = main_module.app
+
+
+@pytest.fixture(autouse=True)
+def reset_garmin_pacer() -> Generator[None]:
+    GarminPacer._global_next_call_at = 0
+    GarminPacer._global_cooldown_until = 0
+    limiter.clear()
+    yield
+    GarminPacer._global_next_call_at = 0
+    GarminPacer._global_cooldown_until = 0
+    limiter.clear()
+
+
+def extract_csrf_token(html: str) -> str:
+    match = re.search(r'name="_csrf_token" value="([^"]+)"', html)
+    assert match is not None
+    return match.group(1)
 
 
 @pytest.fixture
@@ -28,7 +49,9 @@ def session_factory() -> Generator[sessionmaker[Session]]:
     Base.metadata.create_all(test_engine)
     factory = sessionmaker(bind=test_engine, expire_on_commit=False)
     yield factory
-    Base.metadata.drop_all(test_engine)
+    with test_engine.connect() as connection:
+        connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
+        Base.metadata.drop_all(connection)
     test_engine.dispose()
 
 
@@ -62,11 +85,16 @@ def client(
 
     previous_overrides = dict(app.dependency_overrides)
     monkeypatch.setattr(get_settings(), "scheduler_enabled", False)
+    monkeypatch.setattr(get_settings(), "garmin_call_delay_seconds", 0)
     monkeypatch.setattr(main_module, "upgrade_database", lambda: None)
+    monkeypatch.setattr(main_module, "SessionLocal", session_factory)
+    monkeypatch.setattr(scheduler_module, "SessionLocal", session_factory)
     app.dependency_overrides[get_db] = override_database
     app.dependency_overrides[get_current_user] = override_current_user
     try:
         with TestClient(app) as test_client:
+            page = test_client.get("/help")
+            test_client.headers["X-CSRF-Token"] = extract_csrf_token(page.text)
             yield test_client
     finally:
         app.dependency_overrides.clear()
@@ -84,6 +112,8 @@ def unauthenticated_client(
     previous_overrides = dict(app.dependency_overrides)
     monkeypatch.setattr(get_settings(), "scheduler_enabled", False)
     monkeypatch.setattr(main_module, "upgrade_database", lambda: None)
+    monkeypatch.setattr(main_module, "SessionLocal", session_factory)
+    monkeypatch.setattr(scheduler_module, "SessionLocal", session_factory)
     app.dependency_overrides[get_db] = override_database
     try:
         with TestClient(app) as test_client:

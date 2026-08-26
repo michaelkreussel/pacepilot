@@ -212,6 +212,9 @@ tempCodeRunnerFile.py
 # PacePilot runtime data
 /data/
 
+# Node (Tailwind CSS build tooling)
+node_modules/
+
 # Marimo
 marimo/_static/
 marimo/_lsp/
@@ -219,3 +222,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Agent-browser auth state (signed-in session; do not commit)
+/pacepilot-auth.json

@@ -1,0 +1,15 @@
+{
+  "source": "synthetic",
+  "contract_version": "coach-tools-v2",
+  "tools": {
+    "get_current_recovery_state": [],
+    "get_subjective_context": [],
+    "get_health_trends": ["days", "metrics"],
+    "get_training_summary": ["days"],
+    "get_recent_activities": ["limit"],
+    "get_activity_details": ["activity_id"],
+    "get_health_day": ["day"],
+    "get_upcoming_workouts": ["days"],
+    "create_running_workout_proposal": ["available_minutes", "suggested_for", "template_id"]
+  }
+}

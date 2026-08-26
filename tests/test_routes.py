@@ -1,9 +1,11 @@
 import json
+import re
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
@@ -11,6 +13,8 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.config import get_settings
 from app.models import (
     Activity,
+    AthleteAvailability,
+    AthleteGoal,
     DailyDataStatus,
     DailyFitness,
     DailyHealth,
@@ -21,10 +25,18 @@ from app.models import (
     SyncRun,
     User,
     Workout,
+    WorkoutEvent,
+    WorkoutGarminAttempt,
+    WorkoutGarminBinding,
+    WorkoutGarminOperation,
+    WorkoutGarminRemoteIdentity,
+    WorkoutRevision,
+    WorkoutValidationRun,
 )
 from app.routes import plans as plans_module
 from app.routes import settings as settings_module
 from app.routes import workouts as workouts_module
+from app.services.garmin.account_data import record_connected_principal
 from app.services.garmin.locks import garmin_account_slot
 
 
@@ -68,6 +80,41 @@ def _workout_data(
             }
         ),
     }
+
+
+def _confirmation_data(client: TestClient, location: str) -> dict[str, str]:
+    detail = client.get(location)
+    fields: dict[str, str] = {}
+    for name in (
+        "revision_id",
+        "revision_number",
+        "content_hash",
+        "lock_version",
+        "context_fingerprint",
+    ):
+        match = re.search(rf'name="{name}" value="([^"]*)"', detail.text)
+        assert match is not None
+        fields[name] = match.group(1)
+    return fields
+
+
+def _confirm_and_schedule(client: TestClient, location: str, *, follow_redirects: bool = False):
+    accepted = client.post(
+        f"{location}/confirm",
+        data=_confirmation_data(client, location),
+        follow_redirects=False,
+    )
+    assert accepted.status_code == 303
+    detail = client.get(location)
+    form_match = re.search(r'<form[^>]+action="[^"]+/schedule"[^>]*>(.*?)</form>', detail.text)
+    assert form_match is not None
+    form = form_match.group(1)
+    fields: dict[str, str] = {}
+    for name in ("revision_id", "lock_version", "scheduled_for"):
+        match = re.search(rf'name="{name}" value="([^"]*)"', form)
+        assert match is not None
+        fields[name] = match.group(1)
+    return client.post(f"{location}/schedule", data=fields, follow_redirects=follow_redirects)
 
 
 def _mark_garmin_connected(session: Session) -> GarminAccount:
@@ -191,23 +238,38 @@ def test_training_plan_month_view_shows_calendar_weeks_and_workouts(
             return cls(2027, 1, 15)
 
     monkeypatch.setattr(plans_module, "date", FixedDate)
-    client.post(
+    silvester = client.post(
         "/workouts",
         data=_workout_data(name="Silvesterlauf", scheduled_for="2026-12-31"),
+        follow_redirects=False,
+    )
+    januar = client.post(
+        "/workouts",
+        data=_workout_data(name="Januarlauf", scheduled_for="2027-01-31"),
+        follow_redirects=False,
     )
     client.post(
         "/workouts",
-        data=_workout_data(name="Januarlauf", scheduled_for="2027-01-31"),
+        data=_workout_data(name="Ungeplanter Entwurf", scheduled_for="2027-01-15"),
+    )
+    _confirm_and_schedule(client, silvester.headers["location"])
+    _confirm_and_schedule(client, januar.headers["location"])
+    client.post(
+        januar.headers["location"],
+        data=_workout_data(name="Noch nicht angenommener Kandidat", scheduled_for="2027-01-30"),
     )
 
     response = client.get("/plans?view=month")
 
     assert response.status_code == 200
     assert "Januar 2027" in response.text
-    assert 'aria-label="Kalenderwoche 53"' in response.text
-    assert 'aria-label="Kalenderwoche 4"' in response.text
+    assert "Kalenderwoche</span><strong" in response.text
+    assert ">53</strong>" in response.text
+    assert ">4</strong>" in response.text
     assert "Silvesterlauf" in response.text
     assert "Januarlauf" in response.text
+    assert "Ungeplanter Entwurf" not in response.text
+    assert "Noch nicht angenommener Kandidat" not in response.text
     assert "/plans?view=month&amp;month=-1" in response.text
     assert "/plans?view=month&amp;month=1" in response.text
 
@@ -452,6 +514,8 @@ def test_garmin_disconnect_removes_tokens_but_keeps_imported_data(
     client.get("/settings")
     with session_factory() as session:
         account = _mark_garmin_connected(session)
+        account.heart_rate_zone_profiles = [{"sport": "DEFAULT"}]
+        account.heart_rate_zones_synced_at = datetime(2026, 8, 22)
         user_id = account.user_id
         session.add(
             Activity(
@@ -478,6 +542,8 @@ def test_garmin_disconnect_removes_tokens_but_keeps_imported_data(
         assert account.connected_at is None
         assert account.email is None
         assert account.sync_status == "not_connected"
+        assert account.heart_rate_zone_profiles is None
+        assert account.heart_rate_zones_synced_at is None
         assert session.scalar(select(func.count()).select_from(Activity)) == 1
 
 
@@ -496,9 +562,15 @@ def test_delete_garmin_data_preserves_connection_user_and_local_workout(
     with session_factory() as session:
         account = _mark_garmin_connected(session)
         account.email = "runner@example.com"
+        account.heart_rate_zone_profiles = [{"sport": "DEFAULT"}]
+        account.heart_rate_zones_synced_at = datetime(2026, 8, 22)
         user_id = account.user_id
         workout = session.scalar(select(Workout))
         assert workout is not None
+        revision = session.scalar(
+            select(WorkoutRevision).where(WorkoutRevision.workout_id == workout.id)
+        )
+        assert revision is not None
         workout.garmin_workout_id = "remote-123"
         workout.status = "pushed"
         activity = Activity(
@@ -537,6 +609,36 @@ def test_delete_garmin_data_preserves_connection_user_and_local_workout(
                 message="Test",
             )
         )
+        binding = workout.garmin_binding
+        assert binding is not None
+        binding.content_status = "synced"
+        binding.calendar_status = "synced"
+        binding.device_status = "request_accepted"
+        binding.remote_scheduled_for = date(2026, 8, 9)
+        binding.last_error_code = "old-error"
+        binding.last_error_message = "old metadata"
+        identity = WorkoutGarminRemoteIdentity(
+            binding_id=binding.id,
+            garmin_account_id=account.id,
+            garmin_workout_id="remote-123",
+            status="active",
+        )
+        session.add(identity)
+        session.add(
+            WorkoutValidationRun(
+                workout_id=workout.id,
+                revision_id=revision.id,
+                validation_kind="contextual",
+                rule_set_version="safety-triage-v1",
+                context_fingerprint="a" * 64,
+                feedback_ids_json=["activity:222:garmin:8:4"],
+                expires_at=None,
+                valid=True,
+                report_json={"outcome": "allow"},
+            )
+        )
+        session.flush()
+        binding.active_remote_identity_id = identity.id
         session.commit()
         account_id = account.id
         connected_at = account.connected_at
@@ -569,17 +671,30 @@ def test_delete_garmin_data_preserves_connection_user_and_local_workout(
         assert session.scalar(select(func.count()).select_from(GarminDevice)) == 0
         assert session.scalar(select(func.count()).select_from(SyncRun)) == 0
         assert session.scalar(select(func.count()).select_from(SyncEvent)) == 0
+        assert session.scalar(select(func.count()).select_from(WorkoutValidationRun)) == 0
         workout = session.scalar(select(Workout))
         assert workout is not None
         assert workout.step_count == 3
-        assert workout.garmin_workout_id is None
-        assert workout.status == "confirmed"
+        assert workout.garmin_workout_id == "remote-123"
+        assert workout.status == "pushed"
+        binding = session.scalar(select(WorkoutGarminBinding))
+        assert binding is not None
+        assert binding.active_remote_identity_id is not None
+        assert binding.content_status == "synced"
+        assert binding.calendar_status == "synced"
+        assert binding.device_status == "request_accepted"
+        assert binding.remote_scheduled_for == date(2026, 8, 9)
+        assert binding.last_error_code == "old-error"
+        assert binding.last_error_message == "old metadata"
+        assert session.scalar(select(func.count()).select_from(WorkoutGarminRemoteIdentity)) == 1
         account = session.scalar(select(GarminAccount))
         assert account is not None
         assert account.id == account_id
         assert account.email == "runner@example.com"
         assert account.connected_at == connected_at
         assert account.sync_status == "connected"
+        assert account.heart_rate_zone_profiles is None
+        assert account.heart_rate_zones_synced_at is None
 
 
 def test_garmin_account_actions_are_in_connection_card(client: TestClient) -> None:
@@ -591,6 +706,41 @@ def test_garmin_account_actions_are_in_connection_card(client: TestClient) -> No
     assert 'action="/settings/garmin/disconnect"' in connection_card
     assert 'action="/settings/garmin/data/delete"' in connection_card
     assert "Importierte Daten löschen" in connection_card
+
+
+def test_reconnecting_different_garmin_principal_quarantines_remote_ids(
+    client: TestClient, session_factory: sessionmaker[Session]
+) -> None:
+    client.post("/workouts", data=_workout_data(), follow_redirects=False)
+    with session_factory() as session:
+        account = _mark_garmin_connected(session)
+        record_connected_principal(session, account, "old@example.com")
+        workout = session.scalar(select(Workout))
+        assert workout is not None and workout.garmin_binding is not None
+        binding = workout.garmin_binding
+        identity = WorkoutGarminRemoteIdentity(
+            binding_id=binding.id,
+            garmin_account_id=account.id,
+            garmin_workout_id="remote-old",
+            principal_fingerprint=account.principal_fingerprint,
+            status="active",
+        )
+        session.add(identity)
+        session.flush()
+        binding.active_remote_identity_id = identity.id
+        binding.content_status = "synced"
+        account.heart_rate_zone_profiles = [{"sport": "DEFAULT"}]
+        account.heart_rate_zones_synced_at = datetime(2026, 8, 22)
+
+        record_connected_principal(session, account, "new@example.com")
+        session.commit()
+
+        assert binding.content_status == "unknown"
+        assert binding.calendar_status == "unknown"
+        assert binding.device_status == "unknown"
+        assert binding.last_error_code == "garmin.principal_changed"
+        assert account.heart_rate_zone_profiles is None
+        assert account.heart_rate_zones_synced_at is None
 
 
 def test_delete_garmin_data_is_blocked_during_account_operation(
@@ -631,9 +781,77 @@ def test_create_and_confirm_workout(client: TestClient) -> None:
     assert "Pace 4:00 min/km bis 4:20 min/km" in detail.text
     assert "Entwurf bestätigen" in detail.text
 
-    confirmed = client.post(f"{location}/confirm", follow_redirects=True)
+    confirmed = _confirm_and_schedule(client, location, follow_redirects=True)
     assert confirmed.status_code == 200
     assert "An Garmin übertragen" in confirmed.text
+    assert "Termin von Revision 1 entfernen" in confirmed.text
+
+
+def test_confirming_does_not_silently_schedule(
+    client: TestClient, session_factory: sessionmaker[Session]
+) -> None:
+    created = client.post("/workouts", data=_workout_data(), follow_redirects=False)
+    location = created.headers["location"]
+
+    accepted = client.post(
+        f"{location}/confirm",
+        data=_confirmation_data(client, location),
+        follow_redirects=True,
+    )
+
+    assert accepted.status_code == 200
+    assert "Revision 1 für 09.08.2026 einplanen" in accepted.text
+    assert "Vorgeschlagen für 09.08.2026 · Noch nicht im Kalender" in accepted.text
+    with session_factory() as session:
+        workout = session.scalar(select(Workout))
+        assert workout is not None
+        assert workout.approval_status == "accepted"
+        assert workout.scheduled_for is None
+        assert workout.local_schedule_status == "unscheduled"
+
+
+def test_confirmed_workout_can_be_unscheduled(
+    client: TestClient, session_factory: sessionmaker[Session]
+) -> None:
+    created = client.post("/workouts", data=_workout_data(), follow_redirects=False)
+    location = created.headers["location"]
+    _confirm_and_schedule(client, location)
+    with session_factory() as session:
+        workout = session.scalar(select(Workout))
+        assert workout is not None
+        assert workout.accepted_revision_id is not None
+        payload = {
+            "revision_id": str(workout.accepted_revision_id),
+            "lock_version": str(workout.lock_version),
+        }
+
+    response = client.post(f"{location}/unschedule", data=payload, follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == location
+    with session_factory() as session:
+        workout = session.scalar(select(Workout))
+        assert workout is not None
+        assert workout.scheduled_for is None
+        assert workout.local_schedule_status == "cancelled"
+
+
+def test_stale_workout_revision_cannot_be_confirmed(
+    client: TestClient, session_factory: sessionmaker[Session]
+) -> None:
+    created = client.post("/workouts", data=_workout_data(), follow_redirects=False)
+    location = created.headers["location"]
+    stale_data = _confirmation_data(client, location)
+    client.post(location, data=_workout_data(name="Neuere Revision"))
+
+    response = client.post(f"{location}/confirm", data=stale_data)
+
+    assert response.status_code == 409
+    assert "nicht mehr aktuell" in response.text
+    with session_factory() as session:
+        workout = session.scalar(select(Workout))
+        assert workout is not None
+        assert workout.accepted_revision_id is None
 
 
 def test_invalid_workout_is_rejected(client: TestClient) -> None:
@@ -724,7 +942,7 @@ def test_edit_draft_workout(client: TestClient, session_factory: sessionmaker[Se
     assert "startPaletteDrag('interval'" in form.text
     assert "/static/icons/workout.svg#pencil" in form.text
     assert "setDropTarget(null, index)" in form.text
-    assert "/static/css/tailwind.css?v=20260820-2" in form.text
+    assert "/static/css/tailwind.css?v=20260826-28" in form.text
     assert "/static/js/theme.js?v=20260809-3" in form.text
     assert "data-theme-toggle" in form.text
 
@@ -740,25 +958,26 @@ def test_edit_draft_workout(client: TestClient, session_factory: sessionmaker[Se
         workout = session.scalar(select(Workout))
         assert workout is not None
         assert workout.name == "Tempolauf bearbeitet"
-        assert workout.scheduled_for == date(2026, 8, 10)
+        assert workout.scheduled_for is None
+        assert workout.current_revision_id is not None
+        current_revision = session.get(WorkoutRevision, workout.current_revision_id)
+        assert current_revision is not None
+        assert current_revision.suggested_for == date(2026, 8, 10)
         assert workout.status == "draft"
         interval = workout.definition_model.blocks[1]
         assert interval.target.fastest_seconds_per_km == 240
         assert interval.target.slowest_seconds_per_km == 260
 
 
-def test_edit_pushed_workout_updates_garmin_and_device(
+def test_edit_pushed_workout_creates_candidate_without_contacting_garmin(
     client: TestClient,
     session_factory: sessionmaker[Session],
     monkeypatch: Any,
 ) -> None:
     created = client.post("/workouts", data=_workout_data(), follow_redirects=False)
     location = created.headers["location"]
+    _confirm_and_schedule(client, location)
     with session_factory() as session:
-        workout = session.scalar(select(Workout))
-        assert workout is not None
-        workout.garmin_workout_id = "12345"
-        workout.status = "pushed"
         _mark_garmin_connected(session)
 
     class FakeGarmin:
@@ -766,6 +985,9 @@ def test_edit_pushed_workout_updates_garmin_and_device(
         unscheduled: list[str] = []
         scheduled: list[tuple[str, str]] = []
         pushed: list[str] = []
+
+        def upload_workout(self, _payload: dict[str, Any]) -> dict[str, str]:
+            return {"workoutId": "12345"}
 
         def update_workout(self, workout_id: str, payload: dict[str, Any]) -> dict[str, Any]:
             self.updated.append((workout_id, payload))
@@ -795,6 +1017,13 @@ def test_edit_pushed_workout_updates_garmin_and_device(
         return garmin
 
     monkeypatch.setattr(workouts_module, "connect_garmin_account", connect_test_account)
+    assert client.post(f"{location}/publish", follow_redirects=False).status_code == 303
+    assert client.post(f"{location}/push", follow_redirects=False).status_code == 303
+    garmin.updated.clear()
+    garmin.unscheduled.clear()
+    garmin.scheduled.clear()
+    garmin.pushed.clear()
+    connected_account_ids.clear()
 
     response = client.post(
         location,
@@ -803,22 +1032,31 @@ def test_edit_pushed_workout_updates_garmin_and_device(
     )
 
     assert response.status_code == 303
-    assert garmin.updated[0][0] == "12345"
-    assert garmin.updated[0][1]["workoutName"] == "Garmin Update"
-    assert garmin.unscheduled == ["987"]
-    assert garmin.scheduled == [("12345", "2026-08-10")]
-    assert garmin.pushed == ["12345"]
+    assert garmin.updated == []
+    assert garmin.unscheduled == []
+    assert garmin.scheduled == []
+    assert garmin.pushed == []
+    assert connected_account_ids == []
+    detail = client.get(location)
+    assert "Angenommen · Manuell" in detail.text
+    assert "Aktueller Kandidat · Manuell" in detail.text
+    assert "Geändert: Name, Datum" in detail.text
+    calendar = client.get("/plans?view=month")
+    assert "Angenommen · R" in calendar.text
+    assert "Lockerer Dauerlauf" in calendar.text
+    assert "Neue Revision offen" in calendar.text
     with session_factory() as session:
         workout = session.scalar(select(Workout))
         assert workout is not None
-        account = session.scalar(
-            select(GarminAccount).where(GarminAccount.user_id == workout.user_id)
-        )
-        assert account is not None
-        assert connected_account_ids == [account.id]
-        assert workout.name == "Garmin Update"
-        assert workout.scheduled_for == date(2026, 8, 10)
+        assert workout.name == "Lockerer Dauerlauf"
+        assert workout.scheduled_for == date(2026, 8, 9)
         assert workout.status == "pushed"
+        assert workout.approval_status == "proposed"
+        assert workout.current_revision_id != workout.accepted_revision_id
+        current = session.get(WorkoutRevision, workout.current_revision_id)
+        assert current is not None
+        assert current.name == "Garmin Update"
+        assert current.suggested_for == date(2026, 8, 10)
 
 
 def test_delete_pushed_workout_removes_garmin_workout(
@@ -828,16 +1066,16 @@ def test_delete_pushed_workout_removes_garmin_workout(
 ) -> None:
     created = client.post("/workouts", data=_workout_data(), follow_redirects=False)
     location = created.headers["location"]
+    _confirm_and_schedule(client, location)
     with session_factory() as session:
-        workout = session.scalar(select(Workout))
-        assert workout is not None
-        workout.garmin_workout_id = "12345"
-        workout.status = "pushed"
         _mark_garmin_connected(session)
 
     class FakeGarmin:
         unscheduled: list[str] = []
         deleted: list[str] = []
+
+        def upload_workout(self, _payload: dict[str, Any]) -> dict[str, str]:
+            return {"workoutId": "12345"}
 
         def get_scheduled_workouts(self, _year: int, _month: int) -> dict[str, object]:
             return {"items": [{"id": 987, "date": "2026-08-09", "workoutId": 12345}]}
@@ -854,6 +1092,7 @@ def test_delete_pushed_workout_removes_garmin_workout(
         "connect_garmin_account",
         lambda _session, _account: garmin,
     )
+    assert client.post(f"{location}/publish", follow_redirects=False).status_code == 303
 
     response = client.post(f"{location}/delete", follow_redirects=False)
 
@@ -862,7 +1101,9 @@ def test_delete_pushed_workout_removes_garmin_workout(
     assert garmin.unscheduled == ["987"]
     assert garmin.deleted == ["12345"]
     with session_factory() as session:
-        assert session.scalar(select(Workout)) is None
+        workout = session.scalar(select(Workout))
+        assert workout is not None
+        assert workout.deleted_at is not None
 
 
 def test_publish_retry_reuses_uploaded_garmin_workout(
@@ -872,7 +1113,7 @@ def test_publish_retry_reuses_uploaded_garmin_workout(
 ) -> None:
     created = client.post("/workouts", data=_workout_data(), follow_redirects=False)
     location = created.headers["location"]
-    client.post(f"{location}/confirm")
+    _confirm_and_schedule(client, location)
     with session_factory() as session:
         _mark_garmin_connected(session)
 
@@ -909,6 +1150,17 @@ def test_publish_retry_reuses_uploaded_garmin_workout(
         assert workout is not None
         assert workout.garmin_workout_id == "remote-123"
         assert workout.status == "published"
+        assert workout.garmin_binding is not None
+        assert workout.garmin_binding.calendar_status == "unknown"
+        operation = session.scalar(
+            select(WorkoutGarminOperation).where(
+                WorkoutGarminOperation.operation_type == "schedule"
+            )
+        )
+        assert operation is not None and operation.status == "unknown"
+    detail = client.get(location)
+    assert "Garmin aktualisieren" in detail.text
+    assert "An meine Uhr senden" not in detail.text
 
     garmin.fail_schedule = False
     retried = client.post(f"{location}/publish", follow_redirects=False)
@@ -916,6 +1168,57 @@ def test_publish_retry_reuses_uploaded_garmin_workout(
     assert retried.status_code == 303
     assert garmin.uploads == 1
     assert garmin.schedule_attempts == 2
+    with session_factory() as session:
+        workout = session.scalar(select(Workout))
+        assert workout is not None
+        assert workout.garmin_binding is not None
+        assert workout.garmin_binding.calendar_status == "synced"
+        operation = session.scalar(
+            select(WorkoutGarminOperation).where(
+                WorkoutGarminOperation.operation_type == "schedule"
+            )
+        )
+        assert operation is not None and operation.status == "succeeded"
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(WorkoutGarminAttempt)
+                .where(WorkoutGarminAttempt.operation_id == operation.id)
+            )
+            == 3
+        )
+
+
+def test_unknown_garmin_state_blocks_mutating_controls(
+    client: TestClient, session_factory: sessionmaker[Session]
+) -> None:
+    created = client.post("/workouts", data=_workout_data(), follow_redirects=False)
+    location = created.headers["location"]
+    _confirm_and_schedule(client, location)
+    with session_factory() as session:
+        binding = session.scalar(select(WorkoutGarminBinding))
+        assert binding is not None
+        binding.device_status = "unknown"
+        binding.last_error_message = "Garmin-Anfrage nicht eindeutig bestätigt."
+        session.commit()
+
+    detail = client.get(location)
+
+    assert "Garmin-Ergebnis unklar." in detail.text
+    assert "Weitere Garmin-Änderungen sind bis zur manuellen Prüfung blockiert." in detail.text
+    assert "Löschen blockiert" in detail.text
+    for action in ("confirm", "publish", "push", "schedule", "unschedule", "delete"):
+        assert f'action="{location}/{action}"' not in detail.text
+    assert "Garmin hat die Anfrage noch nicht angenommen" in detail.text
+    assert "Garmin hat die Übertragung an deine Uhr angenommen" not in detail.text
+
+    blocked_delete = client.post(f"{location}/delete", follow_redirects=False)
+    assert blocked_delete.status_code == 303
+    assert "error=" in blocked_delete.headers["location"]
+    with session_factory() as session:
+        workout = session.scalar(select(Workout))
+        assert workout is not None
+        assert workout.deleted_at is None
 
 
 def test_draft_workout_with_remote_id_cannot_be_pushed(
@@ -944,6 +1247,253 @@ def test_draft_workout_with_remote_id_cannot_be_pushed(
         workout = session.scalar(select(Workout))
         assert workout is not None
         assert workout.status == "draft"
+
+
+@pytest.mark.parametrize(
+    ("method", "suffix"),
+    [
+        ("get", ""),
+        ("get", "/edit"),
+        ("post", ""),
+        ("post", "/delete"),
+        ("post", "/confirm"),
+        ("post", "/schedule"),
+        ("post", "/unschedule"),
+        ("post", "/publish"),
+        ("post", "/push"),
+    ],
+)
+def test_other_users_workout_routes_return_404_without_side_effects(
+    method: str,
+    suffix: str,
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: Any,
+) -> None:
+    with session_factory() as session:
+        other_user = User(display_name="Other athlete")
+        session.add(other_user)
+        session.flush()
+        workout = Workout(
+            user_id=other_user.id,
+            name="Foreign workout",
+            sport="running",
+            scheduled_for=date(2026, 8, 9),
+            description="Private",
+            status="pushed",
+            garmin_workout_id="foreign-remote",
+            definition_version=1,
+            definition=json.loads(_workout_data()["definition"]),
+        )
+        session.add(workout)
+        session.commit()
+        workout_id = workout.id
+
+    monkeypatch.setattr(
+        workouts_module,
+        "connect_garmin_account",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("foreign workout contacted Garmin")),
+    )
+
+    path = f"/workouts/{workout_id}{suffix}"
+    response = (
+        client.get(path, follow_redirects=False)
+        if method == "get"
+        else client.post(path, data=_workout_data(), follow_redirects=False)
+    )
+
+    assert response.status_code == 404
+    with session_factory() as session:
+        unchanged = session.get(Workout, workout_id)
+        assert unchanged is not None
+        assert unchanged.name == "Foreign workout"
+        assert unchanged.status == "pushed"
+        assert unchanged.garmin_workout_id == "foreign-remote"
+
+
+def test_edit_accepted_workout_preserves_accepted_projection_without_garmin(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: Any,
+) -> None:
+    created = client.post("/workouts", data=_workout_data(), follow_redirects=False)
+    location = created.headers["location"]
+    _confirm_and_schedule(client, location)
+    monkeypatch.setattr(
+        workouts_module,
+        "connect_garmin_account",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("local edit contacted Garmin")),
+    )
+
+    response = client.post(
+        location,
+        data=_workout_data(name="Edited after confirmation"),
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    with session_factory() as session:
+        workout = session.scalar(select(Workout))
+        assert workout is not None
+        assert workout.name == "Lockerer Dauerlauf"
+        assert workout.status == "confirmed"
+        assert workout.approval_status == "proposed"
+        assert workout.current_revision_id != workout.accepted_revision_id
+        current = session.get(WorkoutRevision, workout.current_revision_id)
+        assert current is not None
+        assert current.name == "Edited after confirmation"
+
+
+def test_edit_draft_never_contacts_garmin_even_with_legacy_remote_id(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: Any,
+) -> None:
+    created = client.post("/workouts", data=_workout_data(), follow_redirects=False)
+    location = created.headers["location"]
+    with session_factory() as session:
+        workout = session.scalar(select(Workout))
+        assert workout is not None
+        workout.garmin_workout_id = "remote-1"
+        _mark_garmin_connected(session)
+
+    class FakeGarmin:
+        updates: list[str] = []
+        pushes: list[str] = []
+
+        def update_workout(self, workout_id: str, _payload: dict[str, Any]) -> None:
+            self.updates.append(workout_id)
+
+        def push_workout_to_device(self, workout_id: str) -> None:
+            self.pushes.append(workout_id)
+
+    garmin = FakeGarmin()
+    monkeypatch.setattr(
+        workouts_module,
+        "connect_garmin_account",
+        lambda _session, _account: garmin,
+    )
+
+    response = client.post(
+        location,
+        data=_workout_data(name="Inconsistent draft edit"),
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert garmin.updates == []
+    assert garmin.pushes == []
+    with session_factory() as session:
+        workout = session.scalar(select(Workout))
+        assert workout is not None
+        assert workout.status == "draft"
+        assert workout.current_revision_id is not None
+        current = session.get(WorkoutRevision, workout.current_revision_id)
+        assert current is not None
+        assert current.name == "Inconsistent draft edit"
+
+
+def test_repeated_successful_publish_reuses_remote_workout_and_schedule(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: Any,
+) -> None:
+    created = client.post("/workouts", data=_workout_data(), follow_redirects=False)
+    location = created.headers["location"]
+    _confirm_and_schedule(client, location)
+    with session_factory() as session:
+        _mark_garmin_connected(session)
+
+    class FakeGarmin:
+        uploads = 0
+        schedules: list[tuple[str, str]] = []
+
+        def upload_workout(self, _payload: dict[str, Any]) -> dict[str, str]:
+            self.uploads += 1
+            return {"workoutId": "remote-1"}
+
+        def get_scheduled_workouts(self, _year: int, _month: int) -> dict[str, object]:
+            return {
+                "items": [
+                    {"id": 99, "date": day, "workoutId": workout_id}
+                    for workout_id, day in self.schedules
+                ]
+            }
+
+        def schedule_workout(self, workout_id: str, day: str) -> None:
+            self.schedules.append((workout_id, day))
+
+    garmin = FakeGarmin()
+    monkeypatch.setattr(
+        workouts_module,
+        "connect_garmin_account",
+        lambda _session, _account: garmin,
+    )
+
+    first = client.post(f"{location}/publish", follow_redirects=False)
+    second = client.post(f"{location}/publish", follow_redirects=False)
+
+    assert first.status_code == second.status_code == 303
+    assert garmin.uploads == 1
+    assert garmin.schedules == [("remote-1", "2026-08-09")]
+
+
+def test_repeated_push_reuses_idempotent_operation(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: Any,
+) -> None:
+    created = client.post("/workouts", data=_workout_data(), follow_redirects=False)
+    location = created.headers["location"]
+    _confirm_and_schedule(client, location)
+    with session_factory() as session:
+        _mark_garmin_connected(session)
+
+    class FakeGarmin:
+        pushes: list[str] = []
+
+        def upload_workout(self, _payload: dict[str, Any]) -> dict[str, str]:
+            return {"workoutId": "remote-1"}
+
+        def get_scheduled_workouts(self, _year: int, _month: int) -> list[object]:
+            return []
+
+        def schedule_workout(self, _workout_id: str, _day: str) -> None:
+            pass
+
+        def push_workout_to_device(self, workout_id: str) -> None:
+            self.pushes.append(workout_id)
+
+    garmin = FakeGarmin()
+    monkeypatch.setattr(
+        workouts_module,
+        "connect_garmin_account",
+        lambda _session, _account: garmin,
+    )
+    assert client.post(f"{location}/publish", follow_redirects=False).status_code == 303
+
+    first = client.post(f"{location}/push", follow_redirects=False)
+    second = client.post(f"{location}/push", follow_redirects=False)
+
+    assert first.status_code == second.status_code == 303
+    assert garmin.pushes == ["remote-1"]
+    with session_factory() as session:
+        operations = list(
+            session.scalars(
+                select(WorkoutGarminOperation).where(
+                    WorkoutGarminOperation.operation_type == "push"
+                )
+            )
+        )
+        assert len(operations) == 1
+        assert operations[0].status == "succeeded"
+        assert len(operations[0].attempts) == 1
+        assert (
+            session.scalar(
+                select(func.count()).select_from(WorkoutEvent).where(WorkoutEvent.action == "push")
+            )
+            == 1
+        )
 
 
 def test_manual_sync_is_queued_once(
@@ -979,3 +1529,326 @@ def test_manual_sync_is_queued_once(
         account = session.get(GarminAccount, account_id)
         assert account is not None
         assert account.sync_status == "queued"
+
+
+def _seed_shadow_week_history(session_factory: sessionmaker[Session]) -> date:
+    with session_factory() as session:
+        user = session.scalar(select(User))
+        assert user is not None
+        today = date.today()
+        monday = today - timedelta(days=today.weekday())
+        for index, age in enumerate((0, 1, 3, 8, 9, 10, 15, 16, 17, 22, 23, 24)):
+            session.add(
+                Activity(
+                    user_id=user.id,
+                    garmin_activity_id=f"shadow-route-{index}",
+                    name=f"Run {index}",
+                    activity_type="running",
+                    started_at=datetime.combine(today - timedelta(days=age), datetime.min.time()),
+                    duration_s=2700 + index * 60,
+                    distance_m=6000,
+                    workout_rpe=3 if index % 2 else 8,
+                )
+            )
+        session.add(
+            GarminSyncState(
+                user_id=user.id,
+                resource="activities",
+                status="ok",
+                backfill_complete=True,
+                oldest_synced_date=today - timedelta(days=365),
+                newest_synced_date=today,
+            )
+        )
+        session.add_all(
+            [
+                AthleteAvailability(
+                    user_id=user.id, weekday=0, available=True, available_minutes=60
+                ),
+                AthleteAvailability(
+                    user_id=user.id, weekday=2, available=True, available_minutes=75
+                ),
+                AthleteAvailability(
+                    user_id=user.id, weekday=5, available=True, available_minutes=120
+                ),
+                AthleteAvailability(
+                    user_id=user.id, weekday=6, available=True, available_minutes=90
+                ),
+            ]
+        )
+        session.commit()
+        return monday
+
+
+def test_planning_shadow_view_is_404_while_flag_disabled(
+    client: TestClient,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", False)
+    assert client.get("/coach/planning-shadow", follow_redirects=False).status_code == 404
+
+
+def test_multiweek_plan_link_is_hidden_while_flag_disabled(
+    client: TestClient,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", False)
+
+    response = client.get("/plans")
+
+    assert response.status_code == 200
+    assert 'href="/plans/cycles/new"' not in response.text
+
+
+def test_coach_links_to_weekly_and_multiweek_planning(
+    client: TestClient,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
+    monkeypatch.setattr(get_settings(), "coach_planner_history_gates_enabled", False)
+
+    response = client.get("/coach")
+
+    assert response.status_code == 200
+    assert 'href="/coach/planning-shadow"' in response.text
+    assert 'href="/plans/cycles/new"' in response.text
+    assert (
+        "Einzelvorschläge und Planvorschauen bleiben bis zur Annahme unverbindlich."
+        in response.text
+    )
+    assert "Testmodus: Wochen- und Frequenz-Gates sind deaktiviert." in response.text
+
+
+def test_planning_shadow_view_redirects_unauthenticated(
+    unauthenticated_client: TestClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
+    response = unauthenticated_client.get("/coach/planning-shadow", follow_redirects=False)
+    assert response.status_code == 303
+
+
+def test_planning_shadow_view_renders_deterministic_week(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
+    monday = _seed_shadow_week_history(session_factory)
+
+    first = client.get(f"/coach/planning-shadow?week={monday.isoformat()}")
+    second = client.get(f"/coach/planning-shadow?week={monday.isoformat()}")
+    assert first.status_code == second.status_code == 200
+    assert first.text == second.text
+    assert "Wochenplanung im Shadow-Modus" in first.text
+    assert "Interne deterministische Vorschau" in first.text
+    assert "Nicht verfügbar" in first.text
+
+    with session_factory() as session:
+        other = User(display_name="Other Runner")
+        session.add(other)
+        session.flush()
+        session.add(
+            AthleteAvailability(user_id=other.id, weekday=2, available=True, available_minutes=180)
+        )
+        session.commit()
+
+    scoped = client.get(f"/coach/planning-shadow?week={monday.isoformat()}")
+    assert scoped.status_code == 200
+    assert scoped.text == second.text
+
+    invalid = client.get("/coach/planning-shadow?week=2026-09-01")
+    assert invalid.status_code == 200
+    assert "Die Woche muss an einem Montag beginnen." in invalid.text
+
+    garbage = client.get("/coach/planning-shadow?week=nonsense")
+    assert garbage.status_code == 200
+    assert "Ungültiges Wochendatum." in garbage.text
+
+
+def test_plan_persistence_is_flagged_idempotent_and_visible_in_calendar(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
+    monday = _seed_shadow_week_history(session_factory)
+
+    first = client.post(
+        "/plans/generate-week",
+        data={"week_start": monday.isoformat()},
+        follow_redirects=False,
+    )
+    second = client.post(
+        "/plans/generate-week",
+        data={"week_start": monday.isoformat()},
+        follow_redirects=False,
+    )
+    assert first.status_code == second.status_code == 303
+    assert first.headers["location"] == "/plans?view=week&week=0"
+
+    calendar = client.get(first.headers["location"])
+    assert calendar.status_code == 200
+    assert "Planvorschlag · nicht angenommen" in calendar.text
+    assert (
+        "Als Vorschläge speichern"
+        in client.get(f"/coach/planning-shadow?week={monday.isoformat()}").text
+    )
+
+    with session_factory() as session:
+        proposal_id = session.scalar(
+            select(Workout.id).where(Workout.approval_status == "proposed")
+        )
+        proposal_count = session.scalar(
+            select(func.count()).select_from(Workout).where(Workout.approval_status == "proposed")
+        )
+        assert proposal_count is not None and proposal_count > 0
+        assert proposal_id is not None
+
+    detail = client.get(f"/workouts/{proposal_id}")
+    assert detail.status_code == 200
+    assert "Wochenplan-Vorschlag" in detail.text
+    assert f'href="/workouts/{proposal_id}/edit"' not in detail.text
+    assert "Vorschlag annehmen" in detail.text
+    assert client.get(f"/workouts/{proposal_id}/edit").status_code == 409
+
+
+def test_plan_persistence_requires_flag_and_csrf(
+    client: TestClient,
+    monkeypatch: Any,
+) -> None:
+    monday = date.today() - timedelta(days=date.today().weekday())
+    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", False)
+    assert (
+        client.post(
+            "/plans/generate-week",
+            data={"week_start": monday.isoformat()},
+            follow_redirects=False,
+        ).status_code
+        == 404
+    )
+
+    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
+    csrf_token = client.headers.pop("X-CSRF-Token")
+    try:
+        response = client.post(
+            "/plans/generate-week",
+            data={"week_start": monday.isoformat()},
+            follow_redirects=False,
+        )
+    finally:
+        client.headers["X-CSRF-Token"] = csrf_token
+    assert response.status_code == 403
+
+
+def test_multiweek_plan_page_is_flagged_and_lists_active_goals(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
+    with session_factory() as session:
+        user = session.scalar(select(User))
+        assert user is not None
+        session.add(
+            AthleteGoal(
+                user_id=user.id,
+                event_type="10k",
+                event_name="Herbstlauf",
+                target_date=date.today() + timedelta(days=56),
+            )
+        )
+        session.commit()
+
+    response = client.get("/plans/cycles/new")
+
+    assert response.status_code == 200
+    assert "Mehrwochenplan erstellen" in response.text
+    assert "Herbstlauf" in response.text
+    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", False)
+    assert client.get("/plans/cycles/new").status_code == 404
+
+
+def test_multiweek_plan_error_redirects_back_to_form(
+    client: TestClient,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
+    monkeypatch.setattr(
+        plans_module,
+        "plan_training_cycle",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ValueError("Für eine Wochenplanung fehlt die nötige Laufroutine.")
+        ),
+    )
+
+    generated = client.post(
+        "/plans/generate-cycle",
+        data={
+            "start_date": date.today().isoformat(),
+            "target_date": (date.today() + timedelta(days=56)).isoformat(),
+            "event_type": "10k",
+        },
+        follow_redirects=False,
+    )
+
+    assert generated.status_code == 303
+    assert generated.headers["location"].startswith("/plans/cycles/new?error=")
+    form = client.get(generated.headers["location"])
+    assert form.status_code == 200
+    assert "Plan konnte nicht erstellt werden." in form.text
+    assert "Für eine Wochenplanung fehlt die nötige Laufroutine." in form.text
+    assert 'href="/coach/planning-shadow"' in form.text
+
+
+def test_multiweek_plan_generate_detail_and_accept(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
+    monkeypatch.setattr(get_settings(), "coach_planner_history_gates_enabled", False)
+    monkeypatch.setattr(get_settings(), "coach_deferred_quality_templates_enabled", True)
+    current_monday = _seed_shadow_week_history(session_factory)
+    start = current_monday + timedelta(days=7)
+    target = start + timedelta(weeks=7, days=6)
+    with session_factory() as session:
+        user = session.scalar(select(User))
+        assert user is not None
+        goal = AthleteGoal(user_id=user.id, event_type="10k", target_date=target)
+        session.add(goal)
+        session.commit()
+        goal_id = goal.id
+
+    generated = client.post(
+        "/plans/generate-cycle",
+        data={
+            "start_date": start.isoformat(),
+            "target_date": target.isoformat(),
+            "goal_id": str(goal_id),
+        },
+        follow_redirects=False,
+    )
+
+    assert generated.status_code == 303
+    assert re.fullmatch(r"/plans/cycles/\d+", generated.headers["location"])
+    detail = client.get(generated.headers["location"])
+    assert detail.status_code == 200
+    assert "Mehrwochenplan" in detail.text
+    assert "Schwellenintervalle" in detail.text
+    assert "VO₂max-Intervalle" in detail.text
+    accept_action = re.search(r'action="(/plans/cycles/\d+/revisions/\d+/accept)"', detail.text)
+    assert accept_action is not None
+
+    calendar = client.get("/plans")
+    assert calendar.status_code == 200
+    assert "Mehrwochenpläne" in calendar.text
+    assert f'href="{generated.headers["location"]}"' in calendar.text
+    assert "Vorschlag offen" in calendar.text
+
+    accepted = client.post(accept_action.group(1), follow_redirects=False)
+
+    assert accepted.status_code == 303
+    accepted_detail = client.get(accepted.headers["location"])
+    assert "Planrevision angenommen" in accepted_detail.text

@@ -26,6 +26,7 @@ from app.services.garmin.health_backfill import (
     retry_after_seconds,
     sync_health_history,
 )
+from app.services.garmin.heart_rate_zones import sync_heart_rate_zone_profiles
 from app.services.garmin.locks import (
     GarminAccountBusyError,
     garmin_account_active,
@@ -50,6 +51,7 @@ METRIC_LABELS = {
     "running_thresholds": "Laufschwellen",
     "cycling_ftp": "Cycling FTP",
     "race_predictions": "Rennprognosen",
+    "heart_rate_zones": "HF-Zonen",
     "activities": "Aktivitäten",
     "devices": "Geräte",
     "login": "Anmeldung",
@@ -769,6 +771,41 @@ def sync_garmin(
                     operation="sync_performance_metric",
                     record_count=item.stored_values,
                 )
+            zone_result = sync_heart_rate_zone_profiles(session, client, account, pacer)
+            run.operations_total += zone_result.api_calls
+            run.operations_completed += zone_result.api_calls
+            _event(
+                session,
+                run,
+                (
+                    f"HF-Zonen: {zone_result.profiles} Sportprofile gespeichert"
+                    if zone_result.status == "ok"
+                    else "HF-Zonen: keine Konfiguration"
+                    if zone_result.status == "empty"
+                    else "HF-Zonen: nicht unterstützt"
+                    if zone_result.status == "unsupported"
+                    else f"HF-Zonen: {zone_result.status}"
+                ),
+                category="metric",
+                status=(
+                    "success"
+                    if zone_result.status == "ok"
+                    else "skipped"
+                    if zone_result.status in {"empty", "unsupported"}
+                    else "error"
+                ),
+                level=(
+                    "success"
+                    if zone_result.status == "ok"
+                    else "info"
+                    if zone_result.status in {"empty", "unsupported"}
+                    else "warning"
+                ),
+                resource="heart_rate_zones",
+                day=date.today(),
+                operation="sync_heart_rate_zones",
+                record_count=zone_result.profiles,
+            )
             session.commit()
 
             run.stage = "devices"

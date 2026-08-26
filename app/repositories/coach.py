@@ -1,7 +1,7 @@
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from app.models import CoachConversation, CoachMessage, CoachToolCall
+from app.models import CoachAssistantRun, CoachConversation, CoachMessage, CoachToolCall
 from app.models.user import utcnow
 
 
@@ -75,6 +75,49 @@ def create_message(
     return message
 
 
+def create_assistant_run(
+    session: Session,
+    conversation: CoachConversation,
+    user_message: CoachMessage,
+    assistant_message: CoachMessage,
+    *,
+    model_id: str | None,
+    request_id: str | None,
+) -> CoachAssistantRun:
+    if (
+        user_message.conversation_id != conversation.id
+        or assistant_message.conversation_id != conversation.id
+        or user_message.role != "user"
+        or assistant_message.role != "assistant"
+    ):
+        raise ValueError("Assistant run messages do not match the conversation")
+    run = CoachAssistantRun(
+        conversation_id=conversation.id,
+        user_message_id=user_message.id,
+        assistant_message_id=assistant_message.id,
+        status="streaming",
+        model_id=model_id,
+        request_id=request_id,
+    )
+    session.add(run)
+    session.flush()
+    return run
+
+
+def find_assistant_run(
+    session: Session, user_id: int, conversation_id: int, run_id: int
+) -> CoachAssistantRun | None:
+    return session.scalar(
+        select(CoachAssistantRun)
+        .join(CoachConversation)
+        .where(
+            CoachAssistantRun.id == run_id,
+            CoachAssistantRun.conversation_id == conversation_id,
+            CoachConversation.user_id == user_id,
+        )
+    )
+
+
 def complete_message(session: Session, message_id: int, content: str) -> None:
     message = session.get(CoachMessage, message_id)
     if message is None:
@@ -84,6 +127,9 @@ def complete_message(session: Session, message_id: int, content: str) -> None:
     completed_at = utcnow()
     message.completed_at = completed_at
     message.conversation.updated_at = completed_at
+    if message.generated_run is not None:
+        message.generated_run.status = "completed"
+        message.generated_run.completed_at = completed_at
 
 
 def fail_message(session: Session, message_id: int, *, interrupted: bool = False) -> None:
@@ -94,6 +140,9 @@ def fail_message(session: Session, message_id: int, *, interrupted: bool = False
     completed_at = utcnow()
     message.completed_at = completed_at
     message.conversation.updated_at = completed_at
+    if message.generated_run is not None:
+        message.generated_run.status = message.status
+        message.generated_run.completed_at = completed_at
 
 
 def start_tool_call(

@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Garmin HF-Zonen · Analyse · PacePilot{% endblock %}
+{% block content %}
+<div class="mx-auto max-w-5xl space-y-6 text-sm">
+  <header>
+    <a class="text-xs font-semibold text-primary transition hover:text-primary-hover" href="/profile?period={{ period }}&amp;end={{ end.isoformat() }}">← Zur Analyse</a>
+    <p class="mt-6 text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">{{ metric.group }}</p>
+    <h1 class="mt-2 font-display text-3xl font-semibold tracking-tight">{{ metric.title }}</h1>
+    <p class="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">{{ metric.description }}</p>
+    {% if synced_at %}<p class="mt-2 text-xs text-muted-foreground">Zuletzt von Garmin aktualisiert: {{ synced_at|datetime }}</p>{% endif %}
+  </header>
+
+  {% if profiles %}
+    {% for profile in profiles %}
+    <article class="overflow-hidden rounded-xl border border-border bg-surface">
+      <div class="flex flex-col gap-3 border-b border-border px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+        <div><p class="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">Garmin-Sportprofil</p><h2 class="mt-1 text-lg font-semibold">{{ profile.sport }}</h2></div>
+        <span class="rounded-full bg-primary-subtle px-3 py-1 text-xs font-semibold text-primary-emphasis">{{ profile.method }}</span>
+      </div>
+      <div class="grid gap-6 p-5 lg:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)]">
+        <section aria-labelledby="basis-{{ loop.index }}">
+          <h3 class="font-semibold" id="basis-{{ loop.index }}">Garmin-Berechnungsgrundlage</h3>
+          <p class="mt-1 text-xs leading-5 text-muted-foreground">Garmin verwendet die markierten Metriken für die Zonengrenzen. Die übrigen Werte sind hinterlegt, bestimmen diese Konfiguration aber nicht direkt.</p>
+          <dl class="mt-4 divide-y divide-border rounded-lg border border-border">
+            {% for item in profile.metrics %}<div class="flex items-center justify-between gap-4 px-3 py-3"><dt><span class="block text-xs text-muted-foreground">{{ item.label }}</span>{% if item.used %}<small class="mt-0.5 block text-xs font-semibold text-primary">Wird für diese Zonen verwendet</small>{% endif %}</dt><dd class="font-semibold">{{ item.value }}</dd></div>{% endfor %}
+          </dl>
+        </section>
+        <section aria-labelledby="zones-{{ loop.index }}">
+          <div class="flex items-baseline justify-between gap-4"><h3 class="font-semibold" id="zones-{{ loop.index }}">Aktuelle Zonengrenzen</h3><span class="text-xs text-muted-foreground">5-Zonen-Modell</span></div>
+          <div class="mt-4 grid gap-2">
+            {% for zone in profile.zones %}<div class="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 rounded-lg border border-border px-3 py-3"><span class="grid size-8 place-items-center rounded-full bg-primary-subtle text-xs font-bold text-primary-emphasis">{{ zone.number }}</span><span class="text-xs text-muted-foreground">Zone {{ zone.number }}</span><strong>{{ zone.range }}</strong></div>{% endfor %}
+          </div>
+        </section>
+      </div>
+    </article>
+    {% endfor %}
+  {% else %}
+    <section class="rounded-xl border border-border bg-surface p-6"><h2 class="text-lg font-semibold">Noch keine HF-Zonen synchronisiert</h2><p class="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">Starte in den Einstellungen eine Garmin-Synchronisierung. PacePilot übernimmt anschließend deine aktuell bei Garmin konfigurierten Zonen.</p><a class="mt-4 inline-flex text-xs font-semibold text-primary" href="/settings">Synchronisierung öffnen →</a></section>
+  {% endif %}
+
+  <section class="rounded-xl border border-border bg-surface-muted p-4 text-xs leading-5 text-muted-foreground"><strong class="text-foreground">Quelle:</strong> Diese Grenzen und Berechnungswerte werden von Garmin bereitgestellt. PacePilot berechnet oder verändert die Zonen nicht. Aktivitätsdetails können historische Grenzen zeigen, wenn Garmin die Konfiguration zwischenzeitlich geändert hat.</section>
+</div>
+{% endblock %}

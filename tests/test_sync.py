@@ -159,6 +159,34 @@ class FakeGarmin:
     def get_race_predictions(self) -> dict[str, Any]:
         return {"calendarDate": date.today().isoformat(), "time5K": 1_200}
 
+    def get_heart_rate_zones(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "sport": "DEFAULT",
+                "trainingMethod": "HR_MAX",
+                "zone1Floor": 105,
+                "zone2Floor": 125,
+                "zone3Floor": 144,
+                "zone4Floor": 164,
+                "zone5Floor": 185,
+                "maxHeartRateUsed": 205,
+                "restingHeartRateUsed": 67,
+                "lactateThresholdHeartRateUsed": None,
+            },
+            {
+                "sport": "RUNNING",
+                "trainingMethod": "HR_RESERVE",
+                "zone1Floor": 136,
+                "zone2Floor": 150,
+                "zone3Floor": 164,
+                "zone4Floor": 177,
+                "zone5Floor": 191,
+                "maxHeartRateUsed": 205,
+                "restingHeartRateUsed": 67,
+                "lactateThresholdHeartRateUsed": None,
+            },
+        ]
+
     def get_devices(self) -> list[dict[str, Any]]:
         return [{"deviceId": 77, "displayName": "Forerunner", "productType": "FR"}]
 
@@ -220,7 +248,7 @@ def test_sync_normalizes_and_stores_data(
         assert result.message == "Synchronisierung abgeschlossen"
         assert result.current_item == result.total_items == 2
         assert result.days_completed == result.days_total == 2
-        assert result.operations_completed == result.operations_total == 22
+        assert result.operations_completed == result.operations_total == 23
         assert result.activities_synced == 1
         assert result.health_days_synced == 2
         activity = session.scalar(select(Activity))
@@ -245,6 +273,25 @@ def test_sync_normalizes_and_stores_data(
         assert fitness.lactate_threshold_hr == 170
         assert fitness.cycling_ftp_watts == 280
         assert fitness.race_prediction_5k_seconds == 1_200
+        assert account.heart_rate_zone_profiles == [
+            {
+                "sport": "DEFAULT",
+                "training_method": "HR_MAX",
+                "zone_floors": [105, 125, 144, 164, 185],
+                "max_hr": 205,
+                "resting_hr": 67,
+                "lactate_threshold_hr": None,
+            },
+            {
+                "sport": "RUNNING",
+                "training_method": "HR_RESERVE",
+                "zone_floors": [136, 150, 164, 177, 191],
+                "max_hr": 205,
+                "resting_hr": 67,
+                "lactate_threshold_hr": None,
+            },
+        ]
+        assert account.heart_rate_zones_synced_at is not None
         assert health.steps == 9000
         assert health.sleep_score == 82
         assert health.hrv_average == 54.0

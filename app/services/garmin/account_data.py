@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import shutil
 from dataclasses import dataclass
@@ -18,11 +19,59 @@ from app.models import (
     GarminSyncState,
     SyncRun,
     Workout,
+    WorkoutGarminBinding,
+    WorkoutGarminRemoteIdentity,
+    WorkoutValidationRun,
 )
 from app.services.garmin.client import cancel_garmin_account_logins
 from app.services.garmin.locks import garmin_account_slot
 
 logger = logging.getLogger(__name__)
+
+
+def garmin_principal_fingerprint(email: str) -> str:
+    return hashlib.sha256(email.strip().lower().encode()).hexdigest()
+
+
+def record_connected_principal(session: Session, account: GarminAccount, email: str) -> None:
+    fingerprint = garmin_principal_fingerprint(email)
+    identities = list(
+        session.scalars(
+            select(WorkoutGarminRemoteIdentity).where(
+                WorkoutGarminRemoteIdentity.garmin_account_id == account.id
+            )
+        )
+    )
+    principal_changed = account.principal_fingerprint not in {None, fingerprint}
+    unverified_binding_ids = {
+        identity.binding_id
+        for identity in identities
+        if identity.principal_fingerprint != fingerprint
+    }
+    if principal_changed or unverified_binding_ids:
+        binding_ids = (
+            {identity.binding_id for identity in identities}
+            if principal_changed
+            else unverified_binding_ids
+        )
+        bindings = list(
+            session.scalars(
+                select(WorkoutGarminBinding).where(WorkoutGarminBinding.id.in_(binding_ids))
+            )
+        )
+        for binding in bindings:
+            binding.content_status = "unknown"
+            binding.calendar_status = "unknown"
+            binding.device_status = "unknown"
+            binding.last_error_code = "garmin.principal_changed"
+            binding.last_error_message = (
+                "Das verbundene Garmin-Konto hat gewechselt. "
+                "Bestehende Remote-IDs müssen manuell geprüft werden."
+            )
+    if principal_changed:
+        account.heart_rate_zone_profiles = None
+        account.heart_rate_zones_synced_at = None
+    account.principal_fingerprint = fingerprint
 
 
 @dataclass(frozen=True)
@@ -64,6 +113,8 @@ def _reset_connection(account: GarminAccount) -> None:
     account.rate_limit_until = None
     account.sync_status = "not_connected"
     account.sync_error = None
+    account.heart_rate_zone_profiles = None
+    account.heart_rate_zones_synced_at = None
 
 
 def _user_row_count(session: Session, model: Any, user_id: int) -> int:
@@ -102,22 +153,22 @@ def delete_garmin_data(session: Session, account: GarminAccount) -> GarminDataDe
         session.execute(delete(GarminSyncState).where(GarminSyncState.user_id == user_id))
         session.execute(delete(SyncRun).where(SyncRun.user_id == user_id))
         session.execute(delete(GarminDevice).where(GarminDevice.account_id == account_id))
-
-        workouts = list(
-            session.scalars(
-                select(Workout).where(
-                    Workout.user_id == user_id,
-                    Workout.garmin_workout_id.is_not(None),
+        session.execute(
+            delete(WorkoutValidationRun).where(
+                WorkoutValidationRun.workout_id.in_(
+                    select(Workout.id).where(Workout.user_id == user_id)
                 )
             )
         )
-        for workout in workouts:
-            workout.garmin_workout_id = None
-            if workout.status in {"published", "pushed"}:
-                workout.status = "confirmed"
+
+        # Remote identities and operation history are a minimal deduplication ledger. Removing
+        # them while Garmin still holds the workout could cause a later duplicate upload.
+        workouts_unlinked = 0
         account.last_sync_at = None
         account.rate_limit_until = None
         account.sync_error = None
+        account.heart_rate_zone_profiles = None
+        account.heart_rate_zones_synced_at = None
         if account.connected_at is not None:
             account.sync_status = "connected"
         session.commit()
@@ -127,7 +178,7 @@ def delete_garmin_data(session: Session, account: GarminAccount) -> GarminDataDe
             health_days=health_days,
             fitness_days=fitness_days,
             sync_runs=sync_runs,
-            workouts_unlinked=len(workouts),
+            workouts_unlinked=workouts_unlinked,
         )
         logger.info(
             "Garmin data deleted",

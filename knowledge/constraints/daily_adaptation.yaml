@@ -1,0 +1,29 @@
+id: daily_adaptation
+version: 1.0.0
+rules:
+  - id: ADAPT-NO-ESCALATION-001
+    status: active
+    enforcement: hard_constraint
+    implementation: adaptation.no_load_increase
+    description: Daily adaptation may preserve or reduce load but cannot increase it.
+    parameters:
+      compared_dimensions: [duration, distance, intensity, density]
+    evidence_refs: [E-PROGRESSION-001]
+    product_heuristic:
+      product_default: true
+      rationale: No spontaneous escalation is a safety-oriented product invariant for daily adaptation.
+      status: initial_product_default
+      reviewed_on: 2026-08-24
+  - id: ADAPT-VOLUME-REDUCTION-001
+    status: active
+    enforcement: heuristic
+    implementation: adaptation.reduce_volume
+    description: Initial daily adaptation reduces every volume end condition uniformly.
+    parameters:
+      factor: 0.75
+    evidence_refs: []
+    product_heuristic:
+      product_default: true
+      rationale: A uniform 25 percent reduction is a conservative configurable starting point, not a universal optimum.
+      status: initial_product_default
+      reviewed_on: 2026-08-25

@@ -1,0 +1,87 @@
+id: safety
+version: 1.0.0
+rules:
+  - id: SAFE-CARDIO-001
+    status: active
+    enforcement: hard_constraint
+    implementation: safety.cardiopulmonary_warning
+    description: Cardiopulmonary warning signs stop normal running guidance.
+    evidence_refs: [E-ILLNESS-001]
+  - id: SAFE-ILLNESS-001
+    status: active
+    enforcement: hard_constraint
+    implementation: safety.fever_or_systemic_illness
+    description: Fever or systemic illness stops normal running guidance.
+    evidence_refs: [E-ILLNESS-001]
+  - id: SAFE-ILLNESS-002
+    status: active
+    enforcement: hard_constraint
+    implementation: safety.illness_unclear
+    description: Ambiguous illness requires clarification before acceptance.
+    evidence_refs: [E-ILLNESS-001]
+  - id: SAFE-ILLNESS-003
+    status: active
+    enforcement: soft_constraint
+    implementation: safety.mild_illness
+    description: Mild upper-respiratory symptoms require conservative training guidance.
+    evidence_refs: [E-ILLNESS-001]
+  - id: SAFE-PAIN-001
+    status: active
+    enforcement: hard_constraint
+    implementation: safety.pain_alters_gait
+    description: Pain that alters gait stops running guidance.
+    product_heuristic:
+      product_default: true
+      rationale: The deterministic product escalation is deliberately conservative and non-diagnostic.
+      status: initial_product_default
+      reviewed_on: 2026-08-24
+  - id: SAFE-PAIN-002
+    status: active
+    enforcement: hard_constraint
+    implementation: safety.pain_unclear
+    description: Incompletely characterized pain requires clarification.
+    product_heuristic:
+      product_default: true
+      rationale: Clarification is preferred over guessing or silently allowing a run.
+      status: initial_product_default
+      reviewed_on: 2026-08-24
+  - id: SAFE-PAIN-003
+    status: active
+    enforcement: soft_constraint
+    implementation: safety.pain_warning
+    description: Localized or worsening pain produces a visible warning.
+    product_heuristic:
+      product_default: true
+      rationale: The warning boundary is a conservative product decision and not a diagnosis.
+      status: initial_product_default
+      reviewed_on: 2026-08-24
+  - id: READY-SUBJECTIVE-001
+    status: active
+    enforcement: soft_constraint
+    implementation: readiness.subjective_strain
+    description: Strong subjective strain keeps the next load conservative.
+    evidence_refs: [E-SRPE-001]
+  - id: TIME-BUDGET-001
+    status: active
+    enforcement: soft_constraint
+    implementation: constraint.no_time_available
+    description: A workout cannot silently exceed an explicitly unavailable time budget.
+    product_heuristic:
+      product_default: true
+      rationale: Respecting an explicit zero-minute budget is a product invariant.
+      status: initial_product_default
+      reviewed_on: 2026-08-24
+  - id: RECOVERY-SESSION-001
+    status: active
+    enforcement: soft_constraint
+    implementation: recovery.difficult_session
+    description: A difficult recent session requires conservative review of the next load.
+    parameters:
+      high_rpe_threshold: 8
+      low_feel_threshold: 2
+    evidence_refs: [E-SRPE-001]
+    product_heuristic:
+      product_default: true
+      rationale: Exact RPE and feel warning thresholds are configurable conservative defaults.
+      status: initial_product_default
+      reviewed_on: 2026-08-24

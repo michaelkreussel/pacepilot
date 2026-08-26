@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf_token }}">
   <title>{% block title %}PacePilot{% endblock %}</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -10,13 +11,14 @@
   <script src="{{ url_for('static', path='/js/theme.js') }}?v=20260809-3"></script>
   <script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
   <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js" defer></script>
+  <script src="{{ url_for('static', path='/js/csrf.js') }}?v=20260820-1" defer></script>
   <script src="{{ url_for('static', path='/js/local-time.js') }}?v=20260809-1" defer></script>
   {% block head %}{% endblock %}
-  <link rel="stylesheet" href="{{ url_for('static', path='/css/tailwind.css') }}?v=20260820-2">
+  <link rel="stylesheet" href="{{ url_for('static', path='/css/tailwind.css') }}?v=20260826-28">
 </head>
 <body class="m-0 min-h-screen bg-background font-sans text-sm text-foreground">
-  <div class="min-h-screen min-[1051px]:grid min-[1051px]:grid-cols-[248px_minmax(0,1fr)]" x-data="{ menuOpen: false }">
-    <aside class="sidebar fixed inset-y-0 -left-[248px] z-30 flex w-[248px] flex-col overflow-y-auto overscroll-contain border-r border-border bg-surface p-5 transition-[left] duration-200 min-[1051px]:sticky min-[1051px]:left-0 min-[1051px]:top-0 min-[1051px]:h-screen min-[1051px]:p-6" :class="menuOpen && 'is-open'">
+  <div class="min-h-screen min-[1051px]:grid min-[1051px]:grid-cols-[248px_minmax(0,1fr)]" x-data="{ menuOpen: false, desktop: window.matchMedia('(min-width: 1051px)').matches }" x-init="const media = window.matchMedia('(min-width: 1051px)'); media.addEventListener('change', event => desktop = event.matches)">
+    <aside class="sidebar fixed inset-y-0 -left-[248px] z-30 flex w-[248px] flex-col overflow-y-auto overscroll-contain border-r border-border bg-surface p-5 transition-[left] duration-200 min-[1051px]:sticky min-[1051px]:left-0 min-[1051px]:top-0 min-[1051px]:h-screen min-[1051px]:p-6" :class="menuOpen && 'is-open'" :inert="!desktop && !menuOpen" :aria-hidden="(!desktop && !menuOpen).toString()" aria-label="Seitenleiste">
       <a class="flex items-center gap-3 font-display text-lg font-bold tracking-tight text-foreground" href="{{ '/' if onboarding.complete else '/onboarding' }}">
         <span class="grid size-9 place-items-center rounded-lg bg-secondary font-display text-base font-bold text-secondary-foreground">P</span>
         <span class="leading-tight">PacePilot <small class="block text-[0.625rem] font-semibold uppercase tracking-[0.14em] text-muted-foreground">Early Access</small></span>
@@ -45,7 +47,7 @@
         <div class="mt-4 flex items-center justify-between gap-3 border-t border-border px-3 pt-4">
           <div class="min-w-0">
             <span class="block truncate text-xs font-semibold text-foreground">{{ current_user.display_name }}</span>
-            <form class="mt-1" method="post" action="/logout"><button class="text-xs text-muted-foreground transition hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" type="submit">Abmelden</button></form>
+            <form class="mt-1" method="post" action="/logout">{{ csrf_field() }}<button class="text-xs text-muted-foreground transition hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" type="submit">Abmelden</button></form>
           </div>
           {% include "partials/theme_toggle.html" %}
         </div>

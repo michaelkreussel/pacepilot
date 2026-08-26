@@ -1,0 +1,51 @@
+id: long_run
+version: 1.0.0
+status: active
+name: Langer lockerer Lauf
+sport: running
+purpose: aerobic_endurance_and_fatigue_resistance
+intensity_domain: low
+rule_strength: heuristic
+eligibility:
+  min_consistent_running_weeks: 4
+  min_runs_per_week: 2
+  requirements:
+    - sufficient_recent_long_run_baseline
+    - no_active_safety_stop
+contraindications:
+  - active_pain_affecting_gait
+  - fever_or_systemic_illness
+  - insufficient_long_run_baseline
+structure:
+  kind: continuous
+  duration_minutes: {minimum: 60, default: 75, maximum: 120}
+  rpe: {minimum: 2, maximum: 3}
+  session_rpe: {minimum: 2, maximum: 4}
+  instructions:
+    - Halte den Lauf überwiegend locker und unterhalb der ersten Schwelle.
+    - Dauer und Verpflegung richten sich nach deiner jüngsten Long-Run-Historie, nicht nach einer pauschalen Distanz.
+progression_axes:
+  - duration
+  - frequency
+  - fueling_practice
+weekly_frequency_cap: 1
+fallback_targets:
+  - rpe_and_talk_test
+  - shorten_to_recent_baseline
+evidence_refs:
+  - E-TID-001
+  - E-PROGRESSION-001
+  - E-INJURY-SESSION-SPIKE-001
+product_heuristic:
+  product_default: true
+  rationale: The active registry caps the initial generic template at 120 minutes until athlete-specific baseline validation is connected.
+  status: initial_product_default
+  reviewed_on: 2026-08-24
+garmin_capabilities:
+  time_steps: true
+  repeat_blocks: true
+  rpe_target: false
+  local_instructions: false
+  degradation:
+    - rpe_target_to_no_device_target
+    - instructions_remain_in_pacepilot

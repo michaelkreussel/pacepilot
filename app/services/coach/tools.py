@@ -4,11 +4,22 @@ from datetime import date, datetime, timedelta
 from typing import Annotated, Literal
 
 from langchain.tools import ToolRuntime, tool
+from langchain_core.tools import BaseTool
 from pydantic import Field
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.models import CoachMessage, User
+from app.repositories.coach import find_assistant_run
 from app.services.analytics.athlete_data import AthleteDataService
 from app.services.analytics.health_trends import MetricTrend
+from app.services.planning.workout_proposals import (
+    RUNNING_PROPOSAL_TEMPLATE_LABELS,
+    RunningProposalRequest,
+    RunningProposalService,
+    WorkoutProposalError,
+)
+from app.services.planning.workout_service import ProposalOrigin, WorkoutServiceError
+from app.services.planning.workout_templates import TemplateExpansionError
 
 HealthMetric = Literal[
     "resting_hr",
@@ -26,6 +37,7 @@ HealthMetric = Literal[
     "acute_load",
     "chronic_load",
 ]
+COACH_TOOL_CONTRACT_VERSION = "coach-tools-v2"
 
 
 @dataclass(frozen=True)
@@ -33,6 +45,11 @@ class CoachRuntimeContext:
     user_id: int
     as_of: date
     session_factory: sessionmaker[Session]
+    request_id: str | None = None
+    conversation_id: int | None = None
+    user_message_id: int | None = None
+    assistant_message_id: int | None = None
+    assistant_run_id: int | None = None
 
 
 def _json_default(value: object) -> str:
@@ -72,6 +89,20 @@ def get_current_recovery_state(runtime: ToolRuntime[CoachRuntimeContext]) -> str
             session, runtime.context.user_id, as_of=runtime.context.as_of
         ).get_current_recovery_state()
     return _json(asdict(state))
+
+
+@tool
+def get_subjective_context(runtime: ToolRuntime[CoachRuntimeContext]) -> str:
+    """Get recent effective Garmin/manual activity feedback.
+
+    Use this with recovery data when recent perceived effort should affect today's training. The
+    athlete's current subjective condition comes directly from the current chat message.
+    """
+    with runtime.context.session_factory() as session:
+        subjective = AthleteDataService(
+            session, runtime.context.user_id, as_of=runtime.context.as_of
+        ).get_subjective_context()
+    return _json(asdict(subjective))
 
 
 @tool
@@ -183,8 +214,97 @@ def get_upcoming_workouts(
     return _json(tuple(asdict(workout) for workout in workouts))
 
 
+@tool
+def create_running_workout_proposal(
+    runtime: ToolRuntime[CoachRuntimeContext],
+    suggested_for: date,
+    available_minutes: Annotated[int, Field(ge=20, le=1440)],
+    template_id: Literal[
+        "easy_run",
+        "recovery_run",
+        "long_run",
+        "strides",
+        "threshold_cruise",
+        "vo2_intervals",
+    ] = "easy_run",
+) -> str:
+    """Create one unaccepted running workout through PacePilot's deterministic planner.
+
+    Use this only when the athlete explicitly wants a running-workout proposal and has supplied a
+    desired date plus available time. Select the workout type that best matches the stated goal;
+    if the athlete did not request a type, use easy_run. The result remains unscheduled and
+    unaccepted. This tool cannot accept, schedule, upload, push, or synchronize a workout.
+    """
+    context = runtime.context
+    if (
+        context.conversation_id is None
+        or context.user_message_id is None
+        or context.assistant_message_id is None
+        or context.assistant_run_id is None
+    ):
+        raise ValueError("Coach proposal runtime is incomplete")
+    conversation_id = context.conversation_id
+    user_message_id = context.user_message_id
+    assistant_message_id = context.assistant_message_id
+    assistant_run_id = context.assistant_run_id
+    with context.session_factory() as session:
+        run = find_assistant_run(session, context.user_id, conversation_id, assistant_run_id)
+        user_message = session.get(CoachMessage, user_message_id)
+        assistant_message = session.get(CoachMessage, assistant_message_id)
+        user = session.get(User, context.user_id)
+        if (
+            run is None
+            or user is None
+            or run.user_message_id != user_message_id
+            or run.assistant_message_id != assistant_message_id
+            or user_message is None
+            or user_message.conversation_id != conversation_id
+            or user_message.role != "user"
+            or assistant_message is None
+            or assistant_message.conversation_id != conversation_id
+            or assistant_message.role != "assistant"
+        ):
+            raise ValueError("Coach proposal runtime is invalid")
+        request = RunningProposalRequest(
+            template_id=template_id,
+            suggested_for=suggested_for,
+            available_minutes=available_minutes,
+            # SQLite rowids are reused after conversation deletes cascade old runs away,
+            # so the run id alone is not unique. The creation timestamp disambiguates
+            # recycled ids and keeps retries within one run on the same key.
+            idempotency_key=(
+                f"coach-run:{assistant_run_id}:{run.created_at.isoformat()}:"
+                "create_running_workout_proposal:v2"
+            ),
+        )
+        try:
+            RunningProposalService(session, user, request_id=context.request_id).create(
+                request,
+                origin=ProposalOrigin(
+                    conversation_id=conversation_id,
+                    user_message_id=user_message_id,
+                    assistant_message_id=assistant_message_id,
+                    assistant_run_id=assistant_run_id,
+                ),
+            )
+        except (WorkoutProposalError, TemplateExpansionError, WorkoutServiceError) as exc:
+            return _json(
+                {
+                    "status": "not_created",
+                    "error": {"code": exc.code, "message": str(exc)},
+                }
+            )
+        return _json(
+            {
+                "status": "created",
+                "artifact": {"type": "workout_proposal"},
+            }
+        )
+
+
 COACH_TOOLS = (
     get_current_recovery_state,
+    get_subjective_context,
     get_health_trends,
     get_training_summary,
     get_recent_activities,
@@ -193,14 +313,23 @@ COACH_TOOLS = (
     get_upcoming_workouts,
 )
 
+
+def coach_tools(*, workout_proposals_enabled: bool) -> tuple[BaseTool, ...]:
+    if workout_proposals_enabled:
+        return (*COACH_TOOLS, create_running_workout_proposal)
+    return COACH_TOOLS
+
+
 TOOL_LABELS = {
     "get_current_recovery_state": "Aktuelle Erholung prüfen",
+    "get_subjective_context": "Subjektives Aktivitätsfeedback laden",
     "get_health_trends": "Gesundheitstrends vergleichen",
     "get_training_summary": "Trainingsbelastung auswerten",
     "get_recent_activities": "Letzte Trainingseinheiten ansehen",
     "get_activity_details": "Trainingseinheit genauer analysieren",
     "get_health_day": "Gesundheitsdaten des Tages laden",
     "get_upcoming_workouts": "Geplante Einheiten prüfen",
+    "create_running_workout_proposal": "Workout-Vorschlag erstellen",
 }
 
 
@@ -212,4 +341,10 @@ def describe_tool_call(tool_name: str, arguments: dict[str, object]) -> tuple[st
         return label, f"Datum: {arguments['day']}"
     if tool_name == "get_recent_activities" and "limit" in arguments:
         return label, f"Letzte {arguments['limit']} Einheiten"
+    if tool_name == "create_running_workout_proposal":
+        day = arguments.get("suggested_for")
+        minutes = arguments.get("available_minutes")
+        template_id = arguments.get("template_id", "easy_run")
+        template_label = RUNNING_PROPOSAL_TEMPLATE_LABELS.get(template_id, str(template_id))
+        return label, f"{template_label} · {day} · {minutes} Minuten"
     return label, None

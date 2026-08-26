@@ -9,7 +9,14 @@ from sqlalchemy import select
 
 from app.config import get_settings
 from app.database import SessionLocal
-from app.models import GarminAccount, SyncRun
+from app.models import (
+    GarminAccount,
+    SyncRun,
+    Workout,
+    WorkoutGarminAttempt,
+    WorkoutGarminBinding,
+    WorkoutGarminOperation,
+)
 from app.models.user import utcnow
 from app.services.garmin.locks import GarminAccountBusyError, garmin_account_slot
 from app.services.garmin.sync import rate_limit_cooldown_remaining, sync_garmin
@@ -116,7 +123,17 @@ def repair_interrupted_syncs() -> None:
             )
         )
         running_runs = list(session.scalars(select(SyncRun).where(SyncRun.status == "running")))
-        if not accounts and not running_runs:
+        pending_operations = list(
+            session.scalars(
+                select(WorkoutGarminOperation).where(WorkoutGarminOperation.status == "pending")
+            )
+        )
+        pending_attempts = list(
+            session.scalars(
+                select(WorkoutGarminAttempt).where(WorkoutGarminAttempt.status == "pending")
+            )
+        )
+        if not accounts and not running_runs and not pending_operations and not pending_attempts:
             return
         for account in accounts:
             account.sync_status = "error"
@@ -127,19 +144,134 @@ def repair_interrupted_syncs() -> None:
             run.message = "Synchronisierung unterbrochen"
             run.error = message
             run.finished_at = utcnow()
+        interrupted_at = utcnow()
+        attempted_operation_ids = {attempt.operation_id for attempt in pending_attempts}
+        for attempt in pending_attempts:
+            attempt.status = "unknown"
+            attempt.completed_at = interrupted_at
+            attempt.error_code = "garmin.process_interrupted"
+            attempt.error_message = "Garmin-Operation durch Neustart unterbrochen"
+        for operation in pending_operations:
+            attempted = operation.id in attempted_operation_ids
+            operation.status = "unknown" if attempted else "retryable"
+            operation.completed_at = interrupted_at if attempted else None
+            operation.error_code = (
+                "garmin.process_interrupted" if attempted else "garmin.operation_not_started"
+            )
+            binding = session.get(WorkoutGarminBinding, operation.binding_id)
+            if binding is not None:
+                axis = (
+                    "content_status"
+                    if operation.operation_type in {"upload", "update", "delete"}
+                    else "calendar_status"
+                    if operation.operation_type in {"schedule", "unschedule"}
+                    else "device_status"
+                )
+                setattr(binding, axis, "unknown" if attempted else "retryable")
+                binding.last_error_code = operation.error_code
+                binding.last_error_message = (
+                    "Der Ausgang der Garmin-Operation muss geprüft werden."
+                    if attempted
+                    else "Die Garmin-Operation wurde vor dem Netzwerkaufruf unterbrochen."
+                )
         session.commit()
+
+
+def repair_stale_garmin_operations() -> None:
+    """Classify operations that remain pending while the process keeps running."""
+    cutoff = utcnow() - timedelta(minutes=get_settings().garmin_operation_stale_minutes)
+    with SessionLocal() as session:
+        pending_operations = list(
+            session.scalars(
+                select(WorkoutGarminOperation).where(
+                    WorkoutGarminOperation.status == "pending",
+                    WorkoutGarminOperation.created_at <= cutoff,
+                )
+            )
+        )
+        if not pending_operations:
+            return
+        for operation in pending_operations:
+            account_id = session.scalar(
+                select(GarminAccount.id)
+                .join(Workout, Workout.user_id == GarminAccount.user_id)
+                .where(Workout.id == operation.workout_id)
+            )
+            if account_id is None:
+                continue
+            try:
+                with garmin_account_slot(account_id):
+                    session.refresh(operation)
+                    if operation.status != "pending":
+                        continue
+                    pending_attempts = list(
+                        session.scalars(
+                            select(WorkoutGarminAttempt).where(
+                                WorkoutGarminAttempt.operation_id == operation.id,
+                                WorkoutGarminAttempt.status == "pending",
+                            )
+                        )
+                    )
+                    if any(attempt.started_at > cutoff for attempt in pending_attempts):
+                        continue
+                    repaired_at = utcnow()
+                    attempted = bool(pending_attempts)
+                    for attempt in pending_attempts:
+                        attempt.status = "unknown"
+                        attempt.completed_at = repaired_at
+                        attempt.error_code = "garmin.operation_stale"
+                        attempt.error_message = "Garmin-Operation hat das Zeitlimit überschritten"
+                    operation.status = "unknown" if attempted else "retryable"
+                    operation.completed_at = repaired_at if attempted else None
+                    operation.error_code = (
+                        "garmin.operation_stale" if attempted else "garmin.operation_not_started"
+                    )
+                    binding = session.get(WorkoutGarminBinding, operation.binding_id)
+                    if binding is not None:
+                        axis = (
+                            "content_status"
+                            if operation.operation_type in {"upload", "update", "delete"}
+                            else "calendar_status"
+                            if operation.operation_type in {"schedule", "unschedule"}
+                            else "device_status"
+                        )
+                        setattr(binding, axis, "unknown" if attempted else "retryable")
+                        binding.last_error_code = operation.error_code
+                        binding.last_error_message = (
+                            "Der Ausgang der Garmin-Operation muss geprüft werden."
+                            if attempted
+                            else (
+                                "Die Garmin-Operation wurde nicht gestartet und kann "
+                                "wiederholt werden."
+                            )
+                        )
+                    session.commit()
+            except GarminAccountBusyError:
+                session.rollback()
+                continue
 
 
 def start_scheduler() -> None:
     settings = get_settings()
-    if not settings.scheduler_enabled or scheduler.running:
+    if scheduler.running:
         return
     repair_interrupted_syncs()
+    if not settings.scheduler_enabled:
+        return
     scheduler.add_job(
         synchronize_accounts,
         "interval",
         minutes=settings.sync_interval_minutes,
         id="garmin-sync",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        repair_stale_garmin_operations,
+        "interval",
+        minutes=5,
+        id="garmin-operation-repair",
         replace_existing=True,
         max_instances=1,
         coalesce=True,

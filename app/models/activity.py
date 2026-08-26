@@ -1,7 +1,16 @@
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -14,7 +23,10 @@ if TYPE_CHECKING:
 
 class Activity(Base):
     __tablename__ = "activities"
-    __table_args__ = (UniqueConstraint("user_id", "garmin_activity_id"),)
+    __table_args__ = (
+        UniqueConstraint("user_id", "garmin_activity_id"),
+        Index("uq_activities_id_user_id", "id", "user_id", unique=True),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
@@ -63,6 +75,7 @@ class Activity(Base):
     source_updated_at: Mapped[datetime | None] = mapped_column(DateTime)
     details_complete: Mapped[bool] = mapped_column(Boolean, default=False)
     splits_complete: Mapped[bool] = mapped_column(Boolean, default=False)
+    zones_complete: Mapped[bool] = mapped_column(Boolean, default=False)
     details_synced_at: Mapped[datetime | None] = mapped_column(DateTime)
     synced_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 

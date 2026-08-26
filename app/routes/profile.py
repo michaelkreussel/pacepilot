@@ -7,6 +7,7 @@ from fastapi.responses import HTMLResponse
 
 from app.auth import CurrentUser
 from app.database import SessionDep
+from app.models import GarminAccount
 from app.onboarding import require_data_access
 from app.services.analytics import AthleteDataService
 from app.services.analytics.fitness_trends import GarminFitnessAnalytics
@@ -14,7 +15,6 @@ from app.services.analytics.health_trends import MetricTrend, preferred_readines
 from app.services.analytics.training_trends import TrainingTimelinePoint
 from app.web import (
     context,
-    format_activity_type,
     format_duration,
     format_precise_duration,
     format_speed_as_pace,
@@ -200,7 +200,8 @@ METRIC_DETAILS: dict[str, dict[str, str]] = {
         "group": "Intensität",
         "title": "Trainingszonen",
         "description": (
-            "Zeigt die verfügbare Zeitverteilung über Herzfrequenz- oder Leistungszonen."
+            "Zeigt die verfügbare Zeitverteilung über alle Aktivitätstypen in Herzfrequenz- "
+            "oder Leistungszonen."
         ),
         "source": "training",
     },
@@ -281,6 +282,16 @@ METRIC_DETAILS: dict[str, dict[str, str]] = {
         "source": "fitness",
         "fitness_keys": "fitness_age",
     },
+    "garmin-heart-rate-zones": {
+        "chart_id": "garmin-heart-rate-zones",
+        "group": "Leistung & Schwellen",
+        "title": "Garmin HF-Zonen",
+        "description": (
+            "Zeigt deine aktuell bei Garmin konfigurierten Herzfrequenzzonen und die dafür "
+            "verwendete Berechnungsmethode."
+        ),
+        "source": "heart_rate_zones",
+    },
 }
 CHART_DETAIL_SLUGS = {details["chart_id"]: slug for slug, details in METRIC_DETAILS.items()}
 TIMELINE_CHART_IDS = {
@@ -320,10 +331,6 @@ FITNESS_DATASET_LABELS = {
 
 def _display_number(value: float, decimals: int = 0) -> str:
     return f"{value:.{decimals}f}".replace(".", ",")
-
-
-def _sport_label(sport: str) -> str:
-    return format_activity_type(sport)
 
 
 def _fresh(source_day: date | None, as_of: date, max_age_days: int) -> bool:
@@ -759,33 +766,26 @@ def _training_charts(
 
 
 def _zone_chart(summary: Any) -> dict[str, Any] | None:
-    groups: dict[tuple[str, str], list[Any]] = defaultdict(list)
+    groups: dict[str, dict[int, float]] = defaultdict(lambda: defaultdict(float))
     for item in summary.zone_distribution:
-        groups[(item.sport, item.zone_type)].append(item)
+        groups[item.zone_type][item.zone_number] += item.seconds
     if not groups:
         return None
-    sport, zone_type = min(
-        groups,
-        key=lambda key: (
-            0 if "run" in key[0] and key[1] == "heart_rate" else 1,
-            0 if key[1] == "heart_rate" else 1,
-            key,
-        ),
-    )
-    zones = sorted(groups[(sport, zone_type)], key=lambda item: item.zone_number)
+    zone_type = min(groups, key=lambda key: (0 if key == "heart_rate" else 1, key))
+    zones = sorted(groups[zone_type].items())
     return {
         "id": "zone-chart",
-        "kicker": _sport_label(sport),
+        "kicker": "Alle Aktivitäten",
         "title": "Herzfrequenzzonen" if zone_type == "heart_rate" else "Leistungszonen",
         "unit": "min",
         "type": "bar",
-        "labels": [f"Zone {item.zone_number}" for item in zones],
+        "labels": [f"Zone {zone_number}" for zone_number, _ in zones],
         "links": [],
         "datasets": [
             {
                 **_line_dataset(
                     "Zeit",
-                    [round(item.seconds / 60, 1) for item in zones],
+                    [round(seconds / 60, 1) for _, seconds in zones],
                     "#ff5c35",
                 ),
                 "type": "bar",
@@ -832,9 +832,12 @@ def _format_fitness_value(key: str, value: float) -> str:
 
 
 def _performance_cards(
-    fitness: GarminFitnessAnalytics, period: Period, end: date
+    fitness: GarminFitnessAnalytics,
+    period: Period,
+    end: date,
+    account: GarminAccount | None,
 ) -> list[dict[str, Any]]:
-    return [
+    cards = [
         {
             "key": metric.key,
             "label": FITNESS_PRESENTATION[metric.key][0],
@@ -847,6 +850,112 @@ def _performance_cards(
         }
         for metric in fitness.metrics
     ]
+    profiles = _heart_rate_zone_profiles(account)
+    if profiles and account is not None and account.heart_rate_zones_synced_at is not None:
+        profile = next((item for item in profiles if item["sport_key"] == "DEFAULT"), profiles[0])
+        cards.append(
+            {
+                "key": "garmin_heart_rate_zones",
+                "label": "Garmin HF-Zonen",
+                "value": (
+                    f"{len(profiles)} Profile"
+                    if len(profiles) > 1
+                    else f"{len(profile['zones'])} Zonen"
+                ),
+                "source_day": account.heart_rate_zones_synced_at,
+                "note": (
+                    f"{profile['sport']}: {profile['card_note']}"
+                    if len(profiles) > 1
+                    else profile["card_note"]
+                ),
+                "detail_url": (
+                    f"/profile/garmin-heart-rate-zones?period={period}&end={end.isoformat()}"
+                ),
+            }
+        )
+    return cards
+
+
+def _heart_rate_zone_profiles(account: GarminAccount | None) -> list[dict[str, Any]]:
+    if account is None or not account.heart_rate_zone_profiles:
+        return []
+    method_labels = {
+        "HR_MAX": ("Maximale Herzfrequenz", "HFmax", ("max_hr",)),
+        "HR_RESERVE": (
+            "Herzfrequenzreserve",
+            "HF-Reserve",
+            ("max_hr", "resting_hr"),
+        ),
+        "HRR": ("Herzfrequenzreserve", "HF-Reserve", ("max_hr", "resting_hr")),
+        "LACTATE_THRESHOLD": (
+            "Laktatschwellen-Herzfrequenz",
+            "Laktatschwelle",
+            ("lactate_threshold_hr",),
+        ),
+    }
+    sport_labels = {
+        "DEFAULT": "Standard",
+        "RUNNING": "Laufen",
+        "CYCLING": "Radfahren",
+        "SWIMMING": "Schwimmen",
+    }
+    profiles: list[dict[str, Any]] = []
+    for raw in account.heart_rate_zone_profiles:
+        floors = raw.get("zone_floors")
+        if (
+            not isinstance(floors, list)
+            or len(floors) != 5
+            or not all(isinstance(value, int) for value in floors)
+        ):
+            continue
+        method = str(raw.get("training_method") or "")
+        method_label, short_method, basis_keys = method_labels.get(
+            method, (method.replace("_", " ").title(), method, ())
+        )
+        basis_values = [raw.get(key) for key in basis_keys if isinstance(raw.get(key), int)]
+        zones = []
+        for index, floor in enumerate(floors):
+            upper = floors[index + 1] - 1 if index + 1 < len(floors) else raw.get("max_hr")
+            zones.append(
+                {
+                    "number": index + 1,
+                    "range": (
+                        f"{floor}–{upper} bpm"
+                        if isinstance(upper, int) and upper >= floor
+                        else f"ab {floor} bpm"
+                    ),
+                }
+            )
+        metrics = [
+            ("Maximale Herzfrequenz", "max_hr"),
+            ("Ruhepuls", "resting_hr"),
+            ("Laktatschwellen-HF", "lactate_threshold_hr"),
+        ]
+        profiles.append(
+            {
+                "sport_key": str(raw.get("sport") or "DEFAULT"),
+                "sport": sport_labels.get(
+                    str(raw.get("sport") or "DEFAULT"),
+                    str(raw.get("sport") or "").replace("_", " ").title(),
+                ),
+                "method": method_label,
+                "card_note": (
+                    f"Nach {short_method} · {'/'.join(str(value) for value in basis_values)} bpm"
+                    if basis_values
+                    else f"Methode {short_method}"
+                ),
+                "metrics": [
+                    {
+                        "label": label,
+                        "value": f"{raw.get(key)} bpm" if isinstance(raw.get(key), int) else "–",
+                        "used": key in basis_keys,
+                    }
+                    for label, key in metrics
+                ],
+                "zones": zones,
+            }
+        )
+    return profiles
 
 
 def _fitness_chart(
@@ -1024,13 +1133,28 @@ def _decorate_chart(chart: dict[str, Any], training: Any | None = None) -> None:
     elif chart_id == "zone-chart":
         values = [value for value in chart["datasets"][0]["data"] if value is not None]
         if values:
+            zone_context = (
+                period_context
+                if training.zone_data_complete
+                else "Bisher synchronisierte Zonen im Zeitraum"
+            )
             items.append(
                 {
                     "label": "Erfasste Zonenzeit",
                     "value": round(sum(values), 1),
                     "unit": "min",
-                    "context": period_context,
+                    "context": zone_context,
                 }
+            )
+            items.extend(
+                {
+                    "label": label,
+                    "value": value,
+                    "unit": "min",
+                    "context": "Alle Aktivitätstypen",
+                }
+                for label, value in zip(chart["labels"], chart["datasets"][0]["data"], strict=True)
+                if value is not None
             )
     elif chart_id == "intensity-chart":
         items = [
@@ -1270,7 +1394,7 @@ def profile(
             ),
             readiness_components=readiness_components,
             metric_cards=cards,
-            performance_cards=_performance_cards(fitness, period, end_date),
+            performance_cards=_performance_cards(fitness, period, end_date, user.garmin_account),
             health_notices=health_notices,
             training=training,
             training_show_data=training_show_data,
@@ -1292,6 +1416,21 @@ def profile_metric(
         raise HTTPException(status_code=404, detail="Analyse nicht gefunden")
 
     start, end_date, days = _period_dates(period, end)
+    if metric["source"] == "heart_rate_zones":
+        account = user.garmin_account
+        return templates.TemplateResponse(
+            request,
+            "profile_heart_rate_zones.html",
+            context(
+                request,
+                active_page="profile",
+                period=period,
+                end=end_date,
+                metric=metric,
+                profiles=_heart_rate_zone_profiles(account),
+                synced_at=account.heart_rate_zones_synced_at if account is not None else None,
+            ),
+        )
     analytics = AthleteDataService(session, user.id, as_of=end_date)
     chart: dict[str, Any] | None = None
     training: Any | None = None
@@ -1325,6 +1464,11 @@ def profile_metric(
             notices.append(
                 "Die Trainingshistorie ist noch nicht vollständig; Lücken werden nicht als null "
                 "gewertet."
+            )
+        if metric["chart_id"] == "zone-chart" and not training.zone_data_complete:
+            notices.append(
+                "Die Zonen einiger Aktivitäten werden noch synchronisiert; die angezeigten Werte "
+                "sind daher vorläufig."
             )
     else:
         fitness = analytics.get_garmin_fitness_metrics(days)

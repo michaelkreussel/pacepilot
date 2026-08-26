@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}Mehrwochenplan · PacePilot{% endblock %}
+{% block content %}
+<div class="mx-auto w-full max-w-3xl space-y-6">
+  <header class="space-y-2">
+    <p class="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">Planung</p>
+    <h1 class="font-display text-3xl font-semibold tracking-tight">Mehrwochenplan erstellen</h1>
+    <p class="max-w-2xl text-sm leading-6 text-muted-foreground">PacePilot plant Re-Entry, Base, Build, Specific und Taper als versionierte Vorschau. Jede materielle Änderung muss ausdrücklich angenommen werden. Verpasste Einheiten werden nicht nachgeholt.</p>
+  </header>
+
+  {% if not features.coach_planner_history_gates %}<div class="rounded-xl border border-warning/30 bg-warning-subtle p-4 text-sm text-warning-emphasis" role="status"><strong>Planner-Testmodus aktiv.</strong> Wochen- und Frequenzanforderungen werden für diese Vorschau übergangen; die übrigen Sicherheits- und Validierungsregeln bleiben aktiv.</div>{% endif %}
+  {% if features.coach_deferred_quality_templates %}<div class="rounded-xl border border-warning/30 bg-warning-subtle p-4 text-sm text-warning-emphasis" role="status"><strong>Quality-Testmodus aktiv.</strong> Build- und Specific-Phasen können Schwellen- bzw. VO₂max-Intervalle enthalten.</div>{% endif %}
+
+  {% if error %}<div class="rounded-xl border border-danger/25 bg-danger-subtle p-4 text-sm text-danger-emphasis" role="alert"><strong>Plan konnte nicht erstellt werden.</strong><p class="mt-1">{{ error }}</p><p class="mt-2 text-xs">Unter „Wochenplan prüfen“ im Coach siehst du den aktuellen Planungskontext und die Freigabekriterien.</p><a class="mt-3 inline-flex font-semibold underline" href="/coach/planning-shadow">Wochenplan prüfen</a></div>{% endif %}
+
+  {% if goals %}
+  <form method="post" action="/plans/generate-cycle" class="space-y-5 rounded-xl border border-border bg-surface p-5">
+    {{ csrf_field() }}
+    <div>
+      <label class="block text-sm font-semibold" for="goal_id">Aktives Ziel</label>
+      <select class="mt-2 w-full rounded-lg border border-border bg-background px-3 py-2" id="goal_id" name="goal_id" required>
+        {% for goal in goals %}
+        <option value="{{ goal.id }}"{% if goal.target_date %} data-target-date="{{ goal.target_date.isoformat() }}"{% endif %}>{{ goal_type_labels.get(goal.event_type, goal.event_type) }}{% if goal.event_name %} · {{ goal.event_name }}{% endif %}{% if goal.target_date %} · {{ goal.target_date|date }}{% endif %}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="grid gap-4 sm:grid-cols-2">
+      <div>
+        <label class="block text-sm font-semibold" for="start_date">Start</label>
+        <input class="mt-2 w-full rounded-lg border border-border bg-background px-3 py-2" id="start_date" name="start_date" type="date" value="{{ default_start.isoformat() }}" required>
+        <p class="mt-1 text-xs text-muted-foreground">Nur montags.</p>
+      </div>
+      <div>
+        <label class="block text-sm font-semibold" for="target_date">Zieldatum</label>
+        <input class="mt-2 w-full rounded-lg border border-border bg-background px-3 py-2" id="target_date" name="target_date" type="date" value="{{ default_target.isoformat() }}" required>
+      </div>
+    </div>
+    <div class="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4">
+      <a class="text-sm font-semibold text-muted-foreground hover:text-foreground" href="/plans">Abbrechen</a>
+      <button class="inline-flex items-center justify-center rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:bg-primary-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" type="submit">Vorschau erzeugen</button>
+    </div>
+  </form>
+  <script>
+    (() => {
+      const goal = document.getElementById("goal_id");
+      const target = document.getElementById("target_date");
+      goal.addEventListener("change", () => {
+        const date = goal.selectedOptions[0]?.dataset.targetDate;
+        if (date) target.value = date;
+      });
+    })();
+  </script>
+  {% else %}
+  <div class="rounded-xl border border-warning/30 bg-warning-subtle p-5 text-sm">
+    <p class="font-semibold">Kein aktives Ziel vorhanden</p>
+    <p class="mt-1 text-muted-foreground">Erfasse zuerst ein Ziel, damit der Planzeitraum und die Phase nachvollziehbar bleiben.</p>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

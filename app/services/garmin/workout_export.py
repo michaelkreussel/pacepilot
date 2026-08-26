@@ -1,8 +1,8 @@
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import date
-from typing import Any
+from typing import Any, Protocol
 
-from app.models import Workout
 from app.services.garmin.client import GarminUnavailableError
 from app.services.planning.validator import WorkoutValidationError
 from app.services.planning.workout_definition import (
@@ -11,9 +11,11 @@ from app.services.planning.workout_definition import (
     HeartRateZoneTarget,
     PaceRangeTarget,
     RepeatBlock,
+    RepeatBlockV2,
+    RpeRangeTarget,
     StepBlock,
+    StepBlockV2,
     TimeEnd,
-    WorkoutBlock,
     validate_definition,
 )
 
@@ -25,7 +27,42 @@ SPORT_TYPES = {
 }
 
 
-def _create_model(workout: Workout) -> Any:
+class WorkoutContent(Protocol):
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def sport(self) -> str: ...
+
+    @property
+    def description(self) -> str | None: ...
+
+    @property
+    def definition_model(self) -> Any: ...
+
+
+class WorkoutExecution(WorkoutContent, Protocol):
+    @property
+    def scheduled_for(self) -> date | None: ...
+
+    @property
+    def garmin_workout_id(self) -> str | None: ...
+
+
+@dataclass(frozen=True)
+class CompilationWarning:
+    code: str
+    message: str
+    block_id: str
+
+
+@dataclass(frozen=True)
+class CompilationResult:
+    payload: dict[str, Any]
+    warnings: tuple[CompilationWarning, ...]
+
+
+def compile_workout_with_report(workout: WorkoutContent) -> CompilationResult:
     from garminconnect.workout import (
         ConditionType,
         CyclingWorkout,
@@ -47,12 +84,16 @@ def _create_model(workout: Workout) -> Any:
     }
     model_type = model_types.get(workout.sport)
     if model_type is None:
-        raise WorkoutValidationError("Diese Sportart kann nicht an Garmin übertragen werden.")
+        raise WorkoutValidationError(
+            "Diese Sportart kann nicht an Garmin übertragen werden.",
+            code="garmin.sport_unsupported",
+        )
     definition = workout.definition_model
+    warnings: list[CompilationWarning] = []
     try:
         validate_definition(definition, workout.sport)
     except DefinitionValidationError as exc:
-        raise WorkoutValidationError(str(exc)) from exc
+        raise WorkoutValidationError(str(exc), code=exc.code) from exc
     step_types = {
         "warmup": (StepType.WARMUP, "warmup", 1),
         "cooldown": (StepType.COOLDOWN, "cooldown", 2),
@@ -60,7 +101,7 @@ def _create_model(workout: Workout) -> Any:
         "recovery": (StepType.RECOVERY, "recovery", 4),
     }
 
-    def create_step(step: StepBlock, step_order: int) -> Any:
+    def create_step(step: StepBlock | StepBlockV2, step_order: int) -> Any:
         step_type_id, step_type_key, display_order = step_types[step.step_type]
         is_time = isinstance(step.end, TimeEnd)
         condition_id = ConditionType.TIME if is_time else ConditionType.DISTANCE
@@ -96,12 +137,39 @@ def _create_model(workout: Workout) -> Any:
                 "displayOrder": 4,
             }
             target_values = {"zoneNumber": step.target.zone}
+        elif isinstance(step.target, RpeRangeTarget):
+            target = {
+                "workoutTargetTypeId": TargetType.NO_TARGET,
+                "workoutTargetTypeKey": "no.target",
+                "displayOrder": 1,
+            }
+            warnings.append(
+                CompilationWarning(
+                    code="garmin.rpe_target_degraded",
+                    message=(
+                        "Garmin kann das RPE-Ziel nicht als Gerätebereich abbilden. "
+                        "Der Schritt wird ohne Geräte-Ziel übertragen."
+                    ),
+                    block_id=step.id,
+                )
+            )
         else:
             target = {
                 "workoutTargetTypeId": TargetType.NO_TARGET,
                 "workoutTargetTypeKey": "no.target",
                 "displayOrder": 1,
             }
+        if isinstance(step, StepBlockV2) and step.instructions:
+            warnings.append(
+                CompilationWarning(
+                    code="garmin.instructions_omitted",
+                    message=(
+                        "Lokale Schrittanweisungen bleiben in PacePilot und werden von Garmin "
+                        "nicht auf die Uhr übernommen."
+                    ),
+                    block_id=step.id,
+                )
+            )
         return ExecutableStep(
             stepOrder=step_order,
             stepType={
@@ -120,12 +188,14 @@ def _create_model(workout: Workout) -> Any:
             **target_values,
         )
 
-    def create_blocks(blocks: list[WorkoutBlock]) -> list[Any]:
+    def create_blocks(blocks: list[Any]) -> list[Any]:
         output: list[Any] = []
         for block in blocks:
-            if isinstance(block, StepBlock):
+            if isinstance(block, (StepBlock, StepBlockV2)):
                 output.append(create_step(block, len(output) + 1))
-            elif len(block.children) == 1 and isinstance(block.children[0], StepBlock):
+            elif len(block.children) == 1 and isinstance(
+                block.children[0], (StepBlock, StepBlockV2)
+            ):
                 for _ in range(block.iterations):
                     output.append(create_step(block.children[0], len(output) + 1))
             else:
@@ -142,10 +212,10 @@ def _create_model(workout: Workout) -> Any:
 
     default_paces = {"running": 360.0, "walking": 720.0, "hiking": 900.0, "cycling": 150.0}
 
-    def estimate_blocks(blocks: list[WorkoutBlock]) -> float:
+    def estimate_blocks(blocks: list[Any]) -> float:
         seconds = 0.0
         for block in blocks:
-            if isinstance(block, RepeatBlock):
+            if isinstance(block, (RepeatBlock, RepeatBlockV2)):
                 seconds += estimate_blocks(block.children) * block.iterations
             elif isinstance(block.end, TimeEnd):
                 seconds += block.end.seconds
@@ -160,14 +230,19 @@ def _create_model(workout: Workout) -> Any:
 
     estimated_seconds = int(estimate_blocks(definition.blocks))
     sport_type = SPORT_TYPES[workout.sport]
-    return model_type(
+    payload = model_type(
         workoutName=workout.name,
         description=workout.description,
         estimatedDurationInSecs=estimated_seconds,
         workoutSegments=[
             WorkoutSegment(segmentOrder=1, sportType=sport_type, workoutSteps=output_steps)
         ],
-    )
+    ).to_dict()
+    return CompilationResult(payload=payload, warnings=tuple(warnings))
+
+
+def compile_workout(workout: WorkoutContent) -> dict[str, Any]:
+    return compile_workout_with_report(workout).payload
 
 
 def _garmin_call[T](message: str, call: Callable[..., T], *args: Any) -> T:
@@ -177,12 +252,11 @@ def _garmin_call[T](message: str, call: Callable[..., T], *args: Any) -> T:
         raise GarminUnavailableError(message) from exc
 
 
-def upload_workout(client: Any, workout: Workout) -> str:
-    model = _create_model(workout)
+def upload_workout(client: Any, workout: WorkoutContent) -> str:
     response = _garmin_call(
         "Das Workout konnte nicht bei Garmin erstellt werden.",
         client.upload_workout,
-        model.to_dict(),
+        compile_workout(workout),
     )
     if not isinstance(response, dict):
         raise GarminUnavailableError("Garmin hat eine ungültige Antwort zurückgegeben.")
@@ -192,10 +266,19 @@ def upload_workout(client: Any, workout: Workout) -> str:
     return workout_id
 
 
-def schedule_published_workout(client: Any, workout: Workout) -> None:
+def schedule_published_workout(
+    client: Any,
+    workout: WorkoutExecution,
+    previous_date: date | None = None,
+) -> None:
     if not workout.garmin_workout_id:
-        raise WorkoutValidationError("Das Workout muss zuerst veröffentlicht werden.")
-    if workout.scheduled_for is not None and not _scheduled_workout_ids(
+        raise WorkoutValidationError(
+            "Das Workout muss zuerst veröffentlicht werden.",
+            code="garmin.remote_id_required",
+        )
+    if previous_date != workout.scheduled_for:
+        unschedule_workout_on_date(client, workout.garmin_workout_id, previous_date)
+    if workout.scheduled_for is not None and not scheduled_workout_ids(
         client, workout.garmin_workout_id, workout.scheduled_for
     ):
         _garmin_call(
@@ -206,9 +289,12 @@ def schedule_published_workout(client: Any, workout: Workout) -> None:
         )
 
 
-def push_workout(client: Any, workout: Workout) -> None:
+def push_workout(client: Any, workout: WorkoutExecution) -> None:
     if not workout.garmin_workout_id:
-        raise WorkoutValidationError("Das Workout muss zuerst veröffentlicht werden.")
+        raise WorkoutValidationError(
+            "Das Workout muss zuerst veröffentlicht werden.",
+            code="garmin.remote_id_required",
+        )
     _garmin_call(
         "Das Workout konnte nicht an das Garmin-Gerät gesendet werden.",
         client.push_workout_to_device,
@@ -216,7 +302,7 @@ def push_workout(client: Any, workout: Workout) -> None:
     )
 
 
-def _scheduled_workout_ids(client: Any, workout_id: str, scheduled_for: date) -> list[str]:
+def scheduled_workout_ids(client: Any, workout_id: str, scheduled_for: date) -> list[str]:
     calendar = _garmin_call(
         "Der Garmin-Kalender konnte nicht geladen werden.",
         client.get_scheduled_workouts,
@@ -224,6 +310,46 @@ def _scheduled_workout_ids(client: Any, workout_id: str, scheduled_for: date) ->
         scheduled_for.month,
     )
     scheduled_ids: list[str] = []
+
+    if not isinstance(calendar, (dict, list)):
+        raise WorkoutValidationError(
+            "Garmin hat ein unbekanntes Kalenderformat geliefert. Die Operation wurde zum "
+            "Schutz vor Duplikaten gestoppt.",
+            code="garmin.contract_drift",
+        )
+
+    collection_keys = {"items", "calendar", "calendarItems", "scheduledWorkouts"}
+
+    def contract_items(value: Any, *, root: bool = False) -> list[Any]:
+        if isinstance(value, list):
+            if any(not isinstance(item, dict) for item in value):
+                raise WorkoutValidationError(
+                    "Garmin hat ein unbekanntes Kalenderformat geliefert. Die Operation wurde "
+                    "zum Schutz vor Duplikaten gestoppt.",
+                    code="garmin.contract_drift",
+                )
+            return value
+        if isinstance(value, dict):
+            recognized = [child for key, child in value.items() if key in collection_keys]
+            if not recognized:
+                if root:
+                    raise WorkoutValidationError(
+                        "Garmin hat ein unbekanntes Kalenderformat geliefert. Die Operation wurde "
+                        "zum Schutz vor Duplikaten gestoppt.",
+                        code="garmin.contract_drift",
+                    )
+                return [value]
+            result: list[Any] = []
+            for child in recognized:
+                result.extend(contract_items(child))
+            return result
+        raise WorkoutValidationError(
+            "Garmin hat ein unbekanntes Kalenderformat geliefert. Die Operation wurde zum "
+            "Schutz vor Duplikaten gestoppt.",
+            code="garmin.contract_drift",
+        )
+
+    calendar_items = contract_items(calendar, root=True)
 
     def collect(value: Any) -> None:
         if isinstance(value, dict):
@@ -240,14 +366,14 @@ def _scheduled_workout_ids(client: Any, workout_id: str, scheduled_for: date) ->
             for child in value:
                 collect(child)
 
-    collect(calendar)
+    collect(calendar_items)
     return scheduled_ids
 
 
-def _unschedule_workout(client: Any, workout_id: str, scheduled_for: date | None) -> None:
+def unschedule_workout_on_date(client: Any, workout_id: str, scheduled_for: date | None) -> None:
     if scheduled_for is None:
         return
-    for scheduled_id in _scheduled_workout_ids(client, workout_id, scheduled_for):
+    for scheduled_id in scheduled_workout_ids(client, workout_id, scheduled_for):
         _garmin_call(
             "Die bisherige Garmin-Planung konnte nicht entfernt werden.",
             client.unschedule_workout,
@@ -255,18 +381,23 @@ def _unschedule_workout(client: Any, workout_id: str, scheduled_for: date | None
         )
 
 
-def update_published_workout(client: Any, workout: Workout, previous_date: date | None) -> None:
+def update_published_workout(
+    client: Any, workout: WorkoutExecution, previous_date: date | None
+) -> None:
     if not workout.garmin_workout_id:
-        raise WorkoutValidationError("Das Workout muss zuerst veröffentlicht werden.")
+        raise WorkoutValidationError(
+            "Das Workout muss zuerst veröffentlicht werden.",
+            code="garmin.remote_id_required",
+        )
     _garmin_call(
         "Das Workout konnte bei Garmin nicht aktualisiert werden.",
         client.update_workout,
         workout.garmin_workout_id,
-        _create_model(workout).to_dict(),
+        compile_workout(workout),
     )
     if previous_date != workout.scheduled_for:
-        _unschedule_workout(client, workout.garmin_workout_id, previous_date)
-        if workout.scheduled_for is not None and not _scheduled_workout_ids(
+        unschedule_workout_on_date(client, workout.garmin_workout_id, previous_date)
+        if workout.scheduled_for is not None and not scheduled_workout_ids(
             client, workout.garmin_workout_id, workout.scheduled_for
         ):
             _garmin_call(
@@ -282,12 +413,43 @@ def update_published_workout(client: Any, workout: Workout, previous_date: date 
     )
 
 
-def delete_published_workout(client: Any, workout: Workout) -> None:
+def update_workout_content(client: Any, workout: WorkoutExecution) -> None:
+    if not workout.garmin_workout_id:
+        raise WorkoutValidationError(
+            "Das Workout muss zuerst veröffentlicht werden.",
+            code="garmin.remote_id_required",
+        )
+    _garmin_call(
+        "Das Workout konnte bei Garmin nicht aktualisiert werden.",
+        client.update_workout,
+        workout.garmin_workout_id,
+        compile_workout(workout),
+    )
+
+
+def delete_published_workout(
+    client: Any, workout: WorkoutExecution, remote_scheduled_for: date | None
+) -> None:
     if not workout.garmin_workout_id:
         return
-    _unschedule_workout(client, workout.garmin_workout_id, workout.scheduled_for)
+    unschedule_workout_on_date(client, workout.garmin_workout_id, remote_scheduled_for)
+    delete_remote_workout(client, workout.garmin_workout_id)
+
+
+def schedule_workout_on_date(client: Any, workout_id: str, scheduled_for: date) -> None:
+    if scheduled_workout_ids(client, workout_id, scheduled_for):
+        return
+    _garmin_call(
+        "Das Workout konnte nicht im Garmin-Kalender geplant werden.",
+        client.schedule_workout,
+        workout_id,
+        scheduled_for.isoformat(),
+    )
+
+
+def delete_remote_workout(client: Any, workout_id: str) -> None:
     _garmin_call(
         "Das Workout konnte bei Garmin nicht gelöscht werden.",
         client.delete_workout,
-        workout.garmin_workout_id,
+        workout_id,
     )
