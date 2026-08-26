@@ -1808,6 +1808,7 @@ def test_multiweek_plan_generate_detail_and_accept(
     monkeypatch: Any,
 ) -> None:
     monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
+    monkeypatch.setattr(get_settings(), "coach_planner_history_gates_enabled", False)
     monkeypatch.setattr(get_settings(), "coach_deferred_quality_templates_enabled", True)
     current_monday = _seed_shadow_week_history(session_factory)
     start = current_monday + timedelta(days=7)

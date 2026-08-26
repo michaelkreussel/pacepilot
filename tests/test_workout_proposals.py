@@ -675,7 +675,8 @@ def test_generated_edit_and_schedule_enforce_proposal_contract(
 def test_proposal_route_is_feature_gated_and_renders_detail(
     client, session_factory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", False)
+    settings = get_settings()
+    monkeypatch.setattr(settings, "coach_workout_proposals_enabled", False)
     response = client.get("/coach")
     assert "Workout vorschlagen" not in response.text
 
@@ -690,7 +691,9 @@ def test_proposal_route_is_feature_gated_and_renders_detail(
     assert blocked.status_code == 403
     assert "noch nicht freigeschaltet" in blocked.text
 
-    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
+    monkeypatch.setattr(settings, "coach_workout_proposals_enabled", True)
+    monkeypatch.setattr(settings, "coach_planner_history_gates_enabled", False)
+    monkeypatch.setattr(settings, "coach_deferred_quality_templates_enabled", True)
     with session_factory() as session:
         user = session.scalar(select(User))
         assert user is not None
