@@ -154,6 +154,7 @@ class WorkoutService:
         idempotency_key: str,
         request_fingerprint: str,
         origin: ProposalOrigin | None = None,
+        commit: bool = True,
     ) -> Workout:
         existing = self.idempotent_proposal(
             idempotency_key=idempotency_key,
@@ -237,7 +238,10 @@ class WorkoutService:
                     ),
                     code="workout.proposal_safety_blocked",
                 )
-            self.session.commit()
+            if commit:
+                self.session.commit()
+            else:
+                self.session.flush()
         except IntegrityError:
             self.session.rollback()
             winner = self.idempotent_proposal(
@@ -838,6 +842,11 @@ class WorkoutService:
         workout = self.get(workout_id)
         self._ensure_generated_proposals_enabled(workout)
         current = self._current_revision(workout)
+        if current.source_type == "coach_weekly_plan":
+            raise WorkoutTransitionError(
+                "Wochenplan-Vorschläge werden einzeln angenommen oder abgelehnt, nicht bearbeitet.",
+                code="plan.edit_not_supported",
+            )
         if current.source_type == "coach_daily_adaptation":
             raise WorkoutTransitionError(
                 "Tägliche Anpassungen können vor der Annahme verworfen oder neu erzeugt werden.",
@@ -1271,7 +1280,10 @@ class WorkoutService:
 
     def reject(self, workout_id: int, command: RejectRevisionCommand) -> Workout:
         workout = self.get(workout_id)
-        if workout.source_type != "coach_single" or workout.accepted_revision_id is not None:
+        if (
+            workout.source_type not in {"coach_single", "coach_weekly_plan"}
+            or workout.accepted_revision_id is not None
+        ):
             raise WorkoutTransitionError(
                 "Nur ein noch nicht angenommener Coach-Vorschlag kann abgelehnt werden.",
                 code="workout.proposal_reject_invalid",
@@ -1345,7 +1357,7 @@ class WorkoutService:
         ):
             return workout
         revision = self._revision(workout, command.revision_id)
-        if workout.source_type == "coach_single":
+        if workout.source_type in {"coach_single", "coach_weekly_plan"}:
             if command.scheduled_for < utcnow().date():
                 raise WorkoutTransitionError(
                     "Ein Workout kann nicht in die Vergangenheit eingeplant werden.",
@@ -2040,7 +2052,11 @@ class WorkoutService:
             if workout.accepted_revision_id is not None
             else self._current_revision(workout)
         )
-        if revision.source_type not in {"coach_single", "coach_daily_adaptation"}:
+        if revision.source_type not in {
+            "coach_single",
+            "coach_daily_adaptation",
+            "coach_weekly_plan",
+        }:
             return
         from app.config import get_settings
 
@@ -2060,6 +2076,13 @@ class WorkoutService:
                 raise WorkoutTransitionError(
                     "Aktionen für tägliche Anpassungen sind derzeit deaktiviert.",
                     code="adaptation.feature_disabled",
+                )
+            return
+        if revision.source_type == "coach_weekly_plan":
+            if not settings.coach_plan_generation_enabled:
+                raise WorkoutTransitionError(
+                    "Aktionen für Wochenplan-Vorschläge sind derzeit deaktiviert.",
+                    code="plan.feature_disabled",
                 )
             return
         if revision.source_type == "coach_single" and not settings.coach_workout_proposals_enabled:

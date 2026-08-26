@@ -39,6 +39,11 @@ from app.services.coach.agent import (
 )
 from app.services.coach.dependencies import CoachAgentDep
 from app.services.coach.tools import CoachRuntimeContext
+from app.services.planning.weekly_planner import (
+    WeeklyPlanCandidate,
+    WeeklyPlannerError,
+    plan_shadow_week,
+)
 from app.services.planning.workout_definition import (
     HeartRateRangeTarget,
     RpeRangeTarget,
@@ -231,6 +236,209 @@ def coach(
     request: Request, session: SessionDep, agent: CoachAgentDep, user: CurrentUser
 ) -> HTMLResponse:
     return _render_coach(request, session, user, agent, None)
+
+
+WEEKDAY_LABELS = (
+    "Montag",
+    "Dienstag",
+    "Mittwoch",
+    "Donnerstag",
+    "Freitag",
+    "Samstag",
+    "Sonntag",
+)
+ROLE_LABELS = {
+    "long_run": "Langer Lauf",
+    "strides": "Steigerungen",
+    "easy_run": "Lockerer Lauf",
+}
+SKIP_REASON_LABELS = {
+    None: "Kein verfügbarer Tag passt für den Langen Lauf",
+    "planner.budget_below_easy_minimum": "Zeitbudget unter dem Minimum für einen lockeren Lauf",
+    "planner.budget_below_quality_requirement": "Zeitbudget reicht für Steigerungen nicht aus",
+    "planner.quality_spacing_violation": "Zu geringer Abstand zu einem Qualitätsreiz",
+    "planner.no_measurable_long_run_history": "Keine messbare Long-Run-Historie",
+    "planner.long_run_below_template_minimum_after_history_bound": (
+        "Long-Run-Grenze liegt unter dem Template-Minimum"
+    ),
+    "planner.long_run_not_placeable": "Kein verfügbarer Tag passt für den Langen Lauf",
+    "planner.long_run_requires_consistent_running_weeks": (
+        "Für den Langen Lauf fehlt eine konsistente Laufbasis"
+    ),
+    "planner.strides_not_eligible": "Steigerungen sind aktuell nicht freigegeben",
+}
+
+WARNING_LABELS = {
+    "planner.long_run_above_typical_weekly_longest": (
+        "Länger als dein typisch längster Wochenlauf"
+    ),
+    "planner.strides_adjacent_to_long_run": "Steigerungen direkt neben dem Langen Lauf",
+}
+
+GOAL_TYPE_LABELS = {
+    "general_fitness": "Allgemeine Fitness",
+    "5k": "5 km",
+    "10k": "10 km",
+    "half_marathon": "Halbmarathon",
+    "marathon": "Marathon",
+}
+
+CONFIDENCE_LABELS = {
+    "high": "Hoch",
+    "medium": "Mittel",
+    "low": "Niedrig",
+    "insufficient": "Unzureichend",
+}
+
+
+@router.get("/planning-shadow", response_class=HTMLResponse)
+def planning_shadow(
+    request: Request,
+    session: SessionDep,
+    user: CurrentUser,
+    week: str | None = None,
+) -> HTMLResponse:
+    if not get_settings().coach_plan_generation_enabled:
+        raise HTTPException(status_code=404, detail="Seite nicht gefunden")
+    today = date.today()
+    week_start = today - timedelta(days=today.weekday())
+    error: str | None = None
+    if week is not None:
+        try:
+            parsed = date.fromisoformat(week)
+        except ValueError:
+            error = "Ungültiges Wochendatum."
+        else:
+            if parsed.weekday() != 0:
+                error = "Die Woche muss an einem Montag beginnen."
+            else:
+                week_start = parsed
+    candidate: WeeklyPlanCandidate | None = None
+    try:
+        candidate = plan_shadow_week(session, user, week_start=week_start)
+    except WeeklyPlannerError as exc:
+        error = str(exc)
+
+    def context_section(name: str) -> dict[str, object]:
+        if candidate is None:
+            return {}
+        value = candidate.generation_context.get(name)
+        return value if isinstance(value, dict) else {}
+
+    sessions_by_weekday = {item.weekday: item for item in candidate.sessions} if candidate else {}
+    skipped_by_weekday = (
+        {skip.weekday: skip.reason_code for skip in candidate.skipped_days} if candidate else {}
+    )
+    raw_availability = candidate.generation_context.get("availability") if candidate else None
+    availability_rows = (
+        [item for item in raw_availability if isinstance(item, dict)]
+        if isinstance(raw_availability, list)
+        else []
+    )
+    availability_by_weekday = {
+        int(item["weekday"]) for item in availability_rows if "weekday" in item
+    }
+    baseline_context = context_section("baseline")
+    intensity_context = context_section("intensity")
+    profile_context = context_section("profile")
+    goals_context: list[dict[str, object]] = []
+    if candidate is not None:
+        raw_goals = candidate.generation_context.get("goals")
+        if isinstance(raw_goals, list):
+            goals_context = [goal for goal in raw_goals if isinstance(goal, dict)]
+    week_days = []
+    for weekday, label in enumerate(WEEKDAY_LABELS):
+        session_candidate = sessions_by_weekday.get(weekday)
+        raw_skip = skipped_by_weekday.get(weekday)
+        skip_code = raw_skip if isinstance(raw_skip, str) else None
+        week_days.append(
+            {
+                "weekday": weekday,
+                "label": label,
+                "date": week_start + timedelta(days=weekday),
+                "available": weekday in availability_by_weekday,
+                "session": session_candidate,
+                "role_label": (
+                    ROLE_LABELS.get(session_candidate.role) if session_candidate else None
+                ),
+                "warning_labels": (
+                    [WARNING_LABELS.get(w, w) for w in session_candidate.warnings]
+                    if session_candidate
+                    else []
+                ),
+                "skip_reason": SKIP_REASON_LABELS.get(skip_code, skip_code)
+                if session_candidate is None
+                else None,
+            }
+        )
+
+    week_links = [
+        {
+            "label": label,
+            "week": (week_start + timedelta(days=offset)).isoformat(),
+            "current": offset == 0,
+        }
+        for offset, label in (
+            (-7, "Vorherige Woche"),
+            (0, "Ausgewählte Woche"),
+            (7, "Nächste Woche"),
+        )
+    ]
+
+    observed_frequency = baseline_context.get("observed_runs_per_week")
+    return templates.TemplateResponse(
+        request,
+        "coach/planning_shadow.html",
+        context(
+            request,
+            active_page="coach",
+            week_start=week_start,
+            week_end=week_start + timedelta(days=6),
+            candidate=candidate,
+            week_days=week_days,
+            week_links=week_links,
+            skip_labels=[
+                SKIP_REASON_LABELS.get(
+                    skip.reason_code if isinstance(skip.reason_code, str) else None,
+                    skip.reason_code,
+                )
+                for skip in candidate.skipped_days
+            ]
+            if candidate
+            else [],
+            error=error,
+            confidence_label=(
+                CONFIDENCE_LABELS.get(str(baseline_context.get("confidence")), "–")
+                if candidate
+                else "–"
+            ),
+            effective_reentry=bool(profile_context.get("effective_reentry")),
+            context_consistent_weeks=baseline_context.get("consistent_running_weeks", "–"),
+            context_frequency=float(observed_frequency)
+            if isinstance(observed_frequency, (int, float))
+            else 0.0,
+            context_intensity_mode=_intensity_mode_label(str(intensity_context.get("mode", "")))
+            if candidate
+            else "–",
+            goals_label=", ".join(
+                GOAL_TYPE_LABELS.get(str(goal.get("event_type")), str(goal.get("event_type")))
+                for goal in goals_context
+            )
+            or "Keine aktiven Ziele erfasst",
+            knowledge_version_short=(
+                candidate.knowledge_base_version.split("+")[0] if candidate else "–"
+            ),
+        ),
+    )
+
+
+def _intensity_mode_label(mode: str) -> str:
+    labels = {
+        "pace_anchor": "Pace-Anker",
+        "rpe_talk_test": "RPE/Sprechtest",
+        "clarify": "Rückfrage erforderlich",
+    }
+    return labels.get(mode, mode)
 
 
 @router.get("/{conversation_id}", response_class=HTMLResponse)

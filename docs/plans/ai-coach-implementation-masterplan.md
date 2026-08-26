@@ -977,6 +977,9 @@ Exit-Kriterien:
 
 ### Phase 11A - Athlete Planning Inputs und Wochenplan im Shadow Mode
 
+**Status:** Abgeschlossen am 26. August 2026. Details und Gates stehen in
+`phase-11a-completion.md` und `ai-coach-phase-11a-gate-matrix.md`.
+
 **Ziel:** Eine deterministische Woche aus bestehenden Workout-Templates planen.
 
 Migration:
@@ -1007,6 +1010,11 @@ Exit-Kriterien:
 - Shadow-Planung ist stabil, bevor ein persistentes Planmodell eingefuehrt wird.
 
 ### Phase 11B - Persistierter Wochenplan
+
+**Status:** Abgeschlossen am 26. August 2026. Details und Gates stehen in
+`phase-11b-completion.md` und `ai-coach-phase-11b-gate-matrix.md`. Der vorgesehene
+Agent-Browser-Pass wurde auf ausdruecklichen Nutzerwunsch ausgelassen; das Restrisiko ist in der
+Abschlussdokumentation festgehalten.
 
 **Ziel:** Den validierten Shadow-Plan als immutable Planrevision und normale Workouts ablegen.
 

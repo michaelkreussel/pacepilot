@@ -64,11 +64,16 @@ class WorkoutRevisionView:
             "ai": "KI",
             "coach_single": "PacePilot-Vorschlag",
             "coach_daily_adaptation": "Tägliche Anpassung",
+            "coach_weekly_plan": "Wochenplan-Vorschlag",
         }.get(self.source_type, self.source_type)
 
     @property
     def is_generated(self) -> bool:
-        return self.source_type in {"coach_single", "coach_daily_adaptation"}
+        return self.source_type in {
+            "coach_single",
+            "coach_daily_adaptation",
+            "coach_weekly_plan",
+        }
 
     @property
     def proposal_summary(self) -> dict[str, object] | None:
@@ -222,6 +227,7 @@ class CalendarWorkout:
             "ai": "KI",
             "coach_single": "PacePilot-Vorschlag",
             "coach_daily_adaptation": "Tägliche Anpassung",
+            "coach_weekly_plan": "Wochenplan-Vorschlag",
         }.get(self.source_type, self.source_type)
 
 
@@ -331,7 +337,11 @@ def workout_detail_view(
     from app.config import get_settings
 
     settings = get_settings()
-    current_is_generated = current.source_type in {"coach_single", "coach_daily_adaptation"}
+    current_is_generated = current.source_type in {
+        "coach_single",
+        "coach_daily_adaptation",
+        "coach_weekly_plan",
+    }
     return WorkoutDetailView(
         id=workout.id,
         current=revision_view(current, context_fingerprint=context_fingerprint),
@@ -361,9 +371,12 @@ def workout_detail_view(
         proposal_actions_allowed=(
             settings.coach_daily_adaptation_enabled
             if current.source_type == "coach_daily_adaptation"
+            else settings.coach_plan_generation_enabled
+            if current.source_type == "coach_weekly_plan"
             else not current_is_generated or settings.coach_workout_proposals_enabled
         ),
         edit_allowed=(
-            current.source_type != "coach_daily_adaptation" and active_replacement_id is None
+            current.source_type not in {"coach_daily_adaptation", "coach_weekly_plan"}
+            and active_replacement_id is None
         ),
     )

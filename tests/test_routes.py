@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.config import get_settings
 from app.models import (
     Activity,
+    AthleteAvailability,
     DailyDataStatus,
     DailyFitness,
     DailyHealth,
@@ -940,7 +941,7 @@ def test_edit_draft_workout(client: TestClient, session_factory: sessionmaker[Se
     assert "startPaletteDrag('interval'" in form.text
     assert "/static/icons/workout.svg#pencil" in form.text
     assert "setDropTarget(null, index)" in form.text
-    assert "/static/css/tailwind.css?v=20260826-20" in form.text
+    assert "/static/css/tailwind.css?v=20260826-22" in form.text
     assert "/static/js/theme.js?v=20260809-3" in form.text
     assert "data-theme-toggle" in form.text
 
@@ -1527,3 +1528,183 @@ def test_manual_sync_is_queued_once(
         account = session.get(GarminAccount, account_id)
         assert account is not None
         assert account.sync_status == "queued"
+
+
+def _seed_shadow_week_history(session_factory: sessionmaker[Session]) -> date:
+    with session_factory() as session:
+        user = session.scalar(select(User))
+        assert user is not None
+        today = date.today()
+        monday = today - timedelta(days=today.weekday())
+        for index, age in enumerate((0, 1, 3, 8, 9, 10, 15, 16, 17, 22, 23, 24)):
+            session.add(
+                Activity(
+                    user_id=user.id,
+                    garmin_activity_id=f"shadow-route-{index}",
+                    name=f"Run {index}",
+                    activity_type="running",
+                    started_at=datetime.combine(today - timedelta(days=age), datetime.min.time()),
+                    duration_s=2700 + index * 60,
+                    distance_m=6000,
+                    workout_rpe=3 if index % 2 else 8,
+                )
+            )
+        session.add(
+            GarminSyncState(
+                user_id=user.id,
+                resource="activities",
+                status="ok",
+                backfill_complete=True,
+                oldest_synced_date=today - timedelta(days=365),
+                newest_synced_date=today,
+            )
+        )
+        session.add_all(
+            [
+                AthleteAvailability(
+                    user_id=user.id, weekday=0, available=True, available_minutes=60
+                ),
+                AthleteAvailability(
+                    user_id=user.id, weekday=2, available=True, available_minutes=75
+                ),
+                AthleteAvailability(
+                    user_id=user.id, weekday=5, available=True, available_minutes=120
+                ),
+                AthleteAvailability(
+                    user_id=user.id, weekday=6, available=True, available_minutes=90
+                ),
+            ]
+        )
+        session.commit()
+        return monday
+
+
+def test_planning_shadow_view_is_404_while_flag_disabled(
+    client: TestClient,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", False)
+    assert client.get("/coach/planning-shadow", follow_redirects=False).status_code == 404
+
+
+def test_planning_shadow_view_redirects_unauthenticated(
+    unauthenticated_client: TestClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
+    response = unauthenticated_client.get("/coach/planning-shadow", follow_redirects=False)
+    assert response.status_code == 303
+
+
+def test_planning_shadow_view_renders_deterministic_week(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
+    monday = _seed_shadow_week_history(session_factory)
+
+    first = client.get(f"/coach/planning-shadow?week={monday.isoformat()}")
+    second = client.get(f"/coach/planning-shadow?week={monday.isoformat()}")
+    assert first.status_code == second.status_code == 200
+    assert first.text == second.text
+    assert "Wochenplanung im Shadow-Modus" in first.text
+    assert "Interne deterministische Vorschau" in first.text
+    assert "Nicht verfügbar" in first.text
+
+    with session_factory() as session:
+        other = User(display_name="Other Runner")
+        session.add(other)
+        session.flush()
+        session.add(
+            AthleteAvailability(user_id=other.id, weekday=2, available=True, available_minutes=180)
+        )
+        session.commit()
+
+    scoped = client.get(f"/coach/planning-shadow?week={monday.isoformat()}")
+    assert scoped.status_code == 200
+    assert scoped.text == second.text
+
+    invalid = client.get("/coach/planning-shadow?week=2026-09-01")
+    assert invalid.status_code == 200
+    assert "Die Woche muss an einem Montag beginnen." in invalid.text
+
+    garbage = client.get("/coach/planning-shadow?week=nonsense")
+    assert garbage.status_code == 200
+    assert "Ungültiges Wochendatum." in garbage.text
+
+
+def test_plan_persistence_is_flagged_idempotent_and_visible_in_calendar(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
+    monday = _seed_shadow_week_history(session_factory)
+
+    first = client.post(
+        "/plans/generate-week",
+        data={"week_start": monday.isoformat()},
+        follow_redirects=False,
+    )
+    second = client.post(
+        "/plans/generate-week",
+        data={"week_start": monday.isoformat()},
+        follow_redirects=False,
+    )
+    assert first.status_code == second.status_code == 303
+    assert first.headers["location"] == "/plans?view=week&week=0"
+
+    calendar = client.get(first.headers["location"])
+    assert calendar.status_code == 200
+    assert "Planvorschlag · nicht angenommen" in calendar.text
+    assert (
+        "Als Vorschläge speichern"
+        in client.get(f"/coach/planning-shadow?week={monday.isoformat()}").text
+    )
+
+    with session_factory() as session:
+        proposal_id = session.scalar(
+            select(Workout.id).where(Workout.approval_status == "proposed")
+        )
+        proposal_count = session.scalar(
+            select(func.count()).select_from(Workout).where(Workout.approval_status == "proposed")
+        )
+        assert proposal_count is not None and proposal_count > 0
+        assert proposal_id is not None
+
+    detail = client.get(f"/workouts/{proposal_id}")
+    assert detail.status_code == 200
+    assert "Wochenplan-Vorschlag" in detail.text
+    assert f'href="/workouts/{proposal_id}/edit"' not in detail.text
+    assert "Vorschlag annehmen" in detail.text
+    assert client.get(f"/workouts/{proposal_id}/edit").status_code == 409
+
+
+def test_plan_persistence_requires_flag_and_csrf(
+    client: TestClient,
+    monkeypatch: Any,
+) -> None:
+    monday = date.today() - timedelta(days=date.today().weekday())
+    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", False)
+    assert (
+        client.post(
+            "/plans/generate-week",
+            data={"week_start": monday.isoformat()},
+            follow_redirects=False,
+        ).status_code
+        == 404
+    )
+
+    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
+    csrf_token = client.headers.pop("X-CSRF-Token")
+    try:
+        response = client.post(
+            "/plans/generate-week",
+            data={"week_start": monday.isoformat()},
+            follow_redirects=False,
+        )
+    finally:
+        client.headers["X-CSRF-Token"] = csrf_token
+    assert response.status_code == 403

@@ -25,6 +25,9 @@ def test_initial_migration_matches_models(tmp_path: Path) -> None:
         "activity_splits",
         "activity_zones",
         "alembic_version",
+        "athlete_availability",
+        "athlete_goals",
+        "athlete_planning_profiles",
         "coach_conversations",
         "coach_assistant_runs",
         "coach_messages",
@@ -36,11 +39,15 @@ def test_initial_migration_matches_models(tmp_path: Path) -> None:
         "garmin_devices",
         "garmin_sync_states",
         "oauth_identities",
+        "performance_anchors",
         "post_session_feedback",
         "pre_session_feedback",
         "sleep_stages",
         "sync_events",
         "sync_runs",
+        "training_plan_revisions",
+        "training_plan_workouts",
+        "training_plans",
         "users",
         "workout_events",
         "workout_garmin_bindings",
@@ -185,7 +192,7 @@ def test_feedback_owner_migration_upgrades_applied_revision_22(tmp_path: Path) -
         ).one() == (1, 1)
         assert connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
-        ).scalar_one() == ("20260824_25")
+        ).scalar_one() == ("20260826_27")
 
 
 def test_application_migration_uses_absolute_project_paths(tmp_path: Path, monkeypatch) -> None:
@@ -245,7 +252,7 @@ def test_workout_revision_migration_resumes_after_added_columns(tmp_path: Path) 
             "SELECT version_num FROM alembic_version"
         ).scalar_one()
         integrity = connection.exec_driver_sql("PRAGMA integrity_check").scalar_one()
-    assert revision == "20260824_25"
+    assert revision == "20260826_27"
     assert integrity == "ok"
     assert "workout_revisions" in inspector.get_table_names()
 
@@ -261,20 +268,20 @@ def test_reverted_athlete_profile_revision_upgrades_to_head(tmp_path: Path) -> N
 
     engine = create_engine(database_url)
     inspector = inspect(engine)
-    assert not {
-        "athlete_profiles",
-        "athlete_goals",
-        "athlete_availability",
-        "athlete_manual_anchors",
-    } & set(inspector.get_table_names())
+    assert not {"athlete_profiles", "athlete_manual_anchors"} & set(inspector.get_table_names())
     assert not {"fit_file", "fit_import_status", "fit_synced_at"} & {
         column["name"] for column in inspector.get_columns("activities")
+    }
+    goal_columns = {column["name"] for column in inspector.get_columns("athlete_goals")}
+    assert {"id", "user_id", "event_type", "status"} <= goal_columns
+    assert {"sport", "event_name"} <= {
+        column["name"] for column in inspector.get_columns("athlete_goals")
     }
     with engine.connect() as connection:
         revision = connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
         ).scalar_one()
-    assert revision == "20260824_25"
+    assert revision == "20260826_27"
 
 
 def test_principal_fingerprint_migration_upgrades_applied_phase_4_schema(
@@ -685,3 +692,75 @@ def test_workout_revision_constraints(tmp_path: Path) -> None:
             "VALUES (?, 1, 'execute', 'pending', '2026-08-22')",
             (operation_id,),
         )
+
+
+def test_athlete_planning_inputs_fresh_and_filled_upgrade(tmp_path: Path) -> None:
+    database_path = tmp_path / "planning.db"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    config = Config("alembic.ini")
+    config.attributes["database_url"] = database_url
+
+    command.upgrade(config, "20260824_25")
+    engine = create_engine(database_url)
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "INSERT INTO users (id, display_name, created_at) "
+            "VALUES (1, 'Legacy Runner', '2026-08-24')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO workouts (id, user_id, name, sport, status, definition_version, "
+            "definition, created_at, updated_at) "
+            "VALUES (1, 1, 'Legacy Run', 'running', 'draft', 1, '{\"blocks\": []}', "
+            "'2026-08-24', '2026-08-24')"
+        )
+    engine.dispose()
+
+    command.upgrade(config, "head")
+    command.check(config)
+    engine = create_engine(database_url)
+    with engine.begin() as connection:
+        version = connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar()
+        tables = set(
+            row[0]
+            for row in connection.exec_driver_sql(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        )
+        legacy = connection.exec_driver_sql("SELECT name FROM workouts WHERE id = 1").scalar()
+    engine.dispose()
+
+    assert version == "20260826_27"
+    assert {
+        "athlete_planning_profiles",
+        "athlete_goals",
+        "athlete_availability",
+        "performance_anchors",
+    } <= tables
+    assert legacy == "Legacy Run"
+
+
+def test_training_plan_migration_creates_revision_and_membership_tables(tmp_path: Path) -> None:
+    database_path = tmp_path / "training-plans.db"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    config = Config("alembic.ini")
+    config.attributes["database_url"] = database_url
+
+    command.upgrade(config, "head")
+    command.check(config)
+    inspector = inspect(create_engine(database_url))
+
+    assert {"training_plans", "training_plan_revisions", "training_plan_workouts"} <= set(
+        inspector.get_table_names()
+    )
+    assert {"user_id", "week_start", "current_revision_id"} <= {
+        column["name"] for column in inspector.get_columns("training_plans")
+    }
+    assert {"input_fingerprint", "generation_context_json", "validation_report_json"} <= {
+        column["name"] for column in inspector.get_columns("training_plan_revisions")
+    }
+    assert "owner_user_id" in {
+        column["name"] for column in inspector.get_columns("training_plan_revisions")
+    }
+    assert "owner_user_id" in {
+        column["name"] for column in inspector.get_columns("training_plan_workouts")
+    }

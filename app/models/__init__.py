@@ -3,6 +3,15 @@ from app.models.coach import CoachAssistantRun, CoachConversation, CoachMessage,
 from app.models.feedback import PostSessionFeedback, PreSessionFeedback
 from app.models.fitness import DailyFitness
 from app.models.health import DailyHealth, SleepStage
+from app.models.planning import (
+    AthleteAvailability,
+    AthleteGoal,
+    AthletePlanningProfile,
+    PerformanceAnchor,
+    TrainingPlan,
+    TrainingPlanRevision,
+    TrainingPlanWorkout,
+)
 from app.models.sync import DailyDataStatus, GarminSyncState, SyncEvent, SyncRun
 from app.models.user import GarminAccount, GarminDevice, OAuthIdentity, User
 from app.models.workout import (
@@ -22,6 +31,9 @@ __all__ = [
     "ActivityExerciseSet",
     "ActivitySplit",
     "ActivityZone",
+    "AthleteAvailability",
+    "AthleteGoal",
+    "AthletePlanningProfile",
     "CoachConversation",
     "CoachAssistantRun",
     "CoachMessage",
@@ -33,6 +45,10 @@ __all__ = [
     "GarminDevice",
     "GarminSyncState",
     "OAuthIdentity",
+    "PerformanceAnchor",
+    "TrainingPlan",
+    "TrainingPlanRevision",
+    "TrainingPlanWorkout",
     "PostSessionFeedback",
     "PreSessionFeedback",
     "SleepStage",

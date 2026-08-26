@@ -283,6 +283,11 @@ def workout_detail(
 @router.get("/{workout_id}/edit", response_class=HTMLResponse)
 def edit_workout(workout_id: int, request: Request, service: WorkoutServiceDep) -> HTMLResponse:
     workout = _get_workout(service, workout_id)
+    if workout.source_type == "coach_weekly_plan":
+        raise HTTPException(
+            status_code=409,
+            detail="Wochenplan-Vorschläge werden angenommen oder abgelehnt, nicht bearbeitet.",
+        )
     return templates.TemplateResponse(
         request,
         "workouts/form.html",
