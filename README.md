@@ -195,6 +195,8 @@ Settings are read from environment variables and, for local development, from `.
 | `COACH_GARMIN_SYNC_ENABLED` | `false` | Enables future Garmin sync for accepted coach workouts |
 | `COACH_DAILY_ADAPTATION_ENABLED` | `false` | Enables future coach daily adaptations |
 | `COACH_PLAN_GENERATION_ENABLED` | `false` | Enables future coach week and multi-week plans |
+| `COACH_PLANNER_HISTORY_GATES_ENABLED` | `true` | Enforces observed week/frequency eligibility; development can disable it for planner testing |
+| `COACH_DEFERRED_QUALITY_TEMPLATES_ENABLED` | `false` | Development-only override for testing deferred threshold and VO2max templates |
 
 Production mode requires `SESSION_SECRET` and `SESSION_HTTPS_ONLY=true`. Configuring only one half
 of an OAuth provider's client ID and secret pair also prevents startup.

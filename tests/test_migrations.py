@@ -48,6 +48,9 @@ def test_initial_migration_matches_models(tmp_path: Path) -> None:
         "training_plan_revisions",
         "training_plan_workouts",
         "training_plans",
+        "training_cycle_revisions",
+        "training_cycle_weeks",
+        "training_cycles",
         "users",
         "workout_events",
         "workout_garmin_bindings",
@@ -192,7 +195,7 @@ def test_feedback_owner_migration_upgrades_applied_revision_22(tmp_path: Path) -
         ).one() == (1, 1)
         assert connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
-        ).scalar_one() == ("20260826_27")
+        ).scalar_one() == ("20260826_31")
 
 
 def test_application_migration_uses_absolute_project_paths(tmp_path: Path, monkeypatch) -> None:
@@ -252,7 +255,7 @@ def test_workout_revision_migration_resumes_after_added_columns(tmp_path: Path) 
             "SELECT version_num FROM alembic_version"
         ).scalar_one()
         integrity = connection.exec_driver_sql("PRAGMA integrity_check").scalar_one()
-    assert revision == "20260826_27"
+    assert revision == "20260826_31"
     assert integrity == "ok"
     assert "workout_revisions" in inspector.get_table_names()
 
@@ -281,7 +284,7 @@ def test_reverted_athlete_profile_revision_upgrades_to_head(tmp_path: Path) -> N
         revision = connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
         ).scalar_one()
-    assert revision == "20260826_27"
+    assert revision == "20260826_31"
 
 
 def test_principal_fingerprint_migration_upgrades_applied_phase_4_schema(
@@ -729,7 +732,7 @@ def test_athlete_planning_inputs_fresh_and_filled_upgrade(tmp_path: Path) -> Non
         legacy = connection.exec_driver_sql("SELECT name FROM workouts WHERE id = 1").scalar()
     engine.dispose()
 
-    assert version == "20260826_27"
+    assert version == "20260826_31"
     assert {
         "athlete_planning_profiles",
         "athlete_goals",
@@ -749,9 +752,14 @@ def test_training_plan_migration_creates_revision_and_membership_tables(tmp_path
     command.check(config)
     inspector = inspect(create_engine(database_url))
 
-    assert {"training_plans", "training_plan_revisions", "training_plan_workouts"} <= set(
-        inspector.get_table_names()
-    )
+    assert {
+        "training_plans",
+        "training_plan_revisions",
+        "training_plan_workouts",
+        "training_cycles",
+        "training_cycle_revisions",
+        "training_cycle_weeks",
+    } <= set(inspector.get_table_names())
     assert {"user_id", "week_start", "current_revision_id"} <= {
         column["name"] for column in inspector.get_columns("training_plans")
     }
@@ -764,3 +772,132 @@ def test_training_plan_migration_creates_revision_and_membership_tables(tmp_path
     assert "owner_user_id" in {
         column["name"] for column in inspector.get_columns("training_plan_workouts")
     }
+    assert (
+        next(
+            column
+            for column in inspector.get_columns("training_plan_revisions")
+            if column["name"] == "owner_user_id"
+        )["nullable"]
+        is False
+    )
+    assert (
+        next(
+            column
+            for column in inspector.get_columns("training_plan_workouts")
+            if column["name"] == "owner_user_id"
+        )["nullable"]
+        is False
+    )
+    assert {
+        (tuple(foreign_key["constrained_columns"]), foreign_key["referred_table"])
+        for foreign_key in inspector.get_foreign_keys("training_plan_workouts")
+    } == {
+        (("plan_revision_id", "owner_user_id"), "training_plan_revisions"),
+        (("workout_id", "owner_user_id"), "workouts"),
+    }
+    cycle_goal_key = next(
+        foreign_key
+        for foreign_key in inspector.get_foreign_keys("training_cycles")
+        if foreign_key["constrained_columns"] == ["goal_id", "user_id"]
+    )
+    assert cycle_goal_key["options"] == {}
+
+
+def test_planning_constraint_rebuild_preserves_revision_graph(tmp_path: Path) -> None:
+    database_path = tmp_path / "planning-rebuild.db"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    config = Config("alembic.ini")
+    config.attributes["database_url"] = database_url
+    command.upgrade(config, "20260826_30")
+    engine = create_engine(database_url)
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "INSERT INTO users (id, display_name, created_at) VALUES (1, 'Runner', '2026-08-26')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO athlete_goals "
+            "(id, user_id, sport, event_type, event_name, target_date, status, created_at, "
+            "updated_at) VALUES "
+            "(1, 1, 'running', '10k', 'Herbstlauf', '2026-10-25', 'active', "
+            "'2026-08-26', '2026-08-26')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO workouts "
+            "(id, user_id, name, sport, status, definition_version, definition, created_at, "
+            "updated_at) VALUES "
+            "(1, 1, 'Easy Run', 'running', 'draft', 1, '{\"blocks\": []}', "
+            "'2026-08-26', '2026-08-26')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO training_plans "
+            "(id, user_id, week_start, status, current_revision_id, created_at, updated_at) "
+            "VALUES (1, 1, '2026-08-31', 'active', NULL, '2026-08-26', '2026-08-26')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO training_plan_revisions "
+            "(id, plan_id, owner_user_id, revision_number, week_start, week_end, "
+            "planner_version, knowledge_base_version, input_fingerprint, "
+            "generation_context_json, validation_report_json, created_at) VALUES "
+            "(1, 1, 1, 1, '2026-08-31', '2026-09-06', 'weekly-v1', 'kb-v1', "
+            "'weekly-fingerprint', '{}', '{\"valid\": true}', '2026-08-26')"
+        )
+        connection.exec_driver_sql("UPDATE training_plans SET current_revision_id = 1 WHERE id = 1")
+        connection.exec_driver_sql(
+            "INSERT INTO training_plan_workouts "
+            "(id, plan_revision_id, workout_id, owner_user_id, position, role, scheduled_for) "
+            "VALUES (1, 1, 1, 1, 0, 'easy_run', '2026-08-31')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO training_cycles "
+            "(id, user_id, goal_id, event_type, start_date, target_date, status, "
+            "current_revision_id, accepted_revision_id, created_at, updated_at) VALUES "
+            "(1, 1, 1, '10k', '2026-08-31', '2026-10-25', 'active', NULL, NULL, "
+            "'2026-08-26', '2026-08-26')"
+        )
+        for revision_id, parent_id in ((1, None), (2, 1)):
+            connection.exec_driver_sql(
+                "INSERT INTO training_cycle_revisions "
+                "(id, cycle_id, owner_user_id, parent_revision_id, revision_number, event_type, "
+                "start_date, target_date, planner_version, knowledge_base_version, "
+                "input_fingerprint, confidence, phase_plan_json, assumptions_json, "
+                "impact_json, validation_report_json, created_at) VALUES "
+                "(?, 1, 1, ?, ?, '10k', '2026-08-31', '2026-10-25', 'multiweek-v1', "
+                "'kb-v1', ?, 'medium', '[]', '{}', '{}', '{\"valid\": true}', "
+                "'2026-08-26')",
+                (revision_id, parent_id, revision_id, f"cycle-fingerprint-{revision_id}"),
+            )
+            connection.exec_driver_sql(
+                "INSERT INTO training_cycle_weeks "
+                "(id, cycle_revision_id, training_plan_revision_id, owner_user_id, position, "
+                "week_start, phase) VALUES (?, ?, 1, 1, 0, '2026-08-31', 'base')",
+                (revision_id, revision_id),
+            )
+        connection.exec_driver_sql(
+            "UPDATE training_cycles SET current_revision_id = 2, accepted_revision_id = 1 "
+            "WHERE id = 1"
+        )
+    engine.dispose()
+
+    command.upgrade(config, "head")
+    command.check(config)
+    engine = create_engine(database_url)
+    with engine.connect() as connection:
+        assert connection.exec_driver_sql(
+            "SELECT current_revision_id, accepted_revision_id FROM training_cycles WHERE id = 1"
+        ).one() == (2, 1)
+        assert connection.exec_driver_sql(
+            "SELECT id, parent_revision_id FROM training_cycle_revisions ORDER BY id"
+        ).all() == [(1, None), (2, 1)]
+        assert connection.exec_driver_sql(
+            "SELECT cycle_revision_id, training_plan_revision_id "
+            "FROM training_cycle_weeks ORDER BY cycle_revision_id"
+        ).all() == [(1, 1), (2, 1)]
+        assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
+        assert (
+            connection.exec_driver_sql(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' "
+                "AND name = 'validate_training_cycle_revision_pointers_insert'"
+            ).scalar_one()
+            == 1
+        )
+    engine.dispose()

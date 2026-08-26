@@ -334,7 +334,11 @@ def workout_detail_view(
         if binding is not None
         else None
     )
-    from app.config import get_settings
+    from app.config import (
+        DEFERRED_QUALITY_TEMPLATE_IDS,
+        deferred_quality_templates_enabled,
+        get_settings,
+    )
 
     settings = get_settings()
     current_is_generated = current.source_type in {
@@ -342,6 +346,10 @@ def workout_detail_view(
         "coach_daily_adaptation",
         "coach_weekly_plan",
     }
+    deferred_quality_actions_allowed = (
+        current.template_id not in DEFERRED_QUALITY_TEMPLATE_IDS
+        or deferred_quality_templates_enabled()
+    )
     return WorkoutDetailView(
         id=workout.id,
         current=revision_view(current, context_fingerprint=context_fingerprint),
@@ -369,14 +377,18 @@ def workout_detail_view(
         sync_safety_report=sync_safety_report,
         garmin_sync_allowed=(not current_is_generated or settings.coach_garmin_sync_enabled),
         proposal_actions_allowed=(
-            settings.coach_daily_adaptation_enabled
-            if current.source_type == "coach_daily_adaptation"
-            else settings.coach_plan_generation_enabled
-            if current.source_type == "coach_weekly_plan"
-            else not current_is_generated or settings.coach_workout_proposals_enabled
+            (
+                settings.coach_daily_adaptation_enabled
+                if current.source_type == "coach_daily_adaptation"
+                else settings.coach_plan_generation_enabled
+                if current.source_type == "coach_weekly_plan"
+                else not current_is_generated or settings.coach_workout_proposals_enabled
+            )
+            and deferred_quality_actions_allowed
         ),
         edit_allowed=(
             current.source_type not in {"coach_daily_adaptation", "coach_weekly_plan"}
+            and (current.source_type != "coach_single" or current.template_id == "easy_run")
             and active_replacement_id is None
         ),
     )

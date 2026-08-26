@@ -1,4 +1,5 @@
 from datetime import date, datetime, timedelta
+from typing import Any
 
 import pytest
 from hypothesis import given
@@ -23,6 +24,7 @@ from app.services.planning.weekly_planner import (
     WeeklyPlannerError,
     WeeklyPlannerSnapshot,
     _assign_strides_day,
+    _count_consistent_weeks,
     compose_week,
     plan_shadow_week,
 )
@@ -32,7 +34,7 @@ MONDAY = date(2026, 8, 31)
 
 
 def _snapshot(**overrides) -> WeeklyPlannerSnapshot:
-    values = {
+    values: dict[str, Any] = {
         "week_start": MONDAY,
         "as_of": date(2026, 8, 26),
         "availability": (
@@ -120,6 +122,63 @@ def test_long_run_requires_consistent_running_weeks() -> None:
     candidate = compose_week(_snapshot(consistent_running_weeks=3))
     assert all(session.role != "long_run" for session in candidate.sessions)
     assert len(candidate.sessions) == candidate.target_days
+
+
+def test_history_gate_test_mode_uses_availability_and_unlocks_templates() -> None:
+    candidate = compose_week(
+        _snapshot(
+            typical_weekly_runs_median=1.0,
+            observed_runs_per_week=1.0,
+            consistent_running_weeks=1,
+        ),
+        enforce_history_gates=False,
+    )
+
+    assert candidate.target_days == 4
+    assert {session.role for session in candidate.sessions} == {
+        "easy_run",
+        "long_run",
+        "strides",
+    }
+    assert candidate.generation_context["history_gates"] == {
+        "enabled": False,
+        "effective_consistent_running_weeks": 4,
+        "effective_runs_per_week": 2,
+    }
+    checks = candidate.validation_report["checks"]
+    assert isinstance(checks, list)
+    assert {
+        check["result"]
+        for check in checks
+        if isinstance(check, dict) and check.get("code") == "planner.history_gates"
+    } == {"bypassed"}
+
+
+def test_consistent_history_counter_reaches_eight_weeks(session_factory) -> None:
+    today = date.today()
+    with session_factory() as session:
+        user = User(display_name="Eight Week Runner")
+        session.add(user)
+        session.flush()
+        for week in range(8):
+            for run in range(2):
+                age = week * 7 + run
+                session.add(
+                    Activity(
+                        user_id=user.id,
+                        garmin_activity_id=f"eight-week-{week}-{run}",
+                        name="Run",
+                        activity_type="running",
+                        started_at=datetime.combine(
+                            today - timedelta(days=age), datetime.min.time()
+                        ),
+                        duration_s=2400,
+                        distance_m=6000,
+                    )
+                )
+        session.flush()
+
+        assert _count_consistent_weeks(session, user.id, today) == 8
 
 
 def test_long_run_is_bounded_by_recent_longest_run() -> None:

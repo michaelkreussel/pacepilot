@@ -41,7 +41,9 @@ from app.services.planning.workout_views import workout_detail_view
 MONDAY = date(2026, 8, 31)
 
 
-def _candidate() -> WeeklyPlanCandidate:
+def _candidate(
+    *, enforce_history_gates: bool = True, sparse_history: bool = False
+) -> WeeklyPlanCandidate:
     return compose_week(
         WeeklyPlannerSnapshot(
             week_start=MONDAY,
@@ -56,9 +58,9 @@ def _candidate() -> WeeklyPlanCandidate:
             effective_reentry=False,
             goals=(GoalSummary(event_type="10k", status="active", target_date=None),),
             baseline_confidence="medium",
-            typical_weekly_runs_median=3.0,
-            observed_runs_per_week=3.0,
-            consistent_running_weeks=4,
+            typical_weekly_runs_median=1.0 if sparse_history else 3.0,
+            observed_runs_per_week=1.0 if sparse_history else 3.0,
+            consistent_running_weeks=1 if sparse_history else 4,
             longest_run_28d_seconds=4800,
             typical_longest_run_seconds=4200,
             median_run_seconds=2700,
@@ -68,7 +70,8 @@ def _candidate() -> WeeklyPlanCandidate:
             baseline_fingerprint="b" * 64,
             intensity_fingerprint="i" * 64,
             knowledge_base_version=get_knowledge_registry().version,
-        )
+        ),
+        enforce_history_gates=enforce_history_gates,
     )
 
 
@@ -103,6 +106,18 @@ def test_persist_week_creates_plan_revision_and_normal_workout_proposals(
         assert all(workout.scheduled_for is None for workout in workouts)
         assert all(workout.source_type == "coach_weekly_plan" for workout in workouts)
         assert session.scalar(select(func.count()).select_from(WorkoutGarminOperation)) == 0
+
+
+def test_persist_week_accepts_candidate_with_bypassed_history_gates(session_factory) -> None:
+    candidate = _candidate(enforce_history_gates=False, sparse_history=True)
+    with session_factory() as session:
+        user = _user(session)
+
+        persist_week_candidate(session, user, candidate)
+
+        roles = set(session.scalars(select(TrainingPlanWorkout.role)))
+        assert "long_run" in roles
+        assert len(roles) == 2
 
 
 def test_persist_week_is_idempotent_and_calendar_is_user_scoped(session_factory) -> None:

@@ -1,3 +1,5 @@
+from typing import Literal
+
 import pytest
 from pydantic import ValidationError
 
@@ -26,6 +28,8 @@ def test_coach_workout_features_default_to_disabled() -> None:
     assert settings.coach_garmin_sync_enabled is False
     assert settings.coach_daily_adaptation_enabled is False
     assert settings.coach_plan_generation_enabled is False
+    assert settings.coach_planner_history_gates_enabled is True
+    assert settings.coach_deferred_quality_templates_enabled is False
 
 
 def test_coach_workout_features_require_proposals() -> None:
@@ -53,3 +57,37 @@ def test_coach_workout_features_can_be_enabled_together() -> None:
     assert settings.coach_garmin_sync_enabled is True
     assert settings.coach_daily_adaptation_enabled is True
     assert settings.coach_plan_generation_enabled is True
+
+
+def test_production_rejects_disabled_planner_history_gates() -> None:
+    with pytest.raises(ValidationError, match="COACH_PLANNER_HISTORY_GATES_ENABLED"):
+        Settings(
+            _env_file=None,
+            environment="production",
+            session_secret="x" * 32,
+            session_https_only=True,
+            coach_planner_history_gates_enabled=False,
+        )
+
+
+@pytest.mark.parametrize("environment", ["test", "production"])
+def test_deferred_quality_templates_are_development_only(
+    environment: Literal["test", "production"],
+) -> None:
+    with pytest.raises(ValidationError, match="COACH_DEFERRED_QUALITY_TEMPLATES_ENABLED"):
+        Settings(
+            _env_file=None,
+            environment=environment,
+            session_secret="x" * 32 if environment == "production" else None,
+            session_https_only=environment == "production",
+            coach_deferred_quality_templates_enabled=True,
+        )
+
+
+def test_history_gate_bypass_is_development_only() -> None:
+    with pytest.raises(ValidationError, match="may be disabled only in development"):
+        Settings(
+            _env_file=None,
+            environment="test",
+            coach_planner_history_gates_enabled=False,
+        )

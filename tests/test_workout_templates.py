@@ -6,6 +6,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 from pydantic import ValidationError
 
+from app.config import get_settings
 from app.models import Workout
 from app.services.garmin.workout_export import compile_workout_with_report
 from app.services.planning.constraints import (
@@ -18,6 +19,7 @@ from app.services.planning.constraints import (
 from app.services.planning.validator import WorkoutInput, WorkoutValidationError, validate_workout
 from app.services.planning.workout_definition import (
     DefinitionValidationError,
+    RepeatBlockV2,
     definition_to_json,
     parse_definition,
     workout_metrics,
@@ -71,6 +73,50 @@ def test_deferred_and_out_of_range_templates_fail_explicitly() -> None:
 
     assert deferred.value.code == "template.not_active"
     assert out_of_range.value.code == "template.parameter_out_of_range"
+
+
+@pytest.mark.parametrize(
+    ("template_id", "expected_seconds", "work_domain"),
+    [
+        ("threshold_cruise", 57 * 60, "moderate"),
+        ("vo2_intervals", 60 * 60, "high"),
+    ],
+)
+def test_deferred_quality_templates_expand_in_development_test_mode(
+    template_id: str,
+    expected_seconds: int,
+    work_domain: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_deferred_quality_templates_enabled", True)
+    expanded = expand_workout_template(
+        template_id,
+        eligibility=_eligibility(
+            "reliable_intensity_model",
+            "reliable_current_performance_model",
+            "quality_density_validation",
+        ),
+        allow_deferred_quality=True,
+    )
+
+    assert expanded.load_estimate.duration_seconds == expected_seconds
+    assert len(expanded.definition.blocks) == 3
+    assert isinstance(expanded.definition.blocks[1], RepeatBlockV2)
+    domains = expanded.load_estimate.time_by_intensity_domain_seconds
+    assert getattr(domains, work_domain) > 0
+    assert domains.low + domains.moderate + domains.high == expected_seconds
+
+
+def test_deferred_quality_expansion_requires_explicit_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_deferred_quality_templates_enabled", True)
+    with pytest.raises(TemplateExpansionError) as blocked:
+        expand_workout_template(
+            "threshold_cruise",
+            eligibility=_eligibility("reliable_intensity_model", "quality_density_validation"),
+        )
+    assert blocked.value.code == "template.not_active"
 
 
 def test_v1_v2_parsing_and_hash_include_local_guidance() -> None:

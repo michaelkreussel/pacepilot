@@ -150,6 +150,6 @@ def downgrade() -> None:
     op.drop_table("training_plan_workouts")
     op.drop_index(op.f("ix_training_plan_revisions_plan_id"), table_name="training_plan_revisions")
     op.drop_table("training_plan_revisions")
-    op.drop_index(op.f("ix_training_plans_current_revision_id"), table_name="training_plans")
+    op.execute("DROP INDEX IF EXISTS ix_training_plans_current_revision_id")
     op.drop_index(op.f("ix_training_plans_user_id"), table_name="training_plans")
     op.drop_table("training_plans")

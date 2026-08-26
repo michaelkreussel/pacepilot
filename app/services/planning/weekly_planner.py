@@ -6,6 +6,7 @@ from datetime import date, datetime, time, timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.config import deferred_quality_templates_enabled, get_settings
 from app.models import (
     AthleteAvailability,
     AthleteGoal,
@@ -31,9 +32,9 @@ from app.services.planning.workout_templates import (
 WEEKLY_PLANNER_VERSION = "weekly-shadow-planner-v1"
 PLANNER_SCHEMA_VERSION = "weekly_plan_candidate.v1"
 MIN_TYPICAL_WEEKLY_RUNS = 2
-CONSISTENT_WEEKS_WINDOW_DAYS = 28
+CONSISTENT_WEEKS_WINDOW_DAYS = 56
 RUNS_PER_CONSISTENT_WEEK = 2
-MAX_CONSISTENT_WEEKS = 4
+MAX_CONSISTENT_WEEKS = 8
 LONG_RUN_REQUIRED_CONSISTENT_WEEKS = 4
 CONSERVATIVE_FREQUENCY_CAP = 3
 LONG_RUN_HISTORY_RATIO = 1.1
@@ -84,6 +85,7 @@ class WeeklyPlannerSnapshot:
     baseline_fingerprint: str
     intensity_fingerprint: str
     knowledge_base_version: str
+    safety_outcome: str = "allow"
 
 
 @dataclass(frozen=True)
@@ -170,9 +172,9 @@ def _long_run_decision(snapshot: WeeklyPlannerSnapshot) -> LongRunDecision:
     return LongRunDecision(minutes, None, tuple(warnings))
 
 
-def _strides_eligible(snapshot: WeeklyPlannerSnapshot) -> bool:
+def _strides_eligible(snapshot: WeeklyPlannerSnapshot, consistent_running_weeks: int) -> bool:
     return (
-        snapshot.consistent_running_weeks >= LONG_RUN_REQUIRED_CONSISTENT_WEEKS
+        consistent_running_weeks >= LONG_RUN_REQUIRED_CONSISTENT_WEEKS
         and snapshot.hard_runs_28d > 0
     )
 
@@ -211,7 +213,12 @@ def _assign_strides_day(
     return None, skips
 
 
-def compose_week(snapshot: WeeklyPlannerSnapshot) -> WeeklyPlanCandidate:
+def compose_week(
+    snapshot: WeeklyPlannerSnapshot,
+    *,
+    enforce_history_gates: bool = True,
+    enable_deferred_quality: bool = False,
+) -> WeeklyPlanCandidate:
     registry = get_knowledge_registry()
     available_days = snapshot.availability
     if not available_days:
@@ -220,7 +227,7 @@ def compose_week(snapshot: WeeklyPlannerSnapshot) -> WeeklyPlanCandidate:
             code="planner.no_available_days",
         )
     typical = snapshot.typical_weekly_runs_median
-    if typical is None or typical < MIN_TYPICAL_WEEKLY_RUNS:
+    if enforce_history_gates and (typical is None or typical < MIN_TYPICAL_WEEKLY_RUNS):
         raise WeeklyPlannerError(
             "Für eine Wochenplanung fehlt eine beobachtete wöchentliche Laufroutine "
             "(weniger als zwei Läufe pro Woche in den letzten 28 Tagen).",
@@ -232,17 +239,31 @@ def compose_week(snapshot: WeeklyPlannerSnapshot) -> WeeklyPlanCandidate:
             code="planner.insufficient_data",
         )
 
-    frequency_cap = max(int(typical), MIN_TYPICAL_WEEKLY_RUNS)
-    if snapshot.baseline_confidence == "low" or snapshot.effective_reentry:
-        frequency_cap = min(frequency_cap, CONSERVATIVE_FREQUENCY_CAP)
+    effective_consistent_weeks = snapshot.consistent_running_weeks
+    effective_runs_per_week = max(round(snapshot.observed_runs_per_week), 1)
+    if enforce_history_gates:
+        assert typical is not None
+        frequency_cap = max(int(typical), MIN_TYPICAL_WEEKLY_RUNS)
+        if snapshot.baseline_confidence == "low" or snapshot.effective_reentry:
+            frequency_cap = min(frequency_cap, CONSERVATIVE_FREQUENCY_CAP)
+    else:
+        frequency_cap = MAX_PLAN_DAYS
+        effective_consistent_weeks = max(
+            effective_consistent_weeks,
+            8 if enable_deferred_quality else LONG_RUN_REQUIRED_CONSISTENT_WEEKS,
+        )
+        effective_runs_per_week = max(
+            effective_runs_per_week,
+            3 if enable_deferred_quality else MIN_TYPICAL_WEEKLY_RUNS,
+        )
     target_days = min(frequency_cap, len(available_days), MAX_PLAN_DAYS)
 
     long_decision = _long_run_decision(snapshot)
     long_ok = (
         long_decision.minutes is not None
-        and snapshot.consistent_running_weeks >= LONG_RUN_REQUIRED_CONSISTENT_WEEKS
+        and effective_consistent_weeks >= LONG_RUN_REQUIRED_CONSISTENT_WEEKS
     )
-    strides_ok = target_days >= 4 and _strides_eligible(snapshot)
+    strides_ok = target_days >= 4 and _strides_eligible(snapshot, effective_consistent_weeks)
     roles = _composition(target_days, long_ok, strides_ok)
 
     placements: list[tuple[str, DayAvailability, int]] = []
@@ -288,8 +309,8 @@ def compose_week(snapshot: WeeklyPlannerSnapshot) -> WeeklyPlanCandidate:
                 "strides",
                 None,
                 eligibility=TemplateEligibilityContext(
-                    consistent_running_weeks=snapshot.consistent_running_weeks,
-                    runs_per_week=max(round(snapshot.observed_runs_per_week), 1),
+                    consistent_running_weeks=effective_consistent_weeks,
+                    runs_per_week=effective_runs_per_week,
                     available_minutes=10_080,
                     facts={"familiar_with_relaxed_fast_running"},
                 ),
@@ -354,8 +375,8 @@ def compose_week(snapshot: WeeklyPlannerSnapshot) -> WeeklyPlanCandidate:
                     role,
                     TemplateParameters(duration_minutes=minutes),
                     eligibility=TemplateEligibilityContext(
-                        consistent_running_weeks=snapshot.consistent_running_weeks,
-                        runs_per_week=max(round(snapshot.observed_runs_per_week), 1),
+                        consistent_running_weeks=effective_consistent_weeks,
+                        runs_per_week=effective_runs_per_week,
                         available_minutes=day.available_minutes,
                         safety_stop=False,
                         facts=facts,
@@ -409,6 +430,10 @@ def compose_week(snapshot: WeeklyPlannerSnapshot) -> WeeklyPlanCandidate:
             {"code": "planner.templates.active_only", "result": "pass"},
             {"code": "planner.availability.respected", "result": "pass"},
             {"code": "planner.budget.respected", "result": "pass"},
+            {
+                "code": "planner.history_gates",
+                "result": "pass" if enforce_history_gates else "bypassed",
+            },
             {"code": "planner.quality_spacing", "result": "pass" if spacing_ok else "fail"},
             {
                 "code": "planner.longrun.history_bound",
@@ -417,7 +442,14 @@ def compose_week(snapshot: WeeklyPlannerSnapshot) -> WeeklyPlanCandidate:
             {"code": "planner.no_catchup", "result": "pass"},
         ],
     }
-    generation_context = _generation_context(snapshot, target_days)
+    generation_context = _generation_context(
+        snapshot,
+        target_days,
+        enforce_history_gates=enforce_history_gates,
+        effective_consistent_weeks=effective_consistent_weeks,
+        effective_runs_per_week=effective_runs_per_week,
+        enable_deferred_quality=enable_deferred_quality,
+    )
     fingerprint_input = {
         **json.loads(json.dumps(generation_context, sort_keys=True, separators=(",", ":"))),
         "planner_version": WEEKLY_PLANNER_VERSION,
@@ -468,13 +500,28 @@ def _rationale(role: str) -> str:
     return rationales[role]
 
 
-def _generation_context(snapshot: WeeklyPlannerSnapshot, target_days: int) -> dict[str, object]:
+def _generation_context(
+    snapshot: WeeklyPlannerSnapshot,
+    target_days: int,
+    *,
+    enforce_history_gates: bool,
+    effective_consistent_weeks: int,
+    effective_runs_per_week: int,
+    enable_deferred_quality: bool,
+) -> dict[str, object]:
     return {
         "schema_version": PLANNER_SCHEMA_VERSION,
         "as_of": snapshot.as_of.isoformat(),
         "week_start": snapshot.week_start.isoformat(),
         "week_end": (snapshot.week_start + timedelta(days=6)).isoformat(),
         "target_days": target_days,
+        "history_gates": {
+            "enabled": enforce_history_gates,
+            "effective_consistent_running_weeks": effective_consistent_weeks,
+            "effective_runs_per_week": effective_runs_per_week,
+        },
+        "deferred_quality_test_mode": enable_deferred_quality,
+        "safety": {"outcome": snapshot.safety_outcome},
         "availability": [
             {"weekday": day.weekday, "available_minutes": day.available_minutes}
             for day in snapshot.availability
@@ -609,8 +656,14 @@ def plan_shadow_week(session: Session, user: User, *, week_start: date) -> Weekl
         baseline_fingerprint=shadow.baseline.input_fingerprint,
         intensity_fingerprint=shadow.intensity.input_fingerprint,
         knowledge_base_version=get_knowledge_registry().version,
+        safety_outcome=safety.report.outcome.value,
     )
-    return compose_week(snapshot)
+    quality_test_mode = deferred_quality_templates_enabled()
+    return compose_week(
+        snapshot,
+        enforce_history_gates=get_settings().coach_planner_history_gates_enabled,
+        enable_deferred_quality=quality_test_mode,
+    )
 
 
 def _count_consistent_weeks(session: Session, user_id: int, as_of: date) -> int:

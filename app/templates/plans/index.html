@@ -32,8 +32,26 @@
     {% if view == 'month' %}<p class="mt-1 text-sm text-muted-foreground">{{ month_name }} {{ month_start.year }}</p>
     {% else %}<p class="mt-1 text-sm text-muted-foreground">{{ monday|date }} bis {{ sunday|date }}</p>{% endif %}
   </div>
-  <a class="inline-flex w-fit items-center justify-center rounded-lg border border-transparent bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background" href="/workouts/new">+ Workout</a>
+  <div class="flex flex-wrap gap-2">{% if features.coach_plan_generation %}<a class="inline-flex w-fit items-center justify-center rounded-lg border border-border bg-surface px-4 py-2 text-sm font-semibold hover:bg-secondary" href="/plans/cycles/new">Mehrwochenplan</a>{% endif %}<a class="inline-flex w-fit items-center justify-center rounded-lg border border-transparent bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background" href="/workouts/new">+ Workout</a></div>
 </header>
+
+{% if features.coach_plan_generation %}
+<section class="mb-4 rounded-xl border border-border bg-surface p-4" aria-labelledby="cycles-title">
+  {% if not features.coach_planner_history_gates %}<p class="mb-3 rounded-lg border border-warning/30 bg-warning-subtle p-3 text-sm font-semibold text-warning-emphasis">Planner-Testmodus: Wochen- und Frequenz-Gates sind deaktiviert.</p>{% endif %}
+  {% if features.coach_deferred_quality_templates %}<p class="mb-3 rounded-lg border border-warning/30 bg-warning-subtle p-3 text-sm font-semibold text-warning-emphasis">Quality-Testmodus: Schwellen- und VO₂max-Templates sind für Tests freigeschaltet.</p>{% endif %}
+  <div class="flex flex-wrap items-center justify-between gap-3">
+    <div><h2 class="font-display text-lg font-semibold" id="cycles-title">Mehrwochenpläne</h2><p class="mt-1 text-xs text-muted-foreground">Versionierte Trainingszyklen mit Phasen und einzelnen Workout-Vorschlägen.</p></div>
+    <a class="text-sm font-semibold text-primary hover:text-primary-hover" href="/plans/cycles/new">Neuen Plan erstellen</a>
+  </div>
+  {% if cycles %}
+  <ul class="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+    {% for cycle in cycles %}<li><a class="block rounded-lg border border-border bg-surface-muted p-3 transition hover:border-primary/30 hover:bg-primary-subtle" href="/plans/cycles/{{ cycle.id }}"><span class="text-xs font-semibold uppercase tracking-wide text-primary">{{ goal_type_labels.get(cycle.event_type, cycle.event_type) }}</span><strong class="mt-1 block">{{ cycle.start_date|date }} bis {{ cycle.target_date|date }}</strong><span class="mt-1 block text-xs text-muted-foreground">{% if cycle.accepted_revision_id %}Planrevision angenommen{% elif cycle.current_revision_id %}Vorschlag offen{% else %}Noch keine Revision{% endif %}</span></a></li>{% endfor %}
+  </ul>
+  {% else %}
+  <p class="mt-3 rounded-lg border border-dashed border-border bg-surface-muted p-3 text-sm text-muted-foreground">Noch kein Mehrwochenplan erzeugt. Der Planer prüft beim Erstellen zuerst deine aktuelle Laufbasis.</p>
+  {% endif %}
+</section>
+{% endif %}
 
 <div class="mb-4 flex flex-col gap-2 rounded-xl border border-border bg-surface p-2 sm:flex-row sm:items-center sm:justify-between">
   <nav class="flex w-fit rounded-lg bg-surface-muted p-1" aria-label="Kalenderansicht">

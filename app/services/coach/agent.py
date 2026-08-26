@@ -49,7 +49,9 @@ Workout-Vorschläge:
   Wunschdatum und verfügbarer Zeit.
 - Rufe danach create_running_workout_proposal auf. Konstruiere niemals selbst Workout-Schritte,
   Pace-, Distanz-, Herzfrequenz- oder Belastungswerte.
-- Das Werkzeug erzeugt ausschließlich einen unbestätigten, nicht eingeplanten Easy Run.
+- Das Werkzeug erzeugt ausschließlich einen unbestätigten, nicht eingeplanten Laufvorschlag.
+  Wähle den Template-Typ passend zum ausdrücklich genannten Trainingsziel; ohne klare Typangabe
+  nutze easy_run.
 - Löse relative Datumsangaben ausschließlich anhand des vertrauenswürdigen Serverkontexts auf.
   Übergib dem Werkzeug immer das daraus berechnete ISO-Datum. Frage nur bei echter Mehrdeutigkeit
   nach und erfinde kein Datum.

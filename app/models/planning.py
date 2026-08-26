@@ -27,6 +27,7 @@ EXPERIENCE_LEVELS = ("novice", "intermediate", "advanced")
 GOAL_EVENT_TYPES = ("general_fitness", "5k", "10k", "half_marathon", "marathon")
 GOAL_STATUSES = ("active", "achieved", "archived")
 ANCHOR_KINDS = ("race", "time_trial", "manual")
+CYCLE_STATUSES = ("active", "archived")
 
 
 class AthletePlanningProfile(Base):
@@ -57,6 +58,7 @@ class AthletePlanningProfile(Base):
 class AthleteGoal(Base):
     __tablename__ = "athlete_goals"
     __table_args__ = (
+        UniqueConstraint("id", "user_id", name="uq_athlete_goals_id_user_id"),
         CheckConstraint(
             "event_type IN ('general_fitness', '5k', '10k', 'half_marathon', 'marathon')",
             name="ck_athlete_goals_event_type",
@@ -202,12 +204,136 @@ class TrainingPlanWorkout(Base):
     scheduled_for: Mapped[date] = mapped_column(Date, index=True)
 
 
+class TrainingCycle(Base):
+    __tablename__ = "training_cycles"
+    __table_args__ = (
+        UniqueConstraint("id", "user_id", name="uq_training_cycles_id_user_id"),
+        UniqueConstraint(
+            "user_id", "goal_id", "start_date", name="uq_training_cycles_user_goal_start"
+        ),
+        CheckConstraint(
+            "event_type IN ('general_fitness', '5k', '10k', 'half_marathon', 'marathon')",
+            name="ck_training_cycles_event_type",
+        ),
+        CheckConstraint("status IN ('active', 'archived')", name="ck_training_cycles_status"),
+        CheckConstraint("target_date > start_date", name="ck_training_cycles_dates"),
+        ForeignKeyConstraint(
+            ["goal_id", "user_id"],
+            ["athlete_goals.id", "athlete_goals.user_id"],
+            name="fk_training_cycles_goal_owner",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    goal_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    event_type: Mapped[str] = mapped_column(String(30))
+    start_date: Mapped[date] = mapped_column(Date)
+    target_date: Mapped[date] = mapped_column(Date)
+    status: Mapped[str] = mapped_column(String(20), default="active")
+    current_revision_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    accepted_revision_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class TrainingCycleRevision(Base):
+    __tablename__ = "training_cycle_revisions"
+    __table_args__ = (
+        UniqueConstraint("id", "owner_user_id", name="uq_training_cycle_revisions_id_owner"),
+        UniqueConstraint(
+            "id",
+            "cycle_id",
+            "owner_user_id",
+            name="uq_training_cycle_revisions_id_cycle_owner",
+        ),
+        UniqueConstraint("cycle_id", "revision_number", name="uq_training_cycle_revisions_number"),
+        UniqueConstraint(
+            "cycle_id", "input_fingerprint", name="uq_training_cycle_revisions_fingerprint"
+        ),
+        CheckConstraint("revision_number >= 1", name="ck_training_cycle_revisions_number_positive"),
+        ForeignKeyConstraint(
+            ["cycle_id", "owner_user_id"],
+            ["training_cycles.id", "training_cycles.user_id"],
+            name="fk_training_cycle_revisions_cycle_owner",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["parent_revision_id", "cycle_id", "owner_user_id"],
+            [
+                "training_cycle_revisions.id",
+                "training_cycle_revisions.cycle_id",
+                "training_cycle_revisions.owner_user_id",
+            ],
+            name="fk_training_cycle_revisions_parent_same_cycle",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    cycle_id: Mapped[int] = mapped_column(Integer, index=True)
+    owner_user_id: Mapped[int] = mapped_column(Integer)
+    parent_revision_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    revision_number: Mapped[int] = mapped_column(Integer)
+    event_type: Mapped[str] = mapped_column(String(30))
+    start_date: Mapped[date] = mapped_column(Date)
+    target_date: Mapped[date] = mapped_column(Date)
+    planner_version: Mapped[str] = mapped_column(String(100))
+    knowledge_base_version: Mapped[str] = mapped_column(String(200))
+    input_fingerprint: Mapped[str] = mapped_column(String(64))
+    confidence: Mapped[str] = mapped_column(String(20))
+    phase_plan_json: Mapped[list[dict[str, object]]] = mapped_column(JSON)
+    assumptions_json: Mapped[dict[str, object]] = mapped_column(JSON)
+    impact_json: Mapped[dict[str, object]] = mapped_column(JSON)
+    validation_report_json: Mapped[dict[str, object]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class TrainingCycleWeek(Base):
+    __tablename__ = "training_cycle_weeks"
+    __table_args__ = (
+        UniqueConstraint("cycle_revision_id", "position", name="uq_training_cycle_weeks_position"),
+        UniqueConstraint(
+            "cycle_revision_id",
+            "training_plan_revision_id",
+            name="uq_training_cycle_weeks_plan_revision",
+        ),
+        ForeignKeyConstraint(
+            ["cycle_revision_id", "owner_user_id"],
+            ["training_cycle_revisions.id", "training_cycle_revisions.owner_user_id"],
+            name="fk_training_cycle_weeks_revision_owner",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["training_plan_revision_id", "owner_user_id"],
+            ["training_plan_revisions.id", "training_plan_revisions.owner_user_id"],
+            name="fk_training_cycle_weeks_plan_revision_owner",
+            ondelete="CASCADE",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    cycle_revision_id: Mapped[int] = mapped_column(Integer, index=True)
+    training_plan_revision_id: Mapped[int] = mapped_column(Integer, index=True)
+    owner_user_id: Mapped[int] = mapped_column(Integer, index=True)
+    position: Mapped[int] = mapped_column(Integer)
+    week_start: Mapped[date] = mapped_column(Date, index=True)
+    phase: Mapped[str] = mapped_column(String(20))
+
+
 @event.listens_for(TrainingPlanRevision, "before_update")
 @event.listens_for(TrainingPlanWorkout, "before_update")
 def _prevent_plan_revision_update(
     _mapper: Any, _connection: Any, _target: TrainingPlanRevision | TrainingPlanWorkout
 ) -> None:
     raise ValueError("Training plan revisions and memberships are immutable")
+
+
+@event.listens_for(TrainingCycleRevision, "before_update")
+@event.listens_for(TrainingCycleWeek, "before_update")
+def _prevent_cycle_revision_update(
+    _mapper: Any, _connection: Any, _target: TrainingCycleRevision | TrainingCycleWeek
+) -> None:
+    raise ValueError("Training cycle revisions and memberships are immutable")
 
 
 event.listen(
@@ -218,6 +344,57 @@ event.listen(
         "BEFORE UPDATE ON training_plan_revisions "
         "BEGIN SELECT RAISE(ABORT, "
         "'Training plan revisions and memberships are immutable'); END"
+    ).execute_if(dialect="sqlite"),
+)
+
+event.listen(
+    TrainingCycleRevision.__table__,
+    "after_create",
+    DDL(
+        "CREATE TRIGGER prevent_training_cycle_revisions_update "
+        "BEFORE UPDATE ON training_cycle_revisions "
+        "BEGIN SELECT RAISE(ABORT, "
+        "'Training cycle revisions and memberships are immutable'); END"
+    ).execute_if(dialect="sqlite"),
+)
+event.listen(
+    TrainingCycleWeek.__table__,
+    "after_create",
+    DDL(
+        "CREATE TRIGGER prevent_training_cycle_weeks_update "
+        "BEFORE UPDATE ON training_cycle_weeks "
+        "BEGIN SELECT RAISE(ABORT, "
+        "'Training cycle revisions and memberships are immutable'); END"
+    ).execute_if(dialect="sqlite"),
+)
+event.listen(
+    TrainingCycle.__table__,
+    "after_create",
+    DDL(
+        "CREATE TRIGGER validate_training_cycle_revision_pointers "
+        "BEFORE UPDATE OF current_revision_id, accepted_revision_id ON training_cycles "
+        "WHEN (NEW.current_revision_id IS NOT NULL AND NOT EXISTS ("
+        "SELECT 1 FROM training_cycle_revisions WHERE id = NEW.current_revision_id "
+        "AND cycle_id = NEW.id AND owner_user_id = NEW.user_id)) OR "
+        "(NEW.accepted_revision_id IS NOT NULL AND NOT EXISTS ("
+        "SELECT 1 FROM training_cycle_revisions WHERE id = NEW.accepted_revision_id "
+        "AND cycle_id = NEW.id AND owner_user_id = NEW.user_id)) "
+        "BEGIN SELECT RAISE(ABORT, 'Cycle revision must belong to its cycle'); END"
+    ).execute_if(dialect="sqlite"),
+)
+event.listen(
+    TrainingCycle.__table__,
+    "after_create",
+    DDL(
+        "CREATE TRIGGER validate_training_cycle_revision_pointers_insert "
+        "BEFORE INSERT ON training_cycles "
+        "WHEN (NEW.current_revision_id IS NOT NULL AND NOT EXISTS ("
+        "SELECT 1 FROM training_cycle_revisions WHERE id = NEW.current_revision_id "
+        "AND cycle_id = NEW.id AND owner_user_id = NEW.user_id)) OR "
+        "(NEW.accepted_revision_id IS NOT NULL AND NOT EXISTS ("
+        "SELECT 1 FROM training_cycle_revisions WHERE id = NEW.accepted_revision_id "
+        "AND cycle_id = NEW.id AND owner_user_id = NEW.user_id)) "
+        "BEGIN SELECT RAISE(ABORT, 'Cycle revision must belong to its cycle'); END"
     ).execute_if(dialect="sqlite"),
 )
 event.listen(

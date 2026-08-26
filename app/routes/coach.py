@@ -14,7 +14,11 @@ from pydantic import ValidationError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.auth import CurrentUser
-from app.config import get_settings
+from app.config import (
+    DEFERRED_QUALITY_TEMPLATE_IDS,
+    deferred_quality_templates_enabled,
+    get_settings,
+)
 from app.database import SessionDep
 from app.models import CoachMessage, Workout, WorkoutRevision
 from app.models.user import utcnow
@@ -51,7 +55,8 @@ from app.services.planning.workout_definition import (
     workout_metrics,
 )
 from app.services.planning.workout_proposals import (
-    EasyRunProposalRequest,
+    RUNNING_PROPOSAL_TEMPLATE_LABELS,
+    RunningProposalRequest,
     RunningProposalService,
     WorkoutProposalError,
 )
@@ -190,6 +195,7 @@ def _render_coach(
     proposal_error: str | None = None,
     proposal_date: str | None = None,
     proposal_minutes: str = "45",
+    proposal_template_id: str = "easy_run",
     status_code: int = 200,
 ) -> HTMLResponse:
     conversations = list_conversations(session, user.id)
@@ -225,6 +231,13 @@ def _render_coach(
             proposal_error=proposal_error,
             proposal_date=proposal_date or date.today().isoformat(),
             proposal_minutes=proposal_minutes,
+            proposal_template_id=proposal_template_id,
+            proposal_templates=[
+                {"id": template_id, "label": label}
+                for template_id, label in RUNNING_PROPOSAL_TEMPLATE_LABELS.items()
+                if template_id not in DEFERRED_QUALITY_TEMPLATE_IDS
+                or deferred_quality_templates_enabled()
+            ],
             proposal_idempotency_key=str(uuid4()),
         ),
         status_code=status_code,
@@ -273,6 +286,9 @@ WARNING_LABELS = {
         "Länger als dein typisch längster Wochenlauf"
     ),
     "planner.strides_adjacent_to_long_run": "Steigerungen direkt neben dem Langen Lauf",
+    "planner.deferred_quality_development_override": (
+        "Development-Testvorlage: vor Annahme besonders sorgfältig prüfen"
+    ),
 }
 
 GOAL_TYPE_LABELS = {
@@ -478,7 +494,8 @@ def proposal_card(
 
 
 @router.post("/workout-proposals/easy-run")
-async def create_easy_run_proposal(
+@router.post("/workout-proposals/running")
+async def create_running_proposal(
     request: Request,
     session: SessionDep,
     user: CurrentUser,
@@ -487,17 +504,19 @@ async def create_easy_run_proposal(
     form = await request.form()
     proposal_date = str(form.get("suggested_for", ""))
     proposal_minutes = str(form.get("available_minutes", ""))
+    proposal_template_id = str(form.get("template_id", "easy_run"))
     try:
-        proposal = EasyRunProposalRequest.model_validate(
+        proposal = RunningProposalRequest.model_validate(
             {
+                "template_id": proposal_template_id,
                 "suggested_for": proposal_date,
                 "available_minutes": proposal_minutes,
                 "idempotency_key": str(form.get("idempotency_key", "")),
             }
         )
-        workout = RunningProposalService(
-            session, user, request_id=request.state.request_id
-        ).create_easy_run(proposal)
+        workout = RunningProposalService(session, user, request_id=request.state.request_id).create(
+            proposal
+        )
     except ValidationError:
         error = "Bitte gib ein gültiges Datum und mindestens 20 verfügbare Minuten an."
     except WorkoutProposalError as exc:
@@ -508,7 +527,7 @@ async def create_easy_run_proposal(
         error = str(exc)
     else:
         return RedirectResponse(
-            f"/workouts/{workout.id}?notice=Easy-Run-Vorschlag erstellt", status_code=303
+            f"/workouts/{workout.id}?notice=Workout-Vorschlag erstellt", status_code=303
         )
     return _render_coach(
         request,
@@ -519,6 +538,7 @@ async def create_easy_run_proposal(
         proposal_error=error,
         proposal_date=proposal_date,
         proposal_minutes=proposal_minutes,
+        proposal_template_id=proposal_template_id,
         status_code=422,
     )
 

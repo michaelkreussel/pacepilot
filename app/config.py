@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     coach_garmin_sync_enabled: bool = False
     coach_daily_adaptation_enabled: bool = False
     coach_plan_generation_enabled: bool = False
+    coach_planner_history_gates_enabled: bool = True
+    coach_deferred_quality_templates_enabled: bool = False
 
     @model_validator(mode="after")
     def validate_deployment(self) -> "Settings":
@@ -53,6 +55,18 @@ class Settings(BaseSettings):
                 raise ValueError("SESSION_SECRET must be configured in production")
             if not self.session_https_only:
                 raise ValueError("SESSION_HTTPS_ONLY must be enabled in production")
+            if not self.coach_planner_history_gates_enabled:
+                raise ValueError(
+                    "COACH_PLANNER_HISTORY_GATES_ENABLED must be enabled in production"
+                )
+        if self.coach_deferred_quality_templates_enabled and self.environment != "development":
+            raise ValueError(
+                "COACH_DEFERRED_QUALITY_TEMPLATES_ENABLED is allowed only in development"
+            )
+        if not self.coach_planner_history_gates_enabled and self.environment != "development":
+            raise ValueError(
+                "COACH_PLANNER_HISTORY_GATES_ENABLED may be disabled only in development"
+            )
         if not self.coach_workout_proposals_enabled and (
             self.coach_garmin_sync_enabled
             or self.coach_daily_adaptation_enabled
@@ -65,3 +79,13 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+DEFERRED_QUALITY_TEMPLATE_IDS = frozenset({"threshold_cruise", "vo2_intervals"})
+
+
+def deferred_quality_templates_enabled() -> bool:
+    settings = get_settings()
+    return (
+        settings.environment == "development" and settings.coach_deferred_quality_templates_enabled
+    )

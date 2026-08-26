@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}{{ goal_type_label }} · Mehrwochenplan{% endblock %}
+{% block content %}
+<div class="mx-auto w-full max-w-5xl space-y-6">
+  <header class="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+    <div>
+      <p class="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">{{ goal_type_label }} · Revision {{ revision.revision_number }}</p>
+      <h1 class="mt-1 font-display text-3xl font-semibold tracking-tight">Mehrwochenplan</h1>
+      <p class="mt-1 text-sm text-muted-foreground">{{ cycle.start_date|date }} bis {{ cycle.target_date|date }}</p>
+    </div>
+    <a class="inline-flex w-fit items-center justify-center rounded-lg border border-border bg-surface px-4 py-2 text-sm font-semibold hover:bg-secondary" href="/plans">Kalender öffnen</a>
+  </header>
+
+  {% if revision.assumptions_json.get('deferred_quality_development_override') %}<div class="rounded-xl border border-warning/30 bg-warning-subtle p-4 text-sm text-warning-emphasis" role="status"><strong>Development-Testmodus aktiv.</strong> Dieser Plan kann noch nicht produktiv freigegebene Schwellen- oder VO₂max-Vorlagen enthalten.</div>{% endif %}
+
+  <section class="grid gap-3 sm:grid-cols-4" aria-label="Planstatus">
+    <div class="rounded-xl border border-border bg-surface p-4"><p class="text-xs text-muted-foreground">Confidence</p><p class="mt-1 font-semibold">{{ revision.confidence|capitalize }}</p></div>
+    <div class="rounded-xl border border-border bg-surface p-4"><p class="text-xs text-muted-foreground">Wochen</p><p class="mt-1 font-semibold">{{ weeks|length }}</p></div>
+    <div class="rounded-xl border border-border bg-surface p-4"><p class="text-xs text-muted-foreground">Planrevision</p><p class="mt-1 font-semibold">{% if is_accepted %}Angenommen{% else %}Vorschlag{% endif %}</p></div>
+    <div class="rounded-xl border border-border bg-surface p-4"><p class="text-xs text-muted-foreground">Änderung</p><p class="mt-1 font-semibold">{% if revision.impact_json.get('material') %}Materiell{% else %}Unverändert{% endif %}</p></div>
+  </section>
+
+  {% if not is_accepted and (not revision.assumptions_json.get('deferred_quality_development_override') or features.coach_deferred_quality_templates) %}
+  <section class="rounded-xl border border-primary/30 bg-primary-subtle p-4">
+    <p class="font-semibold">Diese Revision ist noch nicht angenommen</p>
+    <p class="mt-1 text-sm text-muted-foreground">Die Wochen enthalten weiterhin einzelne, unangenommene Workout-Vorschläge. Die Annahme des Mehrwochenplans ersetzt nicht die explizite Annahme eines einzelnen Workouts.</p>
+    <form class="mt-4" method="post" action="/plans/cycles/{{ cycle.id }}/revisions/{{ revision.id }}/accept">
+      {{ csrf_field() }}
+      <button class="inline-flex items-center justify-center rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:bg-primary-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" type="submit">Planrevision annehmen</button>
+    </form>
+  </section>
+  {% elif is_accepted %}
+  <div class="rounded-xl border border-success/30 bg-success-subtle p-4 text-sm"><strong>Planrevision angenommen.</strong> Workouts müssen weiterhin einzeln geprüft und angenommen werden.</div>
+  {% else %}
+  <div class="rounded-xl border border-warning/30 bg-warning-subtle p-4 text-sm text-warning-emphasis"><strong>Annahme gesperrt.</strong> Aktiviere den Development-Quality-Testmodus erneut, um diese Revision anzunehmen.</div>
+  {% endif %}
+
+  <section class="space-y-3" aria-labelledby="cycle-weeks-title">
+    <h2 id="cycle-weeks-title" class="font-display text-xl font-semibold">Phasen und Wochen</h2>
+    {% for week in weeks %}
+    <article class="rounded-xl border border-border bg-surface p-4">
+      <div class="flex flex-wrap items-baseline justify-between gap-2">
+        <div><p class="text-xs font-semibold uppercase tracking-wider text-primary">Woche {{ week.membership.position + 1 }} · {{ week.membership.phase }}</p><h3 class="mt-1 font-semibold">{{ week.membership.week_start|date }}</h3></div>
+        <span class="text-xs text-muted-foreground">{% if week.workouts %}{{ week.workouts|length }} Einheiten{% else %}Erholung / Unterbrechung{% endif %}</span>
+      </div>
+      {% if week.workouts %}
+      <ul class="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+        {% for item in week.workouts %}
+        <li class="rounded-lg border border-dashed border-primary/30 bg-primary-subtle p-3"><a class="block" href="/workouts/{{ item.workout.id }}"><span class="text-xs text-muted-foreground">{{ item.membership.scheduled_for|date }}</span><strong class="mt-1 block text-sm">{{ item.workout.name }}</strong><span class="mt-1 block text-xs text-muted-foreground">Planvorschlag · einzeln annehmen</span></a></li>
+        {% endfor %}
+      </ul>
+      {% endif %}
+    </article>
+    {% endfor %}
+  </section>
+
+  <details class="rounded-xl border border-border bg-surface p-4 text-sm">
+    <summary class="cursor-pointer font-semibold">Annahmen, Auswirkungen und Validierung</summary>
+    <div class="mt-3 grid gap-4 md:grid-cols-3">
+      <div><h3 class="font-semibold">Annahmen</h3><ul class="mt-2 list-disc space-y-1 pl-5 text-muted-foreground"><li>Keine Nachholstapelung</li><li>{% if revision.assumptions_json.get('deferred_quality_development_override') %}Freigegebene Templates plus markierte Development-Testvorlagen{% else %}Nur freigegebene Lauf-Templates{% endif %}</li><li>Wearables entscheiden nicht allein</li></ul></div>
+      <div><h3 class="font-semibold">Umfang</h3><p class="mt-2 text-muted-foreground">{{ revision.impact_json.get('total_minutes', 0) }} Minuten insgesamt.</p><p class="mt-1 text-muted-foreground">{{ revision.impact_json.get('weekly_minutes', [])|join(' · ') }} Minuten pro Woche.</p></div>
+      <div><h3 class="font-semibold">Versionen</h3><p class="mt-2 break-all text-muted-foreground">Planner: {{ revision.planner_version }}</p><p class="mt-1 break-all text-muted-foreground">Fingerprint: {{ revision.input_fingerprint[:16] }}…</p></div>
+    </div>
+  </details>
+</div>
+{% endblock %}

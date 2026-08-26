@@ -109,6 +109,11 @@ def context(request: Request, **values: Any) -> dict[str, Any]:
             "coach_garmin_sync": settings.coach_garmin_sync_enabled,
             "coach_daily_adaptation": settings.coach_daily_adaptation_enabled,
             "coach_plan_generation": settings.coach_plan_generation_enabled,
+            "coach_planner_history_gates": settings.coach_planner_history_gates_enabled,
+            "coach_deferred_quality_templates": (
+                settings.environment == "development"
+                and settings.coach_deferred_quality_templates_enabled
+            ),
         },
         **values,
     }

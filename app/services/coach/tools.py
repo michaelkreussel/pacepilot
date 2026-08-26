@@ -13,7 +13,8 @@ from app.repositories.coach import find_assistant_run
 from app.services.analytics.athlete_data import AthleteDataService
 from app.services.analytics.health_trends import MetricTrend
 from app.services.planning.workout_proposals import (
-    EasyRunProposalRequest,
+    RUNNING_PROPOSAL_TEMPLATE_LABELS,
+    RunningProposalRequest,
     RunningProposalService,
     WorkoutProposalError,
 )
@@ -217,12 +218,21 @@ def create_running_workout_proposal(
     runtime: ToolRuntime[CoachRuntimeContext],
     suggested_for: date,
     available_minutes: Annotated[int, Field(ge=20, le=1440)],
+    template_id: Literal[
+        "easy_run",
+        "recovery_run",
+        "long_run",
+        "strides",
+        "threshold_cruise",
+        "vo2_intervals",
+    ] = "easy_run",
 ) -> str:
-    """Create one unaccepted Easy Run proposal through PacePilot's deterministic planner.
+    """Create one unaccepted running workout through PacePilot's deterministic planner.
 
     Use this only when the athlete explicitly wants a running-workout proposal and has supplied a
-    desired date plus available time. The result remains unscheduled and unaccepted. This tool
-    cannot accept, schedule, upload, push, or otherwise synchronize a workout.
+    desired date plus available time. Select the workout type that best matches the stated goal;
+    if the athlete did not request a type, use easy_run. The result remains unscheduled and
+    unaccepted. This tool cannot accept, schedule, upload, push, or synchronize a workout.
     """
     context = runtime.context
     if (
@@ -254,7 +264,8 @@ def create_running_workout_proposal(
             or assistant_message.role != "assistant"
         ):
             raise ValueError("Coach proposal runtime is invalid")
-        request = EasyRunProposalRequest(
+        request = RunningProposalRequest(
+            template_id=template_id,
             suggested_for=suggested_for,
             available_minutes=available_minutes,
             # SQLite rowids are reused after conversation deletes cascade old runs away,
@@ -262,11 +273,11 @@ def create_running_workout_proposal(
             # recycled ids and keeps retries within one run on the same key.
             idempotency_key=(
                 f"coach-run:{assistant_run_id}:{run.created_at.isoformat()}:"
-                "create_running_workout_proposal:v1"
+                "create_running_workout_proposal:v2"
             ),
         )
         try:
-            RunningProposalService(session, user, request_id=context.request_id).create_easy_run(
+            RunningProposalService(session, user, request_id=context.request_id).create(
                 request,
                 origin=ProposalOrigin(
                     conversation_id=conversation_id,
@@ -317,7 +328,7 @@ TOOL_LABELS = {
     "get_activity_details": "Trainingseinheit genauer analysieren",
     "get_health_day": "Gesundheitsdaten des Tages laden",
     "get_upcoming_workouts": "Geplante Einheiten prüfen",
-    "create_running_workout_proposal": "Easy-Run-Vorschlag erstellen",
+    "create_running_workout_proposal": "Workout-Vorschlag erstellen",
 }
 
 
@@ -332,5 +343,7 @@ def describe_tool_call(tool_name: str, arguments: dict[str, object]) -> tuple[st
     if tool_name == "create_running_workout_proposal":
         day = arguments.get("suggested_for")
         minutes = arguments.get("available_minutes")
-        return label, f"{day} · {minutes} Minuten"
+        template_id = arguments.get("template_id", "easy_run")
+        template_label = RUNNING_PROPOSAL_TEMPLATE_LABELS.get(template_id, str(template_id))
+        return label, f"{template_label} · {day} · {minutes} Minuten"
     return label, None

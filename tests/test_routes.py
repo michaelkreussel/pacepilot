@@ -14,6 +14,7 @@ from app.config import get_settings
 from app.models import (
     Activity,
     AthleteAvailability,
+    AthleteGoal,
     DailyDataStatus,
     DailyFitness,
     DailyHealth,
@@ -941,7 +942,7 @@ def test_edit_draft_workout(client: TestClient, session_factory: sessionmaker[Se
     assert "startPaletteDrag('interval'" in form.text
     assert "/static/icons/workout.svg#pencil" in form.text
     assert "setDropTarget(null, index)" in form.text
-    assert "/static/css/tailwind.css?v=20260826-22" in form.text
+    assert "/static/css/tailwind.css?v=20260826-27" in form.text
     assert "/static/js/theme.js?v=20260809-3" in form.text
     assert "data-theme-toggle" in form.text
 
@@ -1587,6 +1588,37 @@ def test_planning_shadow_view_is_404_while_flag_disabled(
     assert client.get("/coach/planning-shadow", follow_redirects=False).status_code == 404
 
 
+def test_multiweek_plan_link_is_hidden_while_flag_disabled(
+    client: TestClient,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", False)
+
+    response = client.get("/plans")
+
+    assert response.status_code == 200
+    assert 'href="/plans/cycles/new"' not in response.text
+
+
+def test_coach_links_to_weekly_and_multiweek_planning(
+    client: TestClient,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
+    monkeypatch.setattr(get_settings(), "coach_planner_history_gates_enabled", False)
+
+    response = client.get("/coach")
+
+    assert response.status_code == 200
+    assert 'href="/coach/planning-shadow"' in response.text
+    assert 'href="/plans/cycles/new"' in response.text
+    assert (
+        "Einzelvorschläge und Planvorschauen bleiben bis zur Annahme unverbindlich."
+        in response.text
+    )
+    assert "Testmodus: Wochen- und Frequenz-Gates sind deaktiviert." in response.text
+
+
 def test_planning_shadow_view_redirects_unauthenticated(
     unauthenticated_client: TestClient,
     session_factory: sessionmaker[Session],
@@ -1708,3 +1740,114 @@ def test_plan_persistence_requires_flag_and_csrf(
     finally:
         client.headers["X-CSRF-Token"] = csrf_token
     assert response.status_code == 403
+
+
+def test_multiweek_plan_page_is_flagged_and_lists_active_goals(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
+    with session_factory() as session:
+        user = session.scalar(select(User))
+        assert user is not None
+        session.add(
+            AthleteGoal(
+                user_id=user.id,
+                event_type="10k",
+                event_name="Herbstlauf",
+                target_date=date.today() + timedelta(days=56),
+            )
+        )
+        session.commit()
+
+    response = client.get("/plans/cycles/new")
+
+    assert response.status_code == 200
+    assert "Mehrwochenplan erstellen" in response.text
+    assert "Herbstlauf" in response.text
+    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", False)
+    assert client.get("/plans/cycles/new").status_code == 404
+
+
+def test_multiweek_plan_error_redirects_back_to_form(
+    client: TestClient,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
+    monkeypatch.setattr(
+        plans_module,
+        "plan_training_cycle",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ValueError("Für eine Wochenplanung fehlt die nötige Laufroutine.")
+        ),
+    )
+
+    generated = client.post(
+        "/plans/generate-cycle",
+        data={
+            "start_date": date.today().isoformat(),
+            "target_date": (date.today() + timedelta(days=56)).isoformat(),
+            "event_type": "10k",
+        },
+        follow_redirects=False,
+    )
+
+    assert generated.status_code == 303
+    assert generated.headers["location"].startswith("/plans/cycles/new?error=")
+    form = client.get(generated.headers["location"])
+    assert form.status_code == 200
+    assert "Plan konnte nicht erstellt werden." in form.text
+    assert "Für eine Wochenplanung fehlt die nötige Laufroutine." in form.text
+    assert 'href="/coach/planning-shadow"' in form.text
+
+
+def test_multiweek_plan_generate_detail_and_accept(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
+    monkeypatch.setattr(get_settings(), "coach_deferred_quality_templates_enabled", True)
+    current_monday = _seed_shadow_week_history(session_factory)
+    start = current_monday + timedelta(days=7)
+    target = start + timedelta(weeks=7, days=6)
+    with session_factory() as session:
+        user = session.scalar(select(User))
+        assert user is not None
+        goal = AthleteGoal(user_id=user.id, event_type="10k", target_date=target)
+        session.add(goal)
+        session.commit()
+        goal_id = goal.id
+
+    generated = client.post(
+        "/plans/generate-cycle",
+        data={
+            "start_date": start.isoformat(),
+            "target_date": target.isoformat(),
+            "goal_id": str(goal_id),
+        },
+        follow_redirects=False,
+    )
+
+    assert generated.status_code == 303
+    assert re.fullmatch(r"/plans/cycles/\d+", generated.headers["location"])
+    detail = client.get(generated.headers["location"])
+    assert detail.status_code == 200
+    assert "Mehrwochenplan" in detail.text
+    assert "Schwellenintervalle" in detail.text
+    assert "VO₂max-Intervalle" in detail.text
+    accept_action = re.search(r'action="(/plans/cycles/\d+/revisions/\d+/accept)"', detail.text)
+    assert accept_action is not None
+
+    calendar = client.get("/plans")
+    assert calendar.status_code == 200
+    assert "Mehrwochenpläne" in calendar.text
+    assert f'href="{generated.headers["location"]}"' in calendar.text
+    assert "Vorschlag offen" in calendar.text
+
+    accepted = client.post(accept_action.group(1), follow_redirects=False)
+
+    assert accepted.status_code == 303
+    accepted_detail = client.get(accepted.headers["location"])
+    assert "Planrevision angenommen" in accepted_detail.text

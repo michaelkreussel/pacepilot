@@ -1038,6 +1038,10 @@ Exit-Kriterien:
 
 ### Phase 12 - Mehrwochenplaene
 
+**Status:** Abgeschlossen am 26. August 2026. Details und Gates stehen in
+`phase-12-completion.md` und `ai-coach-phase-12-gate-matrix.md`. Der Agent-Browser-Pass wurde
+auf ausdruecklichen Nutzerwunsch nicht ausgefuehrt.
+
 **Ziel:** Versionierte, phasenbasierte Plaene mit kontrollierter Replanung.
 
 Reihenfolge:

@@ -2058,19 +2058,88 @@ class WorkoutService:
             "coach_weekly_plan",
         }:
             return
-        from app.config import get_settings
+        from app.config import (
+            DEFERRED_QUALITY_TEMPLATE_IDS,
+            deferred_quality_templates_enabled,
+            get_settings,
+        )
 
         if not get_settings().coach_garmin_sync_enabled:
             raise WorkoutTransitionError(
                 "Die Garmin-Übertragung für Coach-Vorschläge ist noch nicht freigeschaltet.",
                 code="coach.garmin_sync_disabled",
             )
+        if (
+            revision.template_id in DEFERRED_QUALITY_TEMPLATE_IDS
+            and not deferred_quality_templates_enabled()
+        ):
+            raise WorkoutTransitionError(
+                "Development-Qualitätstemplates können außerhalb des Testmodus nicht "
+                "übertragen werden.",
+                code="coach.deferred_quality_disabled",
+            )
+        from app.services.planning.workout_proposals import (
+            QUALITY_TEMPLATE_IDS,
+            quality_density_conflicts,
+        )
+
+        if revision.template_id in QUALITY_TEMPLATE_IDS:
+            quality_date = workout.scheduled_for or revision.suggested_for
+            if quality_date is None:
+                raise WorkoutTransitionError(
+                    "Für eine Qualitätseinheit fehlt das vorgesehene Datum.",
+                    code="proposal.quality_date_required",
+                )
+            if quality_density_conflicts(
+                self.session,
+                self.user.id,
+                quality_date,
+                exclude_workout_id=workout.id,
+            ):
+                raise WorkoutTransitionError(
+                    "Zu einer angenommenen Qualitätseinheit fehlen mindestens 48 Stunden Abstand.",
+                    code="proposal.quality_spacing_violation",
+                )
 
     def _ensure_generated_proposals_enabled(self, workout: Workout) -> None:
-        from app.config import get_settings
+        from app.config import (
+            DEFERRED_QUALITY_TEMPLATE_IDS,
+            deferred_quality_templates_enabled,
+            get_settings,
+        )
 
         revision = self._current_revision(workout)
         settings = get_settings()
+        if (
+            revision.template_id in DEFERRED_QUALITY_TEMPLATE_IDS
+            and not deferred_quality_templates_enabled()
+        ):
+            raise WorkoutTransitionError(
+                "Aktionen für Development-Qualitätstemplates sind derzeit deaktiviert.",
+                code="coach.deferred_quality_disabled",
+            )
+        from app.services.planning.workout_proposals import (
+            QUALITY_TEMPLATE_IDS,
+            quality_density_conflicts,
+        )
+
+        if revision.template_id in QUALITY_TEMPLATE_IDS:
+            quality_date = workout.scheduled_for or revision.suggested_for
+            if quality_date is None:
+                raise WorkoutTransitionError(
+                    "Für eine Qualitätseinheit fehlt das vorgesehene Datum.",
+                    code="proposal.quality_date_required",
+                )
+            if quality_density_conflicts(
+                self.session,
+                self.user.id,
+                quality_date,
+                exclude_workout_id=workout.id,
+            ):
+                raise WorkoutTransitionError(
+                    "Zu einer angenommenen Qualitätseinheit fehlen mindestens 48 Stunden Abstand.",
+                    code="proposal.quality_spacing_violation",
+                )
         if revision.source_type == "coach_daily_adaptation":
             if not settings.coach_daily_adaptation_enabled:
                 raise WorkoutTransitionError(

@@ -17,6 +17,13 @@
         </p>
     </header>
 
+    {% if not features.coach_planner_history_gates %}
+    <div class="rounded-xl border border-warning/30 bg-warning-subtle p-4 text-sm text-warning-emphasis" role="status">
+        <strong>Planner-Testmodus aktiv.</strong> Beobachtete Wochen- und Frequenzanforderungen werden übergangen. Safety-Stops, Zeitbudgets, Abstände und Long-Run-Dauergrenzen bleiben aktiv.
+    </div>
+    {% endif %}
+    {% if features.coach_deferred_quality_templates %}<div class="rounded-xl border border-warning/30 bg-warning-subtle p-4 text-sm text-warning-emphasis" role="status"><strong>Quality-Testmodus aktiv.</strong> Schwellen- und VO₂max-Templates stehen für Einzelvorschläge sowie Build-/Specific-Phasen von Mehrwochenplänen zur Verfügung.</div>{% endif %}
+
     {% if error %}
     <div class="rounded-xl border border-danger/25 bg-danger-subtle p-4 text-sm text-danger-emphasis" role="alert">
         {{ error }}

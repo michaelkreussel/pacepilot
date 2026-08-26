@@ -383,7 +383,7 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
         assert propose_event is not None
         assert propose_event.idempotency_key == (
             f"coach-run:{fake.runtime.assistant_run_id}:{run.created_at.isoformat()}:"
-            "create_running_workout_proposal:v1"
+            "create_running_workout_proposal:v2"
         )
         assert len(list(session.scalars(select(Workout)))) == 1
         workout_id = workout.id
@@ -508,7 +508,11 @@ def test_invalid_proposal_date_returns_completed_stream_without_artifact(
 def test_proposal_tool_schema_exposes_no_runtime_or_workout_definition() -> None:
     schema_model: Any = create_running_workout_proposal.tool_call_schema
     schema = schema_model.model_json_schema()
-    assert set(schema["properties"]) == {"suggested_for", "available_minutes"}
+    assert set(schema["properties"]) == {
+        "suggested_for",
+        "available_minutes",
+        "template_id",
+    }
     serialized = json.dumps(schema)
     assert "user_id" not in serialized
     assert "assistant_run_id" not in serialized

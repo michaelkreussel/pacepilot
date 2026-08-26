@@ -5,6 +5,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.config import DEFERRED_QUALITY_TEMPLATE_IDS, deferred_quality_templates_enabled
 from app.models import (
     TrainingPlan,
     TrainingPlanRevision,
@@ -36,11 +37,13 @@ def persist_week_candidate(
     session: Session,
     user: User,
     candidate: WeeklyPlanCandidate,
+    *,
+    commit: bool = True,
 ) -> TrainingPlanRevision:
     last_error: IntegrityError | None = None
     for _attempt in range(2):
         try:
-            return _persist_week_candidate(session, user, candidate)
+            return _persist_week_candidate(session, user, candidate, commit=commit)
         except IntegrityError as exc:
             session.rollback()
             winner = session.scalar(
@@ -56,7 +59,8 @@ def persist_week_candidate(
                 winning_plan = session.get(TrainingPlan, winner.plan_id)
                 if winning_plan is not None and winning_plan.current_revision_id != winner.id:
                     winning_plan.current_revision_id = winner.id
-                    session.commit()
+                    if commit:
+                        session.commit()
                 return winner
             last_error = exc
     assert last_error is not None
@@ -67,6 +71,8 @@ def _persist_week_candidate(
     session: Session,
     user: User,
     candidate: WeeklyPlanCandidate,
+    *,
+    commit: bool = True,
 ) -> TrainingPlanRevision:
     if not candidate.validation_report.get("valid"):
         raise WeeklyPlanPersistenceError(
@@ -89,7 +95,8 @@ def _persist_week_candidate(
         if existing is not None:
             if plan.current_revision_id != existing.id:
                 plan.current_revision_id = existing.id
-                session.commit()
+                if commit:
+                    session.commit()
             return existing
     else:
         plan = TrainingPlan(user_id=user.id, week_start=candidate.week_start)
@@ -128,27 +135,47 @@ def _persist_week_candidate(
     observed_runs = (
         round(float(context.get("observed_runs_per_week", 0))) if isinstance(context, dict) else 0
     )
+    history_gates = candidate.generation_context.get("history_gates")
+    if isinstance(history_gates, dict):
+        consistent_weeks = int(
+            history_gates.get("effective_consistent_running_weeks", consistent_weeks)
+        )
+        observed_runs = int(history_gates.get("effective_runs_per_week", observed_runs))
+    deferred_quality = candidate.generation_context.get("deferred_quality")
+    deferred_quality_recorded = (
+        isinstance(deferred_quality, dict) and deferred_quality.get("development_override") is True
+    )
     try:
         for position, item in enumerate(candidate.sessions):
-            facts = (
-                {
-                    "sufficient_recent_long_run_baseline"
-                    if item.role == "long_run"
-                    else "familiar_with_relaxed_fast_running"
-                }
-                if item.role in {"long_run", "strides"}
-                else set()
-            )
+            facts: set[str] = set()
+            if item.role == "long_run":
+                facts.add("sufficient_recent_long_run_baseline")
+            elif item.role == "strides":
+                facts.add("familiar_with_relaxed_fast_running")
+            elif item.template_id in DEFERRED_QUALITY_TEMPLATE_IDS:
+                facts.update(
+                    {
+                        "reliable_intensity_model",
+                        "reliable_current_performance_model",
+                        "quality_density_validation",
+                    }
+                )
+            is_deferred_quality = item.template_id in DEFERRED_QUALITY_TEMPLATE_IDS
             expanded = expand_workout_template(
                 item.template_id,
                 None
-                if item.role == "strides"
+                if item.role == "strides" or is_deferred_quality
                 else TemplateParameters(duration_minutes=item.planned_minutes),
                 eligibility=TemplateEligibilityContext(
                     consistent_running_weeks=consistent_weeks,
                     runs_per_week=max(observed_runs, 1),
                     available_minutes=item.planned_minutes,
                     facts=facts,
+                ),
+                allow_deferred_quality=(
+                    is_deferred_quality
+                    and deferred_quality_recorded
+                    and deferred_quality_templates_enabled()
                 ),
             )
             data = WorkoutInput(
@@ -208,7 +235,8 @@ def _persist_week_candidate(
                     scheduled_for=item.scheduled_for,
                 )
             )
-        session.commit()
+        if commit:
+            session.commit()
     except Exception:
         session.rollback()
         raise

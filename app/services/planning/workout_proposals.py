@@ -3,18 +3,30 @@ import json
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import date
+from math import ceil
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.config import get_settings
+from app.config import (
+    DEFERRED_QUALITY_TEMPLATE_IDS,
+    deferred_quality_templates_enabled,
+    get_settings,
+)
 from app.models import GarminAccount, User, Workout, WorkoutRevision
 from app.services.analytics.athlete_data import AthleteDataService
 from app.services.analytics.running_intensity import RunningShadowAnalysis
 from app.services.garmin.heart_rate_zones import is_valid_normalized_heart_rate_zone_profile
 from app.services.planning.load_estimate import IntensityDomainTime, LoadEstimate
-from app.services.planning.registry_models import RpeRange
+from app.services.planning.registry import get_knowledge_registry
+from app.services.planning.registry_models import (
+    ContinuousStructure,
+    IntervalStructure,
+    RpeRange,
+    StridesStructure,
+)
 from app.services.planning.safety_triage import (
     SAFETY_RULE_SET_VERSION,
     SafetyContext,
@@ -22,6 +34,7 @@ from app.services.planning.safety_triage import (
     build_proposal_safety_context,
 )
 from app.services.planning.validator import WorkoutInput
+from app.services.planning.weekly_planner import _count_consistent_weeks
 from app.services.planning.workout_definition import (
     HeartRateRangeTarget,
     RpeRangeTarget,
@@ -43,7 +56,24 @@ from app.services.planning.workout_templates import (
 )
 
 PROPOSAL_SOURCE = "coach_single"
-PROPOSAL_RULE_SET_VERSION = f"easy-run-candidate-v2+{SAFETY_RULE_SET_VERSION}"
+PROPOSAL_RULE_SET_VERSION = f"running-workout-candidate-v3+{SAFETY_RULE_SET_VERSION}"
+type RunningTemplateId = Literal[
+    "easy_run",
+    "recovery_run",
+    "long_run",
+    "strides",
+    "threshold_cruise",
+    "vo2_intervals",
+]
+RUNNING_PROPOSAL_TEMPLATE_LABELS: dict[str, str] = {
+    "easy_run": "Lockerer Dauerlauf",
+    "recovery_run": "Regenerationslauf",
+    "long_run": "Langer lockerer Lauf",
+    "strides": "Lockerer Lauf mit Steigerungen",
+    "threshold_cruise": "Schwellenintervalle",
+    "vo2_intervals": "VO₂max-Intervalle",
+}
+QUALITY_TEMPLATE_IDS = frozenset({"strides", *DEFERRED_QUALITY_TEMPLATE_IDS})
 
 
 class EasyRunProposalRequest(BaseModel):
@@ -52,6 +82,10 @@ class EasyRunProposalRequest(BaseModel):
     suggested_for: date
     available_minutes: int = Field(ge=20, le=1440)
     idempotency_key: str = Field(min_length=8, max_length=200)
+
+
+class RunningProposalRequest(EasyRunProposalRequest):
+    template_id: RunningTemplateId = "easy_run"
 
 
 class WorkoutProposalError(ValueError):
@@ -135,7 +169,7 @@ def ensure_easy_run_device_target_current(
         )
 
 
-def _request_fingerprint(request: EasyRunProposalRequest) -> str:
+def _request_fingerprint(request: EasyRunProposalRequest | RunningProposalRequest) -> str:
     payload = json.dumps(
         request.model_dump(mode="json", exclude={"idempotency_key"}),
         sort_keys=True,
@@ -173,10 +207,40 @@ def _candidate_inputs(
     return shadow, safety
 
 
+def quality_density_conflicts(
+    session: Session,
+    user_id: int,
+    suggested_for: date,
+    *,
+    exclude_workout_id: int | None = None,
+) -> tuple[int, ...]:
+    rows = session.execute(
+        select(Workout.id, Workout.scheduled_for, WorkoutRevision.suggested_for)
+        .join(WorkoutRevision, WorkoutRevision.id == Workout.accepted_revision_id)
+        .where(
+            Workout.user_id == user_id,
+            Workout.deleted_at.is_(None),
+            Workout.accepted_revision_id.is_not(None),
+            WorkoutRevision.template_id.in_(QUALITY_TEMPLATE_IDS),
+        )
+    ).all()
+    conflicts = []
+    for workout_id, scheduled_for, revision_suggested_for in rows:
+        if exclude_workout_id is not None and workout_id == exclude_workout_id:
+            continue
+        existing_date = scheduled_for or revision_suggested_for
+        if existing_date is not None and abs((existing_date - suggested_for).days) < 2:
+            conflicts.append(workout_id)
+    return tuple(sorted(conflicts))
+
+
 def _eligibility(
+    session: Session,
+    user_id: int,
     shadow: RunningShadowAnalysis,
     safety: SafetyContext,
     available_minutes: int,
+    template_id: RunningTemplateId,
 ) -> TemplateEligibilityContext:
     recent = shadow.baseline.window(28)
     contraindications: set[str] = set()
@@ -185,25 +249,50 @@ def _eligibility(
         contraindications.add("active_pain_affecting_gait")
     if "safety.fever_or_systemic_illness" in issue_codes:
         contraindications.add("fever_or_systemic_illness")
+    settings = get_settings()
+    consistent_weeks = _count_consistent_weeks(session, user_id, date.today())
+    runs_per_week = max(round(recent.frequency_per_week), 1)
+    if not settings.coach_planner_history_gates_enabled:
+        required_weeks = 8 if template_id in DEFERRED_QUALITY_TEMPLATE_IDS else 4
+        required_runs = 3 if template_id in DEFERRED_QUALITY_TEMPLATE_IDS else 2
+        consistent_weeks = max(consistent_weeks, required_weeks)
+        runs_per_week = max(runs_per_week, required_runs)
+    facts: set[str] = set()
+    if recent.runs:
+        facts.add("easy_running_is_habitual_and_recovery_supportive")
+    if recent.longest_duration.value is not None:
+        facts.add("sufficient_recent_long_run_baseline")
+    if recent.hard_runs > 0:
+        facts.add("familiar_with_relaxed_fast_running")
+    if template_id in DEFERRED_QUALITY_TEMPLATE_IDS and deferred_quality_templates_enabled():
+        facts.update(
+            {
+                "reliable_intensity_model",
+                "reliable_current_performance_model",
+                "quality_density_validation",
+            }
+        )
+    if shadow.baseline.window(56).quality.confidence == "insufficient":
+        contraindications.add("insufficient_baseline")
     return TemplateEligibilityContext(
-        consistent_running_weeks=0,
-        runs_per_week=round(recent.frequency_per_week),
+        consistent_running_weeks=consistent_weeks,
+        runs_per_week=runs_per_week,
         available_minutes=available_minutes,
         safety_stop=safety.report.outcome == TriageOutcome.SAFETY_STOP,
-        facts=set(),
+        facts=facts,
         active_contraindications=contraindications,
     )
 
 
-def _validation_report(duration_minutes: int) -> dict[str, object]:
+def _validation_report(template_id: str, duration_minutes: int) -> dict[str, object]:
     return {
         "valid": True,
         "issues": [],
         "rule_set_version": PROPOSAL_RULE_SET_VERSION,
         "checks": [
             {"code": "structure.valid", "result": "pass"},
-            {"code": "easy_run.duration", "result": "pass", "value": duration_minutes},
-            {"code": "easy_run.rpe_talk_test", "result": "pass"},
+            {"code": "template.duration", "result": "pass", "value": duration_minutes},
+            {"code": "template.selected", "result": "pass", "value": template_id},
             {"code": "athlete.recent_running_history", "result": "pass"},
             {"code": "safety.current_context", "result": "pass"},
         ],
@@ -217,14 +306,16 @@ def _generation_context(
     suggested_for: date,
     available_minutes: int,
     selected_minutes: int,
+    template_id: str,
 ) -> dict[str, object]:
     return {
-        "schema_version": "easy_run_proposal_context.v1",
+        "schema_version": "running_workout_proposal_context.v2",
         "as_of": date.today().isoformat(),
         "request": {
             "suggested_for": suggested_for.isoformat(),
             "available_minutes": available_minutes,
             "selected_minutes": selected_minutes,
+            "template_id": template_id,
         },
         "athlete": shadow.generation_context,
         "athlete_context_fingerprint": shadow.context_fingerprint,
@@ -234,6 +325,12 @@ def _generation_context(
             "rule_set_version": SAFETY_RULE_SET_VERSION,
         },
         "performance_model_version": shadow.intensity.intensity_version,
+        "deferred_quality_development_override": (template_id in DEFERRED_QUALITY_TEMPLATE_IDS),
+        "quality_density": {
+            "checked": template_id in QUALITY_TEMPLATE_IDS,
+            "minimum_spacing_hours": 48,
+            "conflicting_workout_ids": [],
+        },
         "units": {"duration": "seconds", "distance": "meters", "rpe": "1-10"},
     }
 
@@ -249,15 +346,19 @@ def _metadata(
     edit_source: str,
 ) -> RevisionMetadata:
     device_target = expanded.guidance.get("device_target")
-    rationale = (
-        "Ein lockerer, zeitbasierter Lauf erhält die aerobe Basis. Dein persönlicher "
-        "Garmin-HF-Bereich dient als Geräte-Ziel; RPE und Sprechtest bleiben zusätzliche "
-        "Leitplanken. Pace und Distanz werden nicht geschätzt."
-        if isinstance(device_target, dict)
-        else "Ein lockerer, zeitbasierter Lauf erhält die aerobe Basis. Ohne valides "
-        "persönliches Geräte-Ziel bleiben RPE und Sprechtest maßgeblich; Pace und Distanz "
-        "werden nicht geschätzt."
-    )
+    rationales = {
+        "easy_run": "Ein lockerer, zeitbasierter Lauf erhält die aerobe Basis.",
+        "recovery_run": "Ein sehr lockerer Lauf unterstützt die aktive Erholung.",
+        "long_run": "Ein langer lockerer Lauf entwickelt aerobe Ausdauer und Ermüdungsresistenz.",
+        "strides": "Steigerungen verbinden lockeres Laufen mit kurzen kontrollierten Impulsen.",
+        "threshold_cruise": "Kontrollierte Schwellenintervalle entwickeln die Tempohärte.",
+        "vo2_intervals": (
+            "Kontrollierte VO₂max-Intervalle setzen einen hochintensiven aeroben Reiz."
+        ),
+    }
+    rationale = rationales.get(expanded.template_id, expanded.purpose)
+    if isinstance(device_target, dict):
+        rationale += " Dein persönlicher Garmin-HF-Bereich dient als zusätzliches Geräte-Ziel."
     guidance = {
         **expanded.guidance,
         "rationale": rationale,
@@ -269,6 +370,7 @@ def _metadata(
         suggested_for=suggested_for,
         available_minutes=available_minutes,
         selected_minutes=selected_minutes,
+        template_id=expanded.template_id,
     )
     if isinstance(device_target := guidance.get("device_target"), dict):
         generation_context["device_target"] = device_target
@@ -276,7 +378,7 @@ def _metadata(
         purpose=expanded.purpose,
         guidance_json=guidance,
         load_estimate_json=expanded.load_estimate.model_dump(mode="json"),
-        validation_report_json=_validation_report(selected_minutes),
+        validation_report_json=_validation_report(expanded.template_id, selected_minutes),
         generation_context_json=generation_context,
         source_type=PROPOSAL_SOURCE,
         generator_version=expanded.generator_version,
@@ -303,6 +405,19 @@ class RunningProposalService:
     def create_easy_run(
         self, request: EasyRunProposalRequest, *, origin: ProposalOrigin | None = None
     ) -> Workout:
+        return self.create(
+            RunningProposalRequest(
+                template_id="easy_run",
+                suggested_for=request.suggested_for,
+                available_minutes=request.available_minutes,
+                idempotency_key=request.idempotency_key,
+            ),
+            origin=origin,
+        )
+
+    def create(
+        self, request: RunningProposalRequest, *, origin: ProposalOrigin | None = None
+    ) -> Workout:
         request_fingerprint = _request_fingerprint(request)
         workout_service = WorkoutService(self.session, self.user, request_id=self.request_id)
         existing = workout_service.idempotent_proposal(
@@ -320,13 +435,86 @@ class RunningProposalService:
         shadow, safety = _candidate_inputs(
             self.session, self.user, suggested_for=request.suggested_for
         )
-        selected_minutes = min(90, request.available_minutes)
+        if request.template_id in QUALITY_TEMPLATE_IDS:
+            conflicts = quality_density_conflicts(self.session, self.user.id, request.suggested_for)
+            if conflicts:
+                raise WorkoutProposalError(
+                    "Zu einer bereits angenommenen Qualitätseinheit fehlen mindestens "
+                    "48 Stunden Abstand.",
+                    code="proposal.quality_spacing_violation",
+                )
+        registry = get_knowledge_registry()
+        template = registry.workouts[request.template_id]
+        parameters: TemplateParameters | None = None
+        if isinstance(template.structure, ContinuousStructure):
+            selected_minutes = min(
+                request.available_minutes,
+                template.structure.duration_minutes.maximum,
+                90 if request.template_id == "easy_run" else request.available_minutes,
+            )
+            if request.template_id == "long_run":
+                longest = shadow.baseline.window(28).longest_duration.value
+                if longest is not None:
+                    history_bound = int(float(longest) * 1.1 / 60) // 5 * 5
+                    selected_minutes = min(selected_minutes, history_bound)
+            parameters = TemplateParameters(duration_minutes=selected_minutes)
+        elif isinstance(template.structure, StridesStructure):
+            repetitions = template.structure.repetitions.default
+            overhead_seconds = repetitions * (
+                template.structure.stride_duration_seconds.default
+                + template.structure.recovery_duration_seconds.default
+            )
+            easy_minutes = min(
+                template.structure.easy_duration_minutes.maximum,
+                (request.available_minutes * 60 - overhead_seconds) // 60,
+            )
+            parameters = TemplateParameters(
+                duration_minutes=max(easy_minutes, 1),
+                repetitions=repetitions,
+            )
+        elif isinstance(template.structure, IntervalStructure):
+            for repetitions in range(
+                template.structure.repetitions.default,
+                template.structure.repetitions.minimum - 1,
+                -1,
+            ):
+                total_work = repetitions * template.structure.work_minutes.default
+                duration = (
+                    template.structure.warmup_minutes.default
+                    + repetitions
+                    * (
+                        template.structure.work_minutes.default
+                        + template.structure.recovery_minutes.default
+                    )
+                    + template.structure.cooldown_minutes.default
+                )
+                if (
+                    template.structure.total_work_minutes.minimum
+                    <= total_work
+                    <= template.structure.total_work_minutes.maximum
+                    and duration <= request.available_minutes
+                ):
+                    parameters = TemplateParameters(repetitions=repetitions)
+                    break
         expanded = expand_workout_template(
-            "easy_run",
-            TemplateParameters(duration_minutes=selected_minutes),
-            eligibility=_eligibility(shadow, safety, request.available_minutes),
+            request.template_id,
+            parameters,
+            eligibility=_eligibility(
+                self.session,
+                self.user.id,
+                shadow,
+                safety,
+                request.available_minutes,
+                request.template_id,
+            ),
+            allow_deferred_quality=request.template_id in DEFERRED_QUALITY_TEMPLATE_IDS,
         )
-        device_target = _easy_run_device_target(self.session, self.user.id)
+        selected_minutes = ceil(expanded.load_estimate.duration_seconds / 60)
+        device_target = (
+            _easy_run_device_target(self.session, self.user.id)
+            if request.template_id == "easy_run"
+            else None
+        )
         if device_target is not None:
             definition = expanded.definition.model_copy(deep=True)
             step = definition.blocks[0]
@@ -348,7 +536,7 @@ class RunningProposalService:
             name=expanded.name,
             sport="running",
             scheduled_for=request.suggested_for,
-            description="Deterministischer Easy-Run-Vorschlag von PacePilot.",
+            description=f"Deterministischer {expanded.name}-Vorschlag von PacePilot.",
             definition=expanded.definition,
             definition_version=expanded.definition_version,
         )
@@ -455,7 +643,7 @@ def edited_easy_run_metadata(
     expanded = expand_workout_template(
         "easy_run",
         TemplateParameters(duration_minutes=selected_minutes),
-        eligibility=_eligibility(shadow, safety, available_minutes),
+        eligibility=_eligibility(session, user.id, shadow, safety, available_minutes, "easy_run"),
     )
     current_device_target = (
         current.guidance_json.get("device_target") if current.guidance_json else None

@@ -4,10 +4,12 @@ from uuid import NAMESPACE_URL, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.config import DEFERRED_QUALITY_TEMPLATE_IDS, deferred_quality_templates_enabled
 from app.services.planning.load_estimate import IntensityDomainTime, LoadEstimate
 from app.services.planning.registry import KnowledgeRegistry, get_knowledge_registry
 from app.services.planning.registry_models import (
     ContinuousStructure,
+    IntervalStructure,
     NumericRange,
     RpeRange,
     StridesStructure,
@@ -23,7 +25,7 @@ from app.services.planning.workout_definition import (
     definition_to_json,
 )
 
-GENERATOR_VERSION = "workout-template-expander-v1"
+GENERATOR_VERSION = "workout-template-expander-v2"
 
 
 class TemplateExpansionError(ValueError):
@@ -212,18 +214,116 @@ def _strides(
     return definition, estimate
 
 
+def _intervals(
+    template: WorkoutTemplate,
+    structure: IntervalStructure,
+    parameters: TemplateParameters,
+) -> tuple[WorkoutDefinitionV2, LoadEstimate]:
+    if parameters.duration_minutes is not None:
+        raise TemplateExpansionError(
+            "Die Gesamtdauer eines Intervall-Templates wird aus seinen Blöcken berechnet.",
+            code="template.parameter_unsupported",
+        )
+    repetitions = _bounded(parameters.repetitions, structure.repetitions, "Wiederholungen")
+    work_minutes = structure.work_minutes.default
+    total_work_minutes = repetitions * work_minutes
+    if (
+        not structure.total_work_minutes.minimum
+        <= total_work_minutes
+        <= structure.total_work_minutes.maximum
+    ):
+        raise TemplateExpansionError(
+            "Die gewählte Wiederholungszahl liegt außerhalb der erlaubten Gesamtbelastung.",
+            code="template.total_work_out_of_range",
+        )
+    warmup_seconds = structure.warmup_minutes.default * 60
+    work_seconds = work_minutes * 60
+    recovery_seconds = structure.recovery_minutes.default * 60
+    cooldown_seconds = structure.cooldown_minutes.default * 60
+    definition = WorkoutDefinitionV2(
+        blocks=[
+            StepBlockV2(
+                id=_stable_id(template, parameters, "warmup"),
+                kind="step",
+                step_type="warmup",
+                end=TimeEnd(type="time", seconds=warmup_seconds),
+                target=NoTarget(type="none"),
+                instructions=["Laufe dich locker ein und bereite dich kontrolliert vor."],
+            ),
+            RepeatBlockV2(
+                id=_stable_id(template, parameters, "repeat"),
+                kind="repeat",
+                iterations=repetitions,
+                children=[
+                    StepBlockV2(
+                        id=_stable_id(template, parameters, "work"),
+                        kind="step",
+                        step_type="interval",
+                        end=TimeEnd(type="time", seconds=work_seconds),
+                        target=_rpe_target(structure.work_rpe),
+                        instructions=structure.instructions,
+                    ),
+                    StepBlockV2(
+                        id=_stable_id(template, parameters, "recovery"),
+                        kind="step",
+                        step_type="recovery",
+                        end=TimeEnd(type="time", seconds=recovery_seconds),
+                        target=NoTarget(type="none"),
+                        instructions=["Trabe oder gehe locker bis zur nächsten Wiederholung."],
+                    ),
+                ],
+            ),
+            StepBlockV2(
+                id=_stable_id(template, parameters, "cooldown"),
+                kind="step",
+                step_type="cooldown",
+                end=TimeEnd(type="time", seconds=cooldown_seconds),
+                target=NoTarget(type="none"),
+                instructions=["Laufe anschließend bewusst locker aus."],
+            ),
+        ]
+    )
+    recovery_total_seconds = repetitions * recovery_seconds
+    work_total_seconds = repetitions * work_seconds
+    low_seconds = warmup_seconds + recovery_total_seconds + cooldown_seconds
+    estimate = LoadEstimate(
+        duration_seconds=low_seconds + work_total_seconds,
+        distance_meters=None,
+        time_by_intensity_domain_seconds=IntensityDomainTime(
+            low=low_seconds,
+            moderate=work_total_seconds if template.id == "threshold_cruise" else 0,
+            high=work_total_seconds if template.id == "vo2_intervals" else 0,
+        ),
+        mechanical_load="high" if template.id == "vo2_intervals" else "moderate",
+        session_rpe=structure.session_rpe,
+        confidence="low",
+        uncertainty=[
+            "distance_unknown_for_time_based_workout",
+            "deferred_quality_template_development_override",
+            "individual_response_requires_baseline_validation",
+        ],
+    )
+    return definition, estimate
+
+
 def expand_workout_template(
     template_id: str,
     parameters: TemplateParameters | None = None,
     *,
     eligibility: TemplateEligibilityContext,
     registry: KnowledgeRegistry | None = None,
+    allow_deferred_quality: bool = False,
 ) -> ExpandedWorkoutTemplate:
     knowledge = registry or get_knowledge_registry()
     template = knowledge.workouts.get(template_id)
     if template is None:
         raise TemplateExpansionError("Workout-Template nicht gefunden.", code="template.not_found")
-    if template.status != "active":
+    deferred_allowed = (
+        allow_deferred_quality
+        and template.id in DEFERRED_QUALITY_TEMPLATE_IDS
+        and deferred_quality_templates_enabled()
+    )
+    if template.status != "active" and not deferred_allowed:
         raise TemplateExpansionError(
             "Dieses Workout-Template ist noch nicht freigegeben.",
             code="template.not_active",
@@ -234,6 +334,8 @@ def expand_workout_template(
         definition, estimate = _continuous(template, template.structure, selected)
     elif isinstance(template.structure, StridesStructure):
         definition, estimate = _strides(template, template.structure, selected)
+    elif isinstance(template.structure, IntervalStructure):
+        definition, estimate = _intervals(template, template.structure, selected)
     else:
         raise TemplateExpansionError(
             "Diese Template-Struktur ist noch nicht freigegeben.",
