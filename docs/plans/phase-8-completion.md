@@ -10,8 +10,9 @@
   time. It operates independently of LLM configuration.
 - `RunningProposalService` connects the running baseline, deterministic safety triage, active
   `easy_run` template, V2 generator, load estimate, and candidate validation.
-- The deterministic duration policy selects the smaller of 45 minutes and the available time,
-  while retaining the template's 20-90 minute bounds.
+- The deterministic duration policy honors the requested time up to the template's 90-minute
+  ceiling (`min(90, available_minutes)` since `easy-run-candidate-v2`; originally capped at
+  45 minutes and corrected after real-world 60-minute requests produced 45-minute workouts).
 - Proposal creation requires observed running history in the preceding 56 days. Sparse or
   low-confidence performance data never produces a fabricated pace or distance.
 - If Garmin supplies a structurally valid personal heart-rate profile, the proposal uses the

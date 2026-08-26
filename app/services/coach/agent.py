@@ -161,12 +161,13 @@ class LangChainCoachAgent:
             stream = self._agent.astream(
                 {"messages": agent_messages},
                 context=runtime,
+                # Legacy v1 stream shape: message chunks come straight from the
+                # model, so reasoning stays in additional_kwargs and never
+                # reaches answer_delta. The v2 event stream flattens reasoning
+                # blocks into plain text content without a separator.
                 stream_mode=["messages", "updates"],
-                version="v2",
             )
-            async for item in stream:
-                mode = item["type"]
-                payload = item["data"]
+            async for mode, payload in stream:
                 if mode == "messages":
                     message, metadata = payload
                     if metadata.get("langgraph_node") != "model":

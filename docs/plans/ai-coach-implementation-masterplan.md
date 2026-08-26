@@ -933,6 +933,15 @@ Exit-Kriterien:
 
 **Ziel:** Heutige Einheiten koennen sicher reduziert, ersetzt oder verschoben werden.
 
+**Umsetzungsstand 26. August 2026:** Abgeschlossen. Die Gate-Matrix liegt unter
+`docs/plans/ai-coach-phase-10-gate-matrix.md`, die Abschlussdokumentation unter
+`docs/plans/phase-10-completion.md`. Implementiert sind der deterministische Kandidatenkern,
+user-scoped Kontextaufbau fuer ein heute angenommenes und eingeplantes Lauftraining,
+Baseline-/Recovery-/Feedback-/Wochen-Fingerprints, die vier initialen Klassen, Persistenz mit
+CAS/Idempotenz/Replay, erneute Annahme mit frischem Kontext, Garmin-Update-in-place,
+echte Ersetzung als separates Workout mit `replaces_workout_id` inklusive atomarem Terminwechsel
+und Kalender-Retirement sowie die Detailseiten-UI mit dokumentiertem Accessibility-Pass.
+
 Erste Adaptationsklassen:
 
 - `KEEP`

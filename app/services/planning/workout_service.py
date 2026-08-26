@@ -1,10 +1,12 @@
+import hashlib
+import json
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import date, timedelta
 from typing import Any, cast
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -264,6 +266,548 @@ class WorkoutService:
                 code="proposal.origin_mismatch",
             )
 
+    def propose_adaptation_revision(
+        self,
+        workout_id: int,
+        data: WorkoutInput,
+        metadata: RevisionMetadata,
+        *,
+        adaptation_class: str,
+        context_fingerprint: str,
+        expected_identity: RevisionIdentity,
+        idempotency_key: str,
+    ) -> Workout:
+        self._ensure_daily_adaptation_enabled()
+        if metadata.source_type != "coach_daily_adaptation":
+            raise WorkoutTransitionError(
+                "Die Revisionsquelle ist keine tägliche Anpassung.",
+                code="adaptation.source_invalid",
+            )
+        workout = self.get(workout_id)
+        request_hash = self._adaptation_request_hash(
+            data,
+            adaptation_class=adaptation_class,
+            context_fingerprint=context_fingerprint,
+        )
+        replay = self._adaptation_event("adapt_propose", idempotency_key)
+        if replay is not None:
+            self._verify_adaptation_replay(replay, workout, request_hash)
+            return workout
+        self.validate(data)
+        accepted = self._accepted_revision(workout)
+        if workout.current_revision_id != accepted.id:
+            raise WorkoutConflictError(
+                "Für dieses Workout ist bereits eine neue Revision offen.",
+                code="adaptation.candidate_already_open",
+            )
+        self._verify_revision_identity(workout, accepted, expected_identity)
+        next_revision_number = (
+            self.session.scalar(
+                select(func.max(WorkoutRevision.revision_number)).where(
+                    WorkoutRevision.workout_id == workout.id
+                )
+            )
+            or 0
+        ) + 1
+        revision = self._create_revision(
+            workout,
+            data,
+            revision_number=next_revision_number,
+            parent_revision_id=accepted.id,
+            metadata=metadata,
+        )
+        self.session.flush()
+        self._record_structural_validation(workout, revision)
+        result = cast(
+            "CursorResult[Any]",
+            self.session.execute(
+                update(Workout)
+                .where(
+                    Workout.id == workout.id,
+                    Workout.user_id == self.user.id,
+                    Workout.current_revision_id == accepted.id,
+                    Workout.accepted_revision_id == accepted.id,
+                    Workout.lock_version == expected_identity.lock_version,
+                    Workout.deleted_at.is_(None),
+                )
+                .values(
+                    current_revision_id=revision.id,
+                    approval_status="proposed",
+                    lock_version=Workout.lock_version + 1,
+                )
+                .execution_options(synchronize_session=False)
+            ),
+        )
+        if result.rowcount != 1:
+            self.session.rollback()
+            replay = self._adaptation_event("adapt_propose", idempotency_key)
+            if replay is not None:
+                self._verify_adaptation_replay(replay, workout, request_hash)
+                return self.get(workout_id)
+            raise WorkoutConflictError(
+                "Das Workout wurde zwischenzeitlich geändert.",
+                code="workout.lock_stale",
+            )
+        self._event(
+            workout,
+            revision,
+            "adapt_propose",
+            metadata={
+                "adaptation_class": adaptation_class,
+                "context_fingerprint": context_fingerprint,
+                "request_hash": request_hash,
+                "parent_revision_id": accepted.id,
+            },
+            idempotency_key=idempotency_key,
+            skip_existing=False,
+        )
+        self._validate_context(workout, revision, self._safety_context(workout, revision))
+        try:
+            self.session.commit()
+        except IntegrityError:
+            self.session.rollback()
+            replay = self._adaptation_event("adapt_propose", idempotency_key)
+            if replay is None:
+                raise
+            self._verify_adaptation_replay(replay, workout, request_hash)
+            return self.get(workout_id)
+        self.session.refresh(workout)
+        return workout
+
+    def propose_adaptation_replacement(
+        self,
+        workout_id: int,
+        data: WorkoutInput,
+        metadata: RevisionMetadata,
+        *,
+        context_fingerprint: str,
+        expected_identity: RevisionIdentity,
+        idempotency_key: str,
+    ) -> Workout:
+        self._ensure_daily_adaptation_enabled()
+        if metadata.source_type != "coach_daily_adaptation":
+            raise WorkoutTransitionError(
+                "Die Revisionsquelle ist keine tägliche Anpassung.",
+                code="adaptation.source_invalid",
+            )
+        original = self.get(workout_id)
+        request_hash = self._adaptation_request_hash(
+            data,
+            adaptation_class="REPLACE_WITH_EASY",
+            context_fingerprint=context_fingerprint,
+        )
+        replay = self._adaptation_event("adapt_replace_propose", idempotency_key)
+        if replay is not None:
+            self._verify_adaptation_replay(replay, original, request_hash)
+            replacement_id = replay.safe_metadata_json.get("replacement_workout_id")
+            if not isinstance(replacement_id, int):
+                raise WorkoutConflictError(
+                    "Dem Ersatz-Audit fehlt das neue Workout.",
+                    code="adaptation.replay_invalid",
+                ) from None
+            return self.get(replacement_id)
+        self.validate(data)
+        accepted = self._accepted_revision(original)
+        if original.current_revision_id != accepted.id:
+            raise WorkoutConflictError(
+                "Für dieses Workout ist bereits eine neue Revision offen.",
+                code="adaptation.candidate_already_open",
+            )
+        self._verify_revision_identity(original, accepted, expected_identity)
+        if original.local_schedule_status != "scheduled" or original.scheduled_for is None:
+            raise WorkoutConflictError(
+                "Der Trainingstermin wurde bereits geändert.",
+                code="adaptation.schedule_stale",
+            )
+        open_replacement = self.session.scalar(
+            select(Workout.id).where(
+                Workout.user_id == self.user.id,
+                Workout.replaces_workout_id == original.id,
+                Workout.source_type == "coach_daily_adaptation",
+                Workout.approval_status == "proposed",
+                Workout.accepted_revision_id.is_(None),
+                Workout.deleted_at.is_(None),
+            )
+        )
+        if open_replacement is not None:
+            raise WorkoutConflictError(
+                "Für dieses Workout ist bereits ein Ersatzvorschlag offen.",
+                code="adaptation.candidate_already_open",
+            )
+        replacement = Workout(
+            user_id=self.user.id,
+            name=data.name,
+            sport=data.sport,
+            scheduled_for=None,
+            description=data.description or None,
+            status="draft",
+            definition_version=data.definition_version,
+            definition=definition_to_json(data.definition),
+            source_type="coach_daily_adaptation",
+            approval_status="proposed",
+            local_schedule_status="unscheduled",
+            lock_version=0,
+            replaces_workout_id=original.id,
+        )
+        self.session.add(replacement)
+        self.session.flush()
+        revision = self._create_revision(
+            replacement,
+            data,
+            revision_number=1,
+            parent_revision_id=None,
+            metadata=metadata,
+        )
+        self.session.flush()
+        self._record_structural_validation(replacement, revision)
+        replacement.current_revision_id = revision.id
+        replacement.materialized_revision_id = revision.id
+        self.session.add(WorkoutGarminBinding(workout_id=replacement.id))
+        result = cast(
+            "CursorResult[Any]",
+            self.session.execute(
+                update(Workout)
+                .where(
+                    Workout.id == original.id,
+                    Workout.user_id == self.user.id,
+                    Workout.current_revision_id == accepted.id,
+                    Workout.accepted_revision_id == accepted.id,
+                    Workout.lock_version == expected_identity.lock_version,
+                    Workout.local_schedule_status == "scheduled",
+                    Workout.scheduled_for == data.scheduled_for,
+                    Workout.deleted_at.is_(None),
+                )
+                .values(lock_version=Workout.lock_version + 1)
+                .execution_options(synchronize_session=False)
+            ),
+        )
+        if result.rowcount != 1:
+            self.session.rollback()
+            replay = self._adaptation_event("adapt_replace_propose", idempotency_key)
+            if replay is not None:
+                self._verify_adaptation_replay(replay, original, request_hash)
+                replacement_id = replay.safe_metadata_json.get("replacement_workout_id")
+                if isinstance(replacement_id, int):
+                    return self.get(replacement_id)
+            raise WorkoutConflictError(
+                "Das Workout wurde zwischenzeitlich geändert.", code="workout.lock_stale"
+            )
+        self._event(
+            replacement,
+            revision,
+            "create",
+            metadata={"source": metadata.source_type, "replaces_workout_id": original.id},
+        )
+        self._event(
+            original,
+            accepted,
+            "adapt_replace_propose",
+            metadata={
+                "adaptation_class": "REPLACE_WITH_EASY",
+                "context_fingerprint": context_fingerprint,
+                "request_hash": request_hash,
+                "replacement_workout_id": replacement.id,
+            },
+            idempotency_key=idempotency_key,
+            skip_existing=False,
+        )
+        self._validate_context(replacement, revision, self._safety_context(replacement, revision))
+        try:
+            self.session.commit()
+        except IntegrityError:
+            self.session.rollback()
+            replay = self._adaptation_event("adapt_replace_propose", idempotency_key)
+            if replay is None:
+                raise
+            self._verify_adaptation_replay(replay, original, request_hash)
+            replacement_id = replay.safe_metadata_json.get("replacement_workout_id")
+            if not isinstance(replacement_id, int):
+                raise WorkoutConflictError(
+                    "Dem Ersatz-Audit fehlt das neue Workout.",
+                    code="adaptation.replay_invalid",
+                ) from None
+            return self.get(replacement_id)
+        self.session.refresh(original)
+        self.session.refresh(replacement)
+        return replacement
+
+    def record_adaptation_keep(
+        self,
+        workout_id: int,
+        *,
+        context_fingerprint: str,
+        expected_identity: RevisionIdentity,
+        idempotency_key: str,
+    ) -> Workout:
+        self._ensure_daily_adaptation_enabled()
+        workout = self.get(workout_id)
+        request_hash = self._adaptation_decision_hash(
+            "KEEP", context_fingerprint, expected_identity
+        )
+        replay = self._adaptation_event("adapt_keep", idempotency_key)
+        if replay is not None:
+            self._verify_adaptation_replay(replay, workout, request_hash)
+            return workout
+        accepted = self._accepted_revision(workout)
+        if workout.current_revision_id != accepted.id:
+            raise WorkoutConflictError(
+                "Für dieses Workout ist bereits eine neue Revision offen.",
+                code="adaptation.candidate_already_open",
+            )
+        self._verify_revision_identity(workout, accepted, expected_identity)
+        result = cast(
+            "CursorResult[Any]",
+            self.session.execute(
+                update(Workout)
+                .where(
+                    Workout.id == workout.id,
+                    Workout.user_id == self.user.id,
+                    Workout.current_revision_id == accepted.id,
+                    Workout.accepted_revision_id == accepted.id,
+                    Workout.lock_version == expected_identity.lock_version,
+                    Workout.local_schedule_status == "scheduled",
+                    Workout.deleted_at.is_(None),
+                )
+                .values(lock_version=Workout.lock_version + 1)
+                .execution_options(synchronize_session=False)
+            ),
+        )
+        if result.rowcount != 1:
+            self.session.rollback()
+            replay = self._adaptation_event("adapt_keep", idempotency_key)
+            if replay is not None:
+                self._verify_adaptation_replay(replay, workout, request_hash)
+                return self.get(workout_id)
+            raise WorkoutConflictError(
+                "Das Workout wurde zwischenzeitlich geändert.", code="workout.lock_stale"
+            )
+        self._event(
+            workout,
+            accepted,
+            "adapt_keep",
+            metadata={
+                "adaptation_class": "KEEP",
+                "context_fingerprint": context_fingerprint,
+                "request_hash": request_hash,
+            },
+            idempotency_key=idempotency_key,
+            skip_existing=False,
+        )
+        try:
+            self.session.commit()
+        except IntegrityError:
+            self.session.rollback()
+            replay = self._adaptation_event("adapt_keep", idempotency_key)
+            if replay is None:
+                raise
+            self._verify_adaptation_replay(replay, workout, request_hash)
+            return self.get(workout_id)
+        self.session.refresh(workout)
+        return workout
+
+    def apply_adaptation_rest(
+        self,
+        workout_id: int,
+        *,
+        context_fingerprint: str,
+        expected_identity: RevisionIdentity,
+        idempotency_key: str,
+    ) -> Workout:
+        self._ensure_daily_adaptation_enabled()
+        workout = self.get(workout_id)
+        request_hash = self._adaptation_decision_hash(
+            "REST", context_fingerprint, expected_identity
+        )
+        replay = self._adaptation_event("adapt_rest", idempotency_key)
+        if replay is not None:
+            self._verify_adaptation_replay(replay, workout, request_hash)
+            return workout
+        accepted = self._accepted_revision(workout)
+        if workout.current_revision_id != accepted.id:
+            raise WorkoutConflictError(
+                "Für dieses Workout ist bereits eine neue Revision offen.",
+                code="adaptation.candidate_already_open",
+            )
+        self._verify_revision_identity(workout, accepted, expected_identity)
+        if workout.local_schedule_status != "scheduled" or workout.scheduled_for is None:
+            raise WorkoutConflictError(
+                "Der Trainingstermin wurde bereits geändert.",
+                code="adaptation.schedule_stale",
+            )
+        previous_date = workout.scheduled_for
+        binding = self._binding(workout)
+        result = cast(
+            "CursorResult[Any]",
+            self.session.execute(
+                update(Workout)
+                .where(
+                    Workout.id == workout.id,
+                    Workout.user_id == self.user.id,
+                    Workout.current_revision_id == accepted.id,
+                    Workout.accepted_revision_id == accepted.id,
+                    Workout.lock_version == expected_identity.lock_version,
+                    Workout.local_schedule_status == "scheduled",
+                    Workout.scheduled_for == previous_date,
+                    Workout.deleted_at.is_(None),
+                )
+                .values(
+                    scheduled_for=None,
+                    local_schedule_status="cancelled",
+                    lock_version=Workout.lock_version + 1,
+                )
+                .execution_options(synchronize_session=False)
+            ),
+        )
+        if result.rowcount != 1:
+            self.session.rollback()
+            replay = self._adaptation_event("adapt_rest", idempotency_key)
+            if replay is not None:
+                self._verify_adaptation_replay(replay, workout, request_hash)
+                return self.get(workout_id)
+            raise WorkoutConflictError(
+                "Das Workout wurde zwischenzeitlich geändert.",
+                code="workout.lock_stale",
+            )
+        if (
+            binding.active_remote_identity_id is not None
+            and binding.remote_scheduled_for is not None
+            and binding.calendar_status not in {"pending", "unknown"}
+        ):
+            binding.calendar_status = "pending"
+        self._event(
+            workout,
+            accepted,
+            "unschedule",
+            metadata={"previous_date": previous_date.isoformat(), "source": "daily_adaptation"},
+            idempotency_key=f"{idempotency_key}:unschedule",
+            skip_existing=False,
+        )
+        self._event(
+            workout,
+            accepted,
+            "adapt_rest",
+            metadata={
+                "adaptation_class": "REST",
+                "context_fingerprint": context_fingerprint,
+                "request_hash": request_hash,
+                "previous_date": previous_date.isoformat(),
+                "device_delivery_may_persist": binding.device_status == "request_accepted",
+            },
+            idempotency_key=idempotency_key,
+            skip_existing=False,
+        )
+        try:
+            self.session.commit()
+        except IntegrityError:
+            self.session.rollback()
+            replay = self._adaptation_event("adapt_rest", idempotency_key)
+            if replay is None:
+                raise
+            self._verify_adaptation_replay(replay, workout, request_hash)
+            return self.get(workout_id)
+        self.session.refresh(workout)
+        return workout
+
+    def discard_adaptation_revision(
+        self, workout_id: int, command: RejectRevisionCommand
+    ) -> Workout:
+        workout = self.get(workout_id)
+        current = self._current_revision(workout)
+        if (
+            workout.replaces_workout_id is not None
+            and workout.accepted_revision_id is None
+            and current.source_type == "coach_daily_adaptation"
+        ):
+            self._verify_revision_identity(workout, current, command.identity)
+            if workout.approval_status == "rejected":
+                return workout
+            source = self.get(workout.replaces_workout_id)
+            result = cast(
+                "CursorResult[Any]",
+                self.session.execute(
+                    update(Workout)
+                    .where(
+                        Workout.id == workout.id,
+                        Workout.user_id == self.user.id,
+                        Workout.current_revision_id == current.id,
+                        Workout.accepted_revision_id.is_(None),
+                        Workout.approval_status == "proposed",
+                        Workout.lock_version == command.identity.lock_version,
+                        Workout.deleted_at.is_(None),
+                    )
+                    .values(
+                        approval_status="rejected",
+                        lock_version=Workout.lock_version + 1,
+                    )
+                    .execution_options(synchronize_session=False)
+                ),
+            )
+            if result.rowcount != 1:
+                self.session.rollback()
+                raise WorkoutConflictError(
+                    "Das Workout wurde zwischenzeitlich geändert.", code="workout.lock_stale"
+                )
+            self._event(
+                workout,
+                current,
+                "adapt_reject",
+                metadata={"replaces_workout_id": source.id},
+            )
+            source_revision = self._accepted_revision(source)
+            self._event(
+                source,
+                source_revision,
+                "adapt_replace_reject",
+                metadata={"replacement_workout_id": workout.id},
+            )
+            self.session.commit()
+            self.session.refresh(workout)
+            return workout
+        accepted = self._accepted_revision(workout)
+        if (
+            current.source_type != "coach_daily_adaptation"
+            or current.parent_revision_id != accepted.id
+        ):
+            raise WorkoutTransitionError(
+                "Es ist keine tägliche Anpassung zum Verwerfen geöffnet.",
+                code="adaptation.discard_invalid",
+            )
+        self._verify_revision_identity(workout, current, command.identity)
+        result = cast(
+            "CursorResult[Any]",
+            self.session.execute(
+                update(Workout)
+                .where(
+                    Workout.id == workout.id,
+                    Workout.user_id == self.user.id,
+                    Workout.current_revision_id == current.id,
+                    Workout.accepted_revision_id == accepted.id,
+                    Workout.lock_version == command.identity.lock_version,
+                    Workout.deleted_at.is_(None),
+                )
+                .values(
+                    current_revision_id=accepted.id,
+                    approval_status="accepted",
+                    lock_version=Workout.lock_version + 1,
+                )
+                .execution_options(synchronize_session=False)
+            ),
+        )
+        if result.rowcount != 1:
+            self.session.rollback()
+            raise WorkoutConflictError(
+                "Das Workout wurde zwischenzeitlich geändert.", code="workout.lock_stale"
+            )
+        self._event(
+            workout,
+            current,
+            "adapt_reject",
+            metadata={"restored_revision_id": accepted.id},
+        )
+        self.session.commit()
+        self.session.refresh(workout)
+        return workout
+
     def idempotent_proposal(
         self, *, idempotency_key: str, request_fingerprint: str
     ) -> Workout | None:
@@ -293,8 +837,14 @@ class WorkoutService:
     ) -> Workout:
         workout = self.get(workout_id)
         self._ensure_generated_proposals_enabled(workout)
+        current = self._current_revision(workout)
+        if current.source_type == "coach_daily_adaptation":
+            raise WorkoutTransitionError(
+                "Tägliche Anpassungen können vor der Annahme verworfen oder neu erzeugt werden.",
+                code="adaptation.edit_not_supported",
+            )
         request_hash = workout_content_hash(data)
-        if workout.source_type == "coach_single" and idempotency_key:
+        if current.source_type == "coach_single" and idempotency_key:
             existing_event = self.session.scalar(
                 select(WorkoutEvent).where(
                     WorkoutEvent.owner_user_id == self.user.id,
@@ -310,9 +860,8 @@ class WorkoutService:
                     )
                 return workout
         self.validate(data)
-        current = self._current_revision(workout)
         metadata = None
-        if workout.source_type == "coach_single":
+        if current.source_type == "coach_single":
             if expected_identity is None or idempotency_key is None:
                 raise WorkoutConflictError(
                     "Für generierte Vorschläge fehlen exakte Revisionsangaben.",
@@ -342,7 +891,7 @@ class WorkoutService:
         self.session.flush()
         self._record_structural_validation(workout, revision)
         change_labels = self._change_labels(current, revision)
-        if workout.source_type == "coach_single":
+        if current.source_type == "coach_single":
             result = cast(
                 "CursorResult[Any]",
                 self.session.execute(
@@ -432,6 +981,11 @@ class WorkoutService:
         workout = self.get(workout_id)
         self._ensure_generated_proposals_enabled(workout)
         revision = self._current_revision(workout)
+        replacement_source = (
+            self.get(workout.replaces_workout_id)
+            if workout.replaces_workout_id is not None
+            else None
+        )
         identity = command.identity
         if (
             revision.id != identity.revision_id
@@ -449,13 +1003,21 @@ class WorkoutService:
                 code="workout.validation_context_stale",
             )
         if workout.accepted_revision_id == revision.id and workout.approval_status == "accepted":
+            if replacement_source is not None and (
+                replacement_source.local_schedule_status != "cancelled"
+                or replacement_source.scheduled_for is not None
+            ):
+                raise WorkoutConflictError(
+                    "Der ersetzte Termin ist nicht vollständig aufgehoben.",
+                    code="adaptation.replacement_state_invalid",
+                )
             return workout
         if workout.approval_status == "rejected":
             raise WorkoutTransitionError(
                 "Ein abgelehnter Vorschlag muss vor der Annahme bearbeitet werden.",
                 code="workout.proposal_rejected",
             )
-        if workout.source_type == "coach_single":
+        if revision.source_type in {"coach_single", "coach_daily_adaptation"}:
             from app.services.planning.workout_proposals import (
                 ensure_easy_run_device_target_current,
             )
@@ -463,6 +1025,77 @@ class WorkoutService:
             ensure_easy_run_device_target_current(self.session, self.user.id, revision)
         binding = self._binding(workout)
         self._ensure_garmin_state_known(binding)
+        source_binding = (
+            self._binding(replacement_source) if replacement_source is not None else None
+        )
+        if source_binding is not None:
+            self._ensure_garmin_state_known(source_binding)
+        adaptation_validation: WorkoutValidationRun | None = None
+        if revision.source_type == "coach_daily_adaptation":
+            from app.services.planning.daily_adaptation import (
+                DailyAdaptationError,
+                DailyAdaptationService,
+            )
+
+            generation_context = revision.generation_context_json or {}
+            expected_adaptation_context = generation_context.get("adaptation_context_fingerprint")
+            adaptation_as_of = generation_context.get("as_of")
+            if not isinstance(expected_adaptation_context, str):
+                raise WorkoutTransitionError(
+                    "Der Anpassungsrevision fehlt ihr geprüfter Kontext.",
+                    code="adaptation.context_missing",
+                )
+            if not isinstance(adaptation_as_of, str):
+                raise WorkoutTransitionError(
+                    "Der Anpassungsrevision fehlt ihr geprüfter Trainingstag.",
+                    code="adaptation.context_missing",
+                )
+            try:
+                adaptation_day = date.fromisoformat(adaptation_as_of)
+            except ValueError as exc:
+                raise WorkoutTransitionError(
+                    "Der geprüfte Trainingstag ist ungültig.",
+                    code="adaptation.context_invalid",
+                ) from exc
+            if adaptation_day != date.today():
+                raise WorkoutConflictError(
+                    "Diese tägliche Anpassung ist nicht mehr aktuell.",
+                    code="adaptation.context_stale",
+                )
+            try:
+                adaptation_workout_id = (
+                    replacement_source.id if replacement_source is not None else workout.id
+                )
+                current_adaptation = DailyAdaptationService(
+                    self.session,
+                    self.user,
+                    as_of=adaptation_day,
+                    request_id=self.request_id,
+                ).assess_today(
+                    adaptation_workout_id,
+                    allow_open_candidate=True,
+                    expected_replacement_id=(
+                        workout.id if replacement_source is not None else None
+                    ),
+                )
+            except DailyAdaptationError as exc:
+                raise WorkoutConflictError(str(exc), code=exc.code) from exc
+            if current_adaptation.context_fingerprint != expected_adaptation_context:
+                raise WorkoutConflictError(
+                    "Der Kontext dieser Anpassung ist nicht mehr aktuell.",
+                    code="adaptation.context_stale",
+                )
+            adaptation_validation = self._validate_context(
+                workout,
+                revision,
+                SafetyContext(
+                    fingerprint=current_adaptation.context_fingerprint,
+                    feedback_ids=safety_context.feedback_ids,
+                    report=safety_context.report,
+                ),
+                validation_kind="daily_adaptation_acceptance",
+                force=True,
+            )
         validation = self._validate_context(
             workout,
             revision,
@@ -484,6 +1117,67 @@ class WorkoutService:
             )
 
         accepted_at = utcnow()
+        replacement_date = None
+        if replacement_source is not None:
+            original_context = (revision.generation_context_json or {}).get("original_workout")
+            original_revision_context = (revision.generation_context_json or {}).get(
+                "original_revision"
+            )
+            if not isinstance(original_context, dict) or not isinstance(
+                original_revision_context, dict
+            ):
+                raise WorkoutTransitionError(
+                    "Dem Ersatzvorschlag fehlt der geprüfte Ursprung.",
+                    code="adaptation.replacement_context_missing",
+                )
+            scheduled_for = original_context.get("scheduled_for")
+            expected_source_lock = original_context.get("acceptance_lock_version")
+            if not isinstance(scheduled_for, str) or not isinstance(expected_source_lock, int):
+                raise WorkoutTransitionError(
+                    "Der geprüfte Ersatztermin ist ungültig.",
+                    code="adaptation.replacement_context_invalid",
+                )
+            replacement_date = date.fromisoformat(scheduled_for)
+            source_revision = self._accepted_revision(replacement_source)
+            if (
+                original_context.get("id") != replacement_source.id
+                or original_revision_context.get("id") != source_revision.id
+                or original_revision_context.get("number") != source_revision.revision_number
+                or original_revision_context.get("content_hash") != source_revision.content_hash
+            ):
+                raise WorkoutConflictError(
+                    "Das zu ersetzende Workout wurde zwischenzeitlich geändert.",
+                    code="adaptation.context_stale",
+                )
+            source_result = cast(
+                "CursorResult[Any]",
+                self.session.execute(
+                    update(Workout)
+                    .where(
+                        Workout.id == replacement_source.id,
+                        Workout.user_id == self.user.id,
+                        Workout.current_revision_id == source_revision.id,
+                        Workout.accepted_revision_id == source_revision.id,
+                        Workout.lock_version == expected_source_lock,
+                        Workout.local_schedule_status == "scheduled",
+                        Workout.scheduled_for == replacement_date,
+                        Workout.deleted_at.is_(None),
+                    )
+                    .values(
+                        scheduled_for=None,
+                        local_schedule_status="cancelled",
+                        status="superseded",
+                        lock_version=Workout.lock_version + 1,
+                    )
+                    .execution_options(synchronize_session=False)
+                ),
+            )
+            if source_result.rowcount != 1:
+                self.session.rollback()
+                raise WorkoutConflictError(
+                    "Das zu ersetzende Workout wurde zwischenzeitlich geändert.",
+                    code="workout.lock_stale",
+                )
         result = cast(
             "CursorResult[Any]",
             self.session.execute(
@@ -508,6 +1202,16 @@ class WorkoutService:
                     description=revision.description,
                     definition_version=revision.definition_version,
                     definition=revision.definition,
+                    scheduled_for=(
+                        replacement_date
+                        if replacement_source is not None
+                        else workout.scheduled_for
+                    ),
+                    local_schedule_status=(
+                        "scheduled"
+                        if replacement_source is not None
+                        else workout.local_schedule_status
+                    ),
                 )
                 .execution_options(synchronize_session=False)
             ),
@@ -522,7 +1226,31 @@ class WorkoutService:
         if binding.active_remote_identity_id is not None:
             binding.content_status = "pending"
         binding.device_status = "not_requested"
+        if (
+            source_binding is not None
+            and source_binding.active_remote_identity_id is not None
+            and source_binding.remote_scheduled_for is not None
+        ):
+            source_binding.calendar_status = "pending"
         self.session.flush()
+        if replacement_source is not None:
+            source_revision = self._accepted_revision(replacement_source)
+            self._event(
+                replacement_source,
+                source_revision,
+                "unschedule",
+                metadata={
+                    "previous_date": replacement_date.isoformat() if replacement_date else None,
+                    "source": "daily_adaptation_replacement",
+                    "replacement_workout_id": workout.id,
+                },
+            )
+            self._event(
+                replacement_source,
+                source_revision,
+                "supersede",
+                metadata={"replacement_workout_id": workout.id},
+            )
         self._event(
             workout,
             revision,
@@ -530,9 +1258,14 @@ class WorkoutService:
             metadata={
                 "validation_run_id": validation.id,
                 "context_fingerprint": validation.context_fingerprint,
+                "adaptation_validation_run_id": (
+                    adaptation_validation.id if adaptation_validation is not None else None
+                ),
             },
         )
         self.session.commit()
+        if replacement_source is not None:
+            self.session.refresh(replacement_source)
         self.session.refresh(workout)
         return workout
 
@@ -587,6 +1320,20 @@ class WorkoutService:
     def schedule(self, workout_id: int, command: ScheduleWorkoutCommand) -> Workout:
         workout = self.get(workout_id)
         self._ensure_generated_proposals_enabled(workout)
+        accepted_replacement = self.session.scalar(
+            select(Workout.id).where(
+                Workout.user_id == self.user.id,
+                Workout.replaces_workout_id == workout.id,
+                Workout.accepted_revision_id.is_not(None),
+                Workout.approval_status == "accepted",
+                Workout.deleted_at.is_(None),
+            )
+        )
+        if accepted_replacement is not None:
+            raise WorkoutTransitionError(
+                "Dieses Workout wurde bereits durch eine angenommene Anpassung ersetzt.",
+                code="adaptation.original_superseded",
+            )
         if workout.accepted_revision_id != command.revision_id:
             raise WorkoutConflictError(
                 "Nur die exakt angenommene Revision kann eingeplant werden.",
@@ -699,12 +1446,36 @@ class WorkoutService:
 
     def publish(self, workout_id: int) -> Workout:
         workout = self.get(workout_id)
-        self._ensure_generated_garmin_enabled(workout)
         revision = self._accepted_revision(workout)
         binding = self._binding(workout)
         self._ensure_garmin_state_known(binding, allow={"content", "calendar"})
+        target_date = (
+            workout.scheduled_for if workout.local_schedule_status == "scheduled" else None
+        )
+        retirement_required = (
+            binding.remote_scheduled_for is not None and binding.remote_scheduled_for != target_date
+        )
+        if not retirement_required:
+            self._ensure_generated_garmin_enabled(workout)
+        account: GarminAccount | None = None
+        if retirement_required:
+            account = self._garmin_account()
+            self._retire_remote_calendar(workout, revision, binding, account)
+        if (
+            target_date is None
+            and binding.active_remote_identity_id is not None
+            and binding.content_status == "synced"
+        ):
+            self.session.commit()
+            return workout
+        if workout.replaces_workout_id is not None:
+            if account is None:
+                account = self._garmin_account()
+            self._retire_replaced_calendar(workout, account)
+        self._ensure_generated_garmin_enabled(workout)
         self._validate_for_sync(workout, revision)
-        account = self._garmin_account()
+        if account is None:
+            account = self._garmin_account()
         runner = GarminWorkoutOperationRunner(self.session, account)
         execution = self._execution(workout, revision)
         identity = self._active_identity(binding, account)
@@ -830,6 +1601,73 @@ class WorkoutService:
         self.session.commit()
         return workout
 
+    def _retire_replaced_calendar(self, replacement: Workout, account: GarminAccount) -> None:
+        if replacement.replaces_workout_id is None:
+            return
+        original = self.get(replacement.replaces_workout_id)
+        if (
+            replacement.accepted_revision_id is None
+            or replacement.local_schedule_status != "scheduled"
+            or original.local_schedule_status != "cancelled"
+            or original.scheduled_for is not None
+        ):
+            raise WorkoutConflictError(
+                "Der lokale Workout-Ersatz ist nicht vollständig angenommen.",
+                code="adaptation.replacement_state_invalid",
+            )
+        original_revision = self._accepted_revision(original)
+        original_binding = self._binding(original)
+        self._ensure_garmin_state_known(original_binding, allow={"calendar"})
+        self._retire_remote_calendar(original, original_revision, original_binding, account)
+
+    def _retire_remote_calendar(
+        self,
+        workout: Workout,
+        revision: WorkoutRevision,
+        binding: WorkoutGarminBinding,
+        account: GarminAccount,
+    ) -> None:
+        identity = self._active_identity(binding, account)
+        if identity is None:
+            if binding.calendar_status == "unknown":
+                raise WorkoutTransitionError(
+                    "Der Garmin-Kalenderzustand des Workouts ist unklar.",
+                    code="garmin.state_unknown",
+                )
+            binding.calendar_status = "not_requested"
+            return
+        remote_date = binding.remote_scheduled_for
+        if remote_date is None:
+            binding.calendar_status = "not_requested"
+            return
+        remote_id = identity.garmin_workout_id
+        runner = GarminWorkoutOperationRunner(self.session, account)
+
+        def record_unschedule(_result: None, _operation: WorkoutGarminOperation) -> None:
+            binding.remote_scheduled_for = None
+            binding.calendar_status = "not_requested"
+
+        runner.execute(
+            workout=workout,
+            binding=binding,
+            revision=revision,
+            operation_type="unschedule",
+            remote_identity=identity,
+            scheduled_for=remote_date,
+            call=lambda: self._garmin_call(
+                account,
+                "workout.unschedule",
+                lambda client: unschedule_workout_on_date(client, remote_id, remote_date),
+            ),
+            reconcile=lambda: self._garmin_call(
+                account,
+                "workout.unschedule.reconcile",
+                lambda client: not scheduled_workout_ids(client, remote_id, remote_date),
+            ),
+            on_success=record_unschedule,
+            on_reconciled=lambda operation: record_unschedule(None, operation),
+        )
+
     def push(self, workout_id: int) -> Workout:
         workout = self.get(workout_id)
         self._ensure_generated_garmin_enabled(workout)
@@ -886,6 +1724,19 @@ class WorkoutService:
 
     def delete(self, workout_id: int) -> None:
         workout = self.get(workout_id)
+        active_replacement = self.session.scalar(
+            select(Workout.id).where(
+                Workout.user_id == self.user.id,
+                Workout.replaces_workout_id == workout.id,
+                Workout.approval_status.in_({"proposed", "accepted"}),
+                Workout.deleted_at.is_(None),
+            )
+        )
+        if active_replacement is not None:
+            raise WorkoutTransitionError(
+                "Das Original kann nicht gelöscht werden, solange ein Ersatz aktiv ist.",
+                code="adaptation.replacement_active",
+            )
         binding = self._binding(workout)
         revision = (
             self._revision(workout, workout.accepted_revision_id)
@@ -1060,6 +1911,72 @@ class WorkoutService:
             )
         return revision
 
+    @staticmethod
+    def _verify_revision_identity(
+        workout: Workout, revision: WorkoutRevision, identity: RevisionIdentity
+    ) -> None:
+        if (
+            revision.id != identity.revision_id
+            or revision.revision_number != identity.revision_number
+            or revision.content_hash != identity.content_hash
+            or workout.lock_version != identity.lock_version
+        ):
+            raise WorkoutConflictError(
+                "Diese Workout-Revision ist nicht mehr aktuell.",
+                code="workout.revision_stale",
+            )
+
+    def _adaptation_event(self, action: str, idempotency_key: str) -> WorkoutEvent | None:
+        return self.session.scalar(
+            select(WorkoutEvent).where(
+                WorkoutEvent.owner_user_id == self.user.id,
+                WorkoutEvent.action == action,
+                WorkoutEvent.idempotency_key == idempotency_key,
+            )
+        )
+
+    @staticmethod
+    def _verify_adaptation_replay(event: WorkoutEvent, workout: Workout, request_hash: str) -> None:
+        if (
+            event.workout_id != workout.id
+            or event.safe_metadata_json.get("request_hash") != request_hash
+        ):
+            raise WorkoutConflictError(
+                "Dieser Wiederholungsschlüssel gehört zu einer anderen Anpassung.",
+                code="adaptation.idempotency_conflict",
+            )
+
+    @staticmethod
+    def _adaptation_request_hash(
+        data: WorkoutInput, *, adaptation_class: str, context_fingerprint: str
+    ) -> str:
+        payload = {
+            "adaptation_class": adaptation_class,
+            "context_fingerprint": context_fingerprint,
+            "content_hash": workout_content_hash(data),
+        }
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+    @staticmethod
+    def _adaptation_decision_hash(
+        adaptation_class: str,
+        context_fingerprint: str,
+        identity: RevisionIdentity,
+    ) -> str:
+        payload = {
+            "adaptation_class": adaptation_class,
+            "context_fingerprint": context_fingerprint,
+            "revision_id": identity.revision_id,
+            "revision_number": identity.revision_number,
+            "content_hash": identity.content_hash,
+            "lock_version": identity.lock_version,
+        }
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
     def _binding(self, workout: Workout) -> WorkoutGarminBinding:
         binding = self.session.scalar(
             select(WorkoutGarminBinding)
@@ -1118,7 +2035,12 @@ class WorkoutService:
             )
 
     def _ensure_generated_garmin_enabled(self, workout: Workout) -> None:
-        if workout.source_type != "coach_single":
+        revision = (
+            self._revision(workout, workout.accepted_revision_id)
+            if workout.accepted_revision_id is not None
+            else self._current_revision(workout)
+        )
+        if revision.source_type not in {"coach_single", "coach_daily_adaptation"}:
             return
         from app.config import get_settings
 
@@ -1129,14 +2051,31 @@ class WorkoutService:
             )
 
     def _ensure_generated_proposals_enabled(self, workout: Workout) -> None:
-        if workout.source_type != "coach_single":
-            return
         from app.config import get_settings
 
-        if not get_settings().coach_workout_proposals_enabled:
+        revision = self._current_revision(workout)
+        settings = get_settings()
+        if revision.source_type == "coach_daily_adaptation":
+            if not settings.coach_daily_adaptation_enabled:
+                raise WorkoutTransitionError(
+                    "Aktionen für tägliche Anpassungen sind derzeit deaktiviert.",
+                    code="adaptation.feature_disabled",
+                )
+            return
+        if revision.source_type == "coach_single" and not settings.coach_workout_proposals_enabled:
             raise WorkoutTransitionError(
                 "Aktionen für Coach-Vorschläge sind derzeit deaktiviert.",
                 code="coach.workout_proposals_disabled",
+            )
+
+    @staticmethod
+    def _ensure_daily_adaptation_enabled() -> None:
+        from app.config import get_settings
+
+        if not get_settings().coach_daily_adaptation_enabled:
+            raise WorkoutTransitionError(
+                "Die tägliche Trainingsanpassung ist noch nicht freigeschaltet.",
+                code="adaptation.feature_disabled",
             )
 
     def _execution(self, workout: Workout, revision: WorkoutRevision) -> AcceptedWorkoutExecution:
@@ -1162,7 +2101,7 @@ class WorkoutService:
                 "Die angenommene Workout-Revision ist nicht mehr aktuell.",
                 code="workout.accepted_revision_mismatch",
             )
-        if workout.source_type == "coach_single":
+        if revision.source_type in {"coach_single", "coach_daily_adaptation"}:
             from app.services.planning.workout_proposals import (
                 ensure_easy_run_device_target_current,
             )

@@ -6,7 +6,7 @@
 - During implementation, add appropriate unit tests and run focused pytest targets, for example `uv run pytest tests/test_routes.py::test_create_and_confirm_workout`.
 - After all code changes are complete, run `uv run pytest`, `uv run ruff check .`, `uv run ruff format --check .`, and `uv run ty check`; fix failures before finishing. Do not repeatedly run the full format or type-check commands during implementation.
 - For model or migration changes, run `uv run pytest tests/test_migrations.py`; it upgrades a fresh database and runs Alembic's schema check.
-- After template or `app/static/css/tailwind.input.css` changes, rebuild committed CSS with `tailwindcss -i ./app/static/css/tailwind.input.css -o ./app/static/css/tailwind.css --minify` (Tailwind 4.3.3), then bump the cache key in `base.html` and `login.html`.
+- After template or `app/static/css/tailwind.input.css` changes, rebuild committed CSS with `npm run build:css` (Tailwind 4.3.3 via the committed `package.json`; run `npm install` first if `node_modules` is missing), then bump the cache key in `base.html` and `login.html`.
 
 ## Workflow
 

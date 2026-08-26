@@ -212,6 +212,9 @@ tempCodeRunnerFile.py
 # PacePilot runtime data
 /data/
 
+# Node (Tailwind CSS build tooling)
+node_modules/
+
 # Marimo
 marimo/_static/
 marimo/_lsp/

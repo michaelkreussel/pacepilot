@@ -63,7 +63,12 @@ class WorkoutRevisionView:
             "import": "Import",
             "ai": "KI",
             "coach_single": "PacePilot-Vorschlag",
+            "coach_daily_adaptation": "Tägliche Anpassung",
         }.get(self.source_type, self.source_type)
+
+    @property
+    def is_generated(self) -> bool:
+        return self.source_type in {"coach_single", "coach_daily_adaptation"}
 
     @property
     def proposal_summary(self) -> dict[str, object] | None:
@@ -113,7 +118,11 @@ class WorkoutDetailView:
     garmin_calendar_status: str
     garmin_device_status: str
     garmin_workout_id: str | None
+    replaces_workout_id: int | None = None
     parent: WorkoutRevisionView | None = None
+    replacement_original: WorkoutRevisionView | None = None
+    open_replacement_id: int | None = None
+    active_replacement_id: int | None = None
     garmin_last_operation: str | None = None
     garmin_last_operation_status: str | None = None
     garmin_last_error: str | None = None
@@ -121,10 +130,21 @@ class WorkoutDetailView:
     sync_safety_report: dict[str, object] | None = None
     garmin_sync_allowed: bool = True
     proposal_actions_allowed: bool = True
+    edit_allowed: bool = True
 
     @property
     def has_unaccepted_changes(self) -> bool:
         return self.accepted is not None and self.accepted.id != self.current.id
+
+    @property
+    def is_adaptation_replacement(self) -> bool:
+        return self.replaces_workout_id is not None and self.current.source_type == (
+            "coach_daily_adaptation"
+        )
+
+    @property
+    def comparison_revision(self) -> WorkoutRevisionView | None:
+        return self.parent or self.replacement_original
 
     @property
     def garmin_needs_review(self) -> bool:
@@ -152,9 +172,10 @@ class WorkoutDetailView:
 
     @property
     def candidate_change_labels(self) -> tuple[str, ...]:
-        if self.accepted is not None or self.parent is None:
+        comparison = self.comparison_revision
+        if self.accepted is not None or comparison is None:
             return ()
-        return self._change_labels(self.parent)
+        return self._change_labels(comparison)
 
     def _change_labels(self, comparison: WorkoutRevisionView) -> tuple[str, ...]:
         labels: list[str] = []
@@ -199,6 +220,8 @@ class CalendarWorkout:
             "template": "Vorlage",
             "import": "Import",
             "ai": "KI",
+            "coach_single": "PacePilot-Vorschlag",
+            "coach_daily_adaptation": "Tägliche Anpassung",
         }.get(self.source_type, self.source_type)
 
 
@@ -257,6 +280,37 @@ def workout_detail_view(
     )
     if parent is not None and parent.workout_id != workout.id:
         raise ValueError("Workout parent revision mismatch")
+    replacement_original = None
+    if workout.replaces_workout_id is not None:
+        original = session.scalar(
+            select(Workout).where(
+                Workout.id == workout.replaces_workout_id,
+                Workout.user_id == workout.user_id,
+                Workout.deleted_at.is_(None),
+            )
+        )
+        if original is not None and original.accepted_revision_id is not None:
+            original_revision = session.get(WorkoutRevision, original.accepted_revision_id)
+            if original_revision is not None and original_revision.workout_id == original.id:
+                replacement_original = original_revision
+    open_replacement_id = session.scalar(
+        select(Workout.id).where(
+            Workout.user_id == workout.user_id,
+            Workout.replaces_workout_id == workout.id,
+            Workout.source_type == "coach_daily_adaptation",
+            Workout.approval_status == "proposed",
+            Workout.accepted_revision_id.is_(None),
+            Workout.deleted_at.is_(None),
+        )
+    )
+    active_replacement_id = session.scalar(
+        select(Workout.id).where(
+            Workout.user_id == workout.user_id,
+            Workout.replaces_workout_id == workout.id,
+            Workout.approval_status.in_({"proposed", "accepted"}),
+            Workout.deleted_at.is_(None),
+        )
+    )
     binding = session.scalar(
         select(WorkoutGarminBinding).where(WorkoutGarminBinding.workout_id == workout.id)
     )
@@ -277,6 +331,7 @@ def workout_detail_view(
     from app.config import get_settings
 
     settings = get_settings()
+    current_is_generated = current.source_type in {"coach_single", "coach_daily_adaptation"}
     return WorkoutDetailView(
         id=workout.id,
         current=revision_view(current, context_fingerprint=context_fingerprint),
@@ -286,20 +341,29 @@ def workout_detail_view(
         scheduled_for=workout.scheduled_for,
         lock_version=workout.lock_version,
         source_type=workout.source_type,
+        replaces_workout_id=workout.replaces_workout_id,
         garmin_content_status=binding.content_status if binding else "not_requested",
         garmin_calendar_status=binding.calendar_status if binding else "not_requested",
         garmin_device_status=binding.device_status if binding else "not_requested",
         garmin_workout_id=remote_id or workout.garmin_workout_id,
         parent=revision_view(parent) if parent is not None else None,
+        replacement_original=(
+            revision_view(replacement_original) if replacement_original is not None else None
+        ),
+        open_replacement_id=open_replacement_id,
+        active_replacement_id=active_replacement_id,
         garmin_last_operation=(latest_operation.operation_type if latest_operation else None),
         garmin_last_operation_status=(latest_operation.status if latest_operation else None),
         garmin_last_error=binding.last_error_message if binding else None,
         safety_report=safety_report,
         sync_safety_report=sync_safety_report,
-        garmin_sync_allowed=(
-            workout.source_type != "coach_single" or settings.coach_garmin_sync_enabled
-        ),
+        garmin_sync_allowed=(not current_is_generated or settings.coach_garmin_sync_enabled),
         proposal_actions_allowed=(
-            workout.source_type != "coach_single" or settings.coach_workout_proposals_enabled
+            settings.coach_daily_adaptation_enabled
+            if current.source_type == "coach_daily_adaptation"
+            else not current_is_generated or settings.coach_workout_proposals_enabled
+        ),
+        edit_allowed=(
+            current.source_type != "coach_daily_adaptation" and active_replacement_id is None
         ),
     )

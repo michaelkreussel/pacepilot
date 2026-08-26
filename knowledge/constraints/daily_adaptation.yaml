@@ -14,3 +14,16 @@ rules:
       rationale: No spontaneous escalation is a safety-oriented product invariant for daily adaptation.
       status: initial_product_default
       reviewed_on: 2026-08-24
+  - id: ADAPT-VOLUME-REDUCTION-001
+    status: active
+    enforcement: heuristic
+    implementation: adaptation.reduce_volume
+    description: Initial daily adaptation reduces every volume end condition uniformly.
+    parameters:
+      factor: 0.75
+    evidence_refs: []
+    product_heuristic:
+      product_default: true
+      rationale: A uniform 25 percent reduction is a conservative configurable starting point, not a universal optimum.
+      status: initial_product_default
+      reviewed_on: 2026-08-25

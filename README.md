@@ -321,12 +321,13 @@ Other recipes: `just open-browser`, `just wait-login`, `just save-state`, and
 
 ### Tailwind CSS
 
-The generated `app/static/css/tailwind.css` file is committed. Tailwind is not installed as a
-project dependency. After changing templates or `app/static/css/tailwind.input.css`, rebuild it with
-the standalone Tailwind CSS 4.3.3 CLI:
+The generated `app/static/css/tailwind.css` file is committed. Tailwind 4.3.3 is pinned as a Node
+dev dependency in the committed `package.json` (only `node_modules` is gitignored). After changing
+templates or `app/static/css/tailwind.input.css`, rebuild it with:
 
 ```bash
-tailwindcss -i ./app/static/css/tailwind.input.css -o ./app/static/css/tailwind.css --minify
+npm install
+npm run build:css
 ```
 
 Then update the stylesheet cache key in `app/templates/base.html` and

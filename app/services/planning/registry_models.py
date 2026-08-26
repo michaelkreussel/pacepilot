@@ -25,6 +25,7 @@ class RuleStrength(StrEnum):
 
 SUPPORTED_CONSTRAINT_IMPLEMENTATIONS = {
     "adaptation.no_load_increase",
+    "adaptation.reduce_volume",
     "constraint.no_time_available",
     "progression.change_one_axis",
     "progression.no_catchup_stacking",

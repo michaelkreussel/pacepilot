@@ -10,12 +10,19 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from pydantic import ValidationError
 
 from app.auth import CurrentUser
+from app.config import get_settings
 from app.database import SessionDep
 from app.onboarding import require_planning_access
 from app.services.garmin.client import (
     GarminUnavailableError,
     connect_garmin_account,
     message_from_exception,
+)
+from app.services.planning.daily_adaptation import (
+    DailyAdaptationClass,
+    DailyAdaptationError,
+    DailyAdaptationPreview,
+    DailyAdaptationService,
 )
 from app.services.planning.feedback_service import FeedbackService
 from app.services.planning.validator import WorkoutInput, WorkoutValidationError, validate_workout
@@ -233,6 +240,20 @@ def _operation_error_redirect(
     return RedirectResponse(f"/workouts/{workout_id}?{query}", status_code=303)
 
 
+def _adaptation_preview(service: WorkoutService, workout_id: int) -> DailyAdaptationPreview | None:
+    if not get_settings().coach_daily_adaptation_enabled:
+        return None
+    try:
+        return DailyAdaptationService(
+            service.session,
+            service.user,
+            as_of=date.today(),
+            request_id=service.request_id,
+        ).assess_today(workout_id)
+    except DailyAdaptationError:
+        return None
+
+
 @router.get("/{workout_id}", response_class=HTMLResponse)
 def workout_detail(
     workout_id: int,
@@ -251,6 +272,8 @@ def workout_detail(
             pre_session_feedback=FeedbackService(
                 service.session, service.user
             ).pre_session_for_workout(workout_id),
+            adaptation_preview=_adaptation_preview(service, workout_id),
+            adaptation_apply_key=str(uuid4()),
             error=error,
             notice=notice,
         ),
@@ -422,6 +445,76 @@ async def reject_workout(
     except (WorkoutTransitionError, WorkoutConflictError) as exc:
         return _operation_error_redirect(workout_id, exc)
     return RedirectResponse(f"/workouts/{workout_id}?notice=Vorschlag abgelehnt", status_code=303)
+
+
+@router.post("/{workout_id}/adaptation/apply", response_class=RedirectResponse, status_code=303)
+async def apply_adaptation(
+    workout_id: int,
+    request: Request,
+    service: WorkoutServiceDep,
+) -> Response:
+    _get_workout(service, workout_id)
+    form = await request.form()
+    try:
+        adaptation_class = DailyAdaptationClass(str(form["adaptation_class"]))
+        context_fingerprint = str(form["context_fingerprint"])
+        idempotency_key = str(form["idempotency_key"]).strip()
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="Ungültige Anpassungsangaben") from exc
+    if not idempotency_key or len(idempotency_key) > 200:
+        raise HTTPException(status_code=422, detail="Ungültiger Wiederholungsschlüssel")
+    try:
+        result = DailyAdaptationService(
+            service.session,
+            service.user,
+            as_of=date.today(),
+            request_id=service.request_id,
+        ).apply(
+            workout_id,
+            adaptation_class,
+            expected_context_fingerprint=context_fingerprint,
+            idempotency_key=idempotency_key,
+        )
+    except DailyAdaptationError as exc:
+        query = urlencode({"error": str(exc)})
+        return RedirectResponse(f"/workouts/{workout_id}?{query}", status_code=303)
+    except (WorkoutTransitionError, WorkoutConflictError) as exc:
+        return _operation_error_redirect(workout_id, exc)
+    notice = {
+        DailyAdaptationClass.KEEP: "Training für heute bestätigt.",
+        DailyAdaptationClass.REDUCE_VOLUME: "Reduzierte Revision erstellt. Bitte annehmen.",
+        DailyAdaptationClass.REPLACE_WITH_EASY: "Easy-Run-Ersatz erstellt. Bitte annehmen.",
+        DailyAdaptationClass.REST: "Ruhetag eingetragen; der Termin wurde entfernt.",
+    }[adaptation_class]
+    return RedirectResponse(
+        f"/workouts/{result.workout.id}?{urlencode({'notice': notice})}", status_code=303
+    )
+
+
+@router.post("/{workout_id}/adaptation/discard", response_class=RedirectResponse, status_code=303)
+async def discard_adaptation(
+    workout_id: int,
+    request: Request,
+    service: WorkoutServiceDep,
+) -> Response:
+    _get_workout(service, workout_id)
+    form = await request.form()
+    try:
+        command = RejectRevisionCommand(
+            identity=RevisionIdentity(
+                revision_id=int(str(form["revision_id"])),
+                revision_number=int(str(form["revision_number"])),
+                content_hash=str(form["content_hash"]),
+                lock_version=int(str(form["lock_version"])),
+            )
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="Ungültige Revisionsangaben") from exc
+    try:
+        service.discard_adaptation_revision(workout_id, command)
+    except (WorkoutTransitionError, WorkoutConflictError) as exc:
+        return _operation_error_redirect(workout_id, exc)
+    return RedirectResponse(f"/workouts/{workout_id}?notice=Anpassung verworfen", status_code=303)
 
 
 @router.post("/{workout_id}/schedule", response_class=RedirectResponse, status_code=303)

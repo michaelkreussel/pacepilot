@@ -257,7 +257,13 @@ def create_running_workout_proposal(
         request = EasyRunProposalRequest(
             suggested_for=suggested_for,
             available_minutes=available_minutes,
-            idempotency_key=(f"coach-run:{assistant_run_id}:create_running_workout_proposal:v1"),
+            # SQLite rowids are reused after conversation deletes cascade old runs away,
+            # so the run id alone is not unique. The creation timestamp disambiguates
+            # recycled ids and keeps retries within one run on the same key.
+            idempotency_key=(
+                f"coach-run:{assistant_run_id}:{run.created_at.isoformat()}:"
+                "create_running_workout_proposal:v1"
+            ),
         )
         try:
             RunningProposalService(session, user, request_id=context.request_id).create_easy_run(

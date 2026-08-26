@@ -43,7 +43,7 @@ from app.services.planning.workout_templates import (
 )
 
 PROPOSAL_SOURCE = "coach_single"
-PROPOSAL_RULE_SET_VERSION = f"easy-run-candidate-v1+{SAFETY_RULE_SET_VERSION}"
+PROPOSAL_RULE_SET_VERSION = f"easy-run-candidate-v2+{SAFETY_RULE_SET_VERSION}"
 
 
 class EasyRunProposalRequest(BaseModel):
@@ -320,7 +320,7 @@ class RunningProposalService:
         shadow, safety = _candidate_inputs(
             self.session, self.user, suggested_for=request.suggested_for
         )
-        selected_minutes = min(45, request.available_minutes)
+        selected_minutes = min(90, request.available_minutes)
         expanded = expand_workout_template(
             "easy_run",
             TemplateParameters(duration_minutes=selected_minutes),

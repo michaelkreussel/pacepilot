@@ -175,6 +175,35 @@ def test_easy_run_proposal_is_deterministic_revisioned_and_unscheduled(
         assert conflict.value.code == "proposal.idempotency_conflict"
 
 
+def test_easy_run_proposal_uses_requested_60_minutes(
+    session_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
+    with session_factory() as session:
+        user = _user(session)
+        _history(session, user.id, date.today())
+
+        workout = RunningProposalService(session, user).create_easy_run(
+            _request(minutes=60, key="phase8-request-60")
+        )
+        revision = session.get(WorkoutRevision, workout.current_revision_id)
+
+        assert revision is not None
+        step = revision.definition_model.blocks[0]
+        assert isinstance(step, StepBlockV2)
+        assert isinstance(step.end, TimeEnd)
+        assert step.end.seconds == 3600
+        assert revision.load_estimate_json is not None
+        assert revision.load_estimate_json["duration_seconds"] == 3600
+        assert revision.generation_context_json is not None
+        request_context = revision.generation_context_json["request"]
+        assert request_context == {
+            "suggested_for": (date.today() + timedelta(days=1)).isoformat(),
+            "available_minutes": 60,
+            "selected_minutes": 60,
+        }
+
+
 def test_stale_idempotency_precheck_rolls_back_duplicate_proposal(
     session_factory, monkeypatch: pytest.MonkeyPatch
 ) -> None:

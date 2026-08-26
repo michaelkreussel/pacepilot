@@ -11,6 +11,8 @@ from unittest.mock import Mock
 import pytest
 from fastapi.testclient import TestClient
 from langchain.messages import AIMessage, AIMessageChunk, ToolMessage
+from langchain_core.language_models import BaseChatModel
+from langchain_core.outputs import ChatGenerationChunk
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode
 from sqlalchemy import select
@@ -109,6 +111,80 @@ def test_openrouter_timeout_is_converted_to_sdk_milliseconds(
     model: Any = captured["model"]
     assert model.request_timeout == 60_000
     assert model.max_tokens == 2000
+
+
+class _ReasoningFakeChatModel(BaseChatModel):
+    """Streams reasoning via additional_kwargs before the visible answer text."""
+
+    answer: str = "Antwort."
+
+    @property
+    def _llm_type(self) -> str:
+        return "reasoning-fake"
+
+    def _generate(self, *args: Any, **kwargs: Any) -> Any:
+        raise NotImplementedError
+
+    def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
+        del tools, kwargs
+        return self
+
+    async def _astream(
+        self,
+        messages: Any,
+        stop: Any = None,
+        run_manager: Any = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[ChatGenerationChunk]:
+        del messages, stop, kwargs
+        for reasoning_token in ("Denke", " nach."):
+            chunk = ChatGenerationChunk(
+                message=AIMessageChunk(
+                    content="",
+                    additional_kwargs={"reasoning_content": reasoning_token},
+                )
+            )
+            if run_manager is not None:
+                await run_manager.on_llm_new_token("", chunk=chunk)
+            yield chunk
+        for answer_token in self.answer:
+            chunk = ChatGenerationChunk(message=AIMessageChunk(content=answer_token))
+            if run_manager is not None:
+                await run_manager.on_llm_new_token(answer_token, chunk=chunk)
+            yield chunk
+
+
+def test_agent_stream_never_leaks_reasoning_into_answer(
+    session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(coach_agent_module, "ChatOpenRouter", lambda **_: _ReasoningFakeChatModel())
+    agent = LangChainCoachAgent(api_key="test-key", model_id="fake/model", timeout_seconds=5)
+
+    with session_factory() as session:
+        user = User(display_name="Reasoning Runner")
+        session.add(user)
+        session.commit()
+        user_id = user.id
+    runtime = CoachRuntimeContext(
+        user_id=user_id,
+        as_of=date.today(),
+        session_factory=session_factory,
+    )
+
+    async def collect() -> list[CoachEvent]:
+        return [
+            event
+            async for event in agent.stream(
+                [CoachHistoryMessage(role="user", content="Hallo")], runtime
+            )
+        ]
+
+    events = asyncio.run(collect())
+
+    answer = "".join(event.text for event in events if event.type == "answer_delta" and event.text)
+    assert answer == "Antwort."
+    assert "Denke" not in answer
 
 
 def _new_chat(client: TestClient) -> int:
@@ -218,7 +294,7 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
                 function(
                     runtime=SimpleNamespace(context=runtime),
                     suggested_for=runtime.as_of - timedelta(days=1),
-                    available_minutes=45,
+                    available_minutes=60,
                 )
             )
             assert rejected == {
@@ -231,12 +307,12 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
             first = function(
                 runtime=SimpleNamespace(context=runtime),
                 suggested_for=date.today() + timedelta(days=1),
-                available_minutes=45,
+                available_minutes=60,
             )
             second = function(
                 runtime=SimpleNamespace(context=runtime),
                 suggested_for=date.today() + timedelta(days=1),
-                available_minutes=45,
+                available_minutes=60,
             )
             assert json.loads(first)["artifact"] == json.loads(second)["artifact"]
             yield CoachEvent(
@@ -266,7 +342,7 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
 
     response = client.post(
         f"/coach/{conversation_id}/messages",
-        data={"message": "Erstelle mir morgen einen lockeren Lauf für 45 Minuten."},
+        data={"message": "Erstelle mir morgen einen lockeren Lauf für 60 Minuten."},
     )
 
     assert response.status_code == 200
@@ -298,12 +374,24 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
             )
             is not None
         )
+        propose_event = session.scalar(
+            select(WorkoutEvent).where(
+                WorkoutEvent.workout_id == workout.id,
+                WorkoutEvent.action == "propose",
+            )
+        )
+        assert propose_event is not None
+        assert propose_event.idempotency_key == (
+            f"coach-run:{fake.runtime.assistant_run_id}:{run.created_at.isoformat()}:"
+            "create_running_workout_proposal:v1"
+        )
         assert len(list(session.scalars(select(Workout)))) == 1
         workout_id = workout.id
 
     page = client.get(f"/coach/{conversation_id}")
     assert page.status_code == 200
     assert "Trainingsvorschlag" in page.text
+    assert "60 Minuten" in page.text
     assert "Unbestätigt" in page.text
     assert f'href="/workouts/{workout_id}"' in page.text
     card = client.get(
@@ -335,7 +423,7 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
         function(
             runtime=SimpleNamespace(context=fake.runtime),
             suggested_for=date.today() + timedelta(days=2),
-            available_minutes=45,
+            available_minutes=60,
         )
     )
     assert conflict["status"] == "not_created"
@@ -810,9 +898,9 @@ async def test_langchain_backend_maps_tokens_and_tool_lifecycle(
     class FakeGraph:
         async def astream(
             self, inputs: dict[str, Any], **kwargs: Any
-        ) -> AsyncIterator[dict[str, Any]]:
+        ) -> AsyncIterator[tuple[str, Any]]:
             assert kwargs["stream_mode"] == ["messages", "updates"]
-            assert kwargs["version"] == "v2"
+            assert "version" not in kwargs
             assert inputs["messages"][0] == {
                 "role": "system",
                 "content": (
@@ -825,10 +913,9 @@ async def test_langchain_backend_maps_tokens_and_tool_lifecycle(
                 "role": "user",
                 "content": "Wie ist meine HRV?",
             }
-            yield {
-                "type": "updates",
-                "ns": (),
-                "data": {
+            yield (
+                "updates",
+                {
                     "model": {
                         "messages": [
                             AIMessage(
@@ -845,11 +932,10 @@ async def test_langchain_backend_maps_tokens_and_tool_lifecycle(
                         ]
                     }
                 },
-            }
-            yield {
-                "type": "updates",
-                "ns": (),
-                "data": {
+            )
+            yield (
+                "updates",
+                {
                     "tools": {
                         "messages": [
                             ToolMessage(
@@ -860,15 +946,14 @@ async def test_langchain_backend_maps_tokens_and_tool_lifecycle(
                         ]
                     }
                 },
-            }
-            yield {
-                "type": "messages",
-                "ns": (),
-                "data": (
+            )
+            yield (
+                "messages",
+                (
                     AIMessageChunk(content="Deine HRV ist stabil."),
                     {"langgraph_node": "model"},
                 ),
-            }
+            )
 
     backend = LangChainCoachAgent.__new__(LangChainCoachAgent)
     backend._model_id = "test/model"
@@ -898,11 +983,10 @@ async def test_langchain_backend_maps_only_valid_proposal_artifact(
     session_factory: sessionmaker[Session],
 ) -> None:
     class FakeGraph:
-        async def astream(self, *_: Any, **__: Any) -> AsyncIterator[dict[str, Any]]:
-            yield {
-                "type": "updates",
-                "ns": (),
-                "data": {
+        async def astream(self, *_: Any, **__: Any) -> AsyncIterator[tuple[str, Any]]:
+            yield (
+                "updates",
+                {
                     "model": {
                         "messages": [
                             AIMessage(
@@ -922,11 +1006,10 @@ async def test_langchain_backend_maps_only_valid_proposal_artifact(
                         ]
                     }
                 },
-            }
-            yield {
-                "type": "updates",
-                "ns": (),
-                "data": {
+            )
+            yield (
+                "updates",
+                {
                     "tools": {
                         "messages": [
                             ToolMessage(
@@ -939,15 +1022,14 @@ async def test_langchain_backend_maps_only_valid_proposal_artifact(
                         ]
                     }
                 },
-            }
-            yield {
-                "type": "messages",
-                "ns": (),
-                "data": (
+            )
+            yield (
+                "messages",
+                (
                     AIMessageChunk(content="Der Vorschlag ist bereit."),
                     {"langgraph_node": "model"},
                 ),
-            }
+            )
 
     backend = LangChainCoachAgent.__new__(LangChainCoachAgent)
     backend._model_id = "test/model"
@@ -970,9 +1052,9 @@ async def test_langchain_backend_logs_and_propagates_provider_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class FailingGraph:
-        async def astream(self, *_: Any, **__: Any) -> AsyncIterator[dict[str, Any]]:
+        async def astream(self, *_: Any, **__: Any) -> AsyncIterator[tuple[str, Any]]:
             raise RuntimeError("secret provider detail")
-            yield {"type": "updates", "ns": (), "data": {}}
+            yield ("updates", {})
 
     backend = LangChainCoachAgent.__new__(LangChainCoachAgent)
     backend._model_id = "test/model"
