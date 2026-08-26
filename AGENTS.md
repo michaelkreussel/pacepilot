@@ -5,6 +5,12 @@
 Before starting a non-trivial change, check whether an installed agent skill
 applies.
 
+For AI Coach refactoring, read both documents and keep their roles distinct:
+
+- `docs/refactoring/ai-coach-current-state.md` maps the current implementation.
+- `docs/refactoring/ai-coach-intent.md` describes the desired outcome, not the
+  current architecture.
+
 For substantial changes, prefer:
 
 1. Understand the relevant existing context.
