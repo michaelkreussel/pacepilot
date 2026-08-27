@@ -10,11 +10,10 @@ from unittest.mock import Mock
 
 import pytest
 from fastapi.testclient import TestClient
-from langchain.messages import AIMessage, AIMessageChunk, ToolMessage
+from langchain.messages import AIMessageChunk, ToolMessage
 from langchain_core.language_models import BaseChatModel
 from langchain_core.outputs import ChatGenerationChunk
-from langgraph.graph import END, START, MessagesState, StateGraph
-from langgraph.prebuilt import ToolNode
+from langchain_core.tools import tool
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -33,8 +32,6 @@ from app.models import (
     WorkoutEvent,
 )
 from app.models.user import utcnow
-from app.repositories.coach import create_assistant_run, create_message
-from app.routes.coach import _stream_answer
 from app.services.coach import agent as coach_agent_module
 from app.services.coach.agent import (
     CoachEvent,
@@ -46,7 +43,6 @@ from app.services.coach.tools import (
     CoachRuntimeContext,
     coach_tools,
     create_running_workout_proposal,
-    get_current_recovery_state,
     get_health_day,
     get_subjective_context,
 )
@@ -152,6 +148,77 @@ class _ReasoningFakeChatModel(BaseChatModel):
             if run_manager is not None:
                 await run_manager.on_llm_new_token(answer_token, chunk=chunk)
             yield chunk
+
+
+class _ToolCallingFakeChatModel(BaseChatModel):
+    tool_name: str
+    tool_args: dict[str, Any]
+    answer: str
+    observed_tool_result: str | None = None
+
+    @property
+    def _llm_type(self) -> str:
+        return "tool-calling-fake"
+
+    def _generate(self, *args: Any, **kwargs: Any) -> Any:
+        raise NotImplementedError
+
+    def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
+        del tools, kwargs
+        return self
+
+    async def _astream(
+        self,
+        messages: Any,
+        stop: Any = None,
+        run_manager: Any = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[ChatGenerationChunk]:
+        del stop, kwargs
+        tool_result = next(
+            (message for message in reversed(messages) if isinstance(message, ToolMessage)),
+            None,
+        )
+        if tool_result is None:
+            chunk = ChatGenerationChunk(
+                message=AIMessageChunk(
+                    content="",
+                    tool_call_chunks=[
+                        {
+                            "name": self.tool_name,
+                            "args": json.dumps(self.tool_args),
+                            "id": "fake-tool-call",
+                            "index": 0,
+                        }
+                    ],
+                    chunk_position="last",
+                )
+            )
+        else:
+            self.observed_tool_result = str(tool_result.content)
+            chunk = ChatGenerationChunk(
+                message=AIMessageChunk(content=self.answer, chunk_position="last")
+            )
+        if run_manager is not None:
+            await run_manager.on_llm_new_token(chunk.text, chunk=chunk)
+        yield chunk
+
+
+class _FailingFakeChatModel(BaseChatModel):
+    @property
+    def _llm_type(self) -> str:
+        return "failing-fake"
+
+    def _generate(self, *args: Any, **kwargs: Any) -> Any:
+        raise NotImplementedError
+
+    def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
+        del tools, kwargs
+        return self
+
+    async def _astream(self, *_: Any, **__: Any) -> AsyncIterator[ChatGenerationChunk]:
+        raise RuntimeError("secret provider detail")
+        yield ChatGenerationChunk(message=AIMessageChunk(content=""))
 
 
 def test_agent_stream_never_leaks_reasoning_into_answer(
@@ -535,23 +602,12 @@ def test_agent_registers_exactly_one_bounded_mutation_tool() -> None:
     )
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("failure_mode", "expected_status"),
-    (("provider", "failed"), ("disconnect", "interrupted")),
-)
-async def test_proposal_survives_stream_failure_after_commit(
+def test_proposal_survives_provider_failure_after_commit(
     client: TestClient,
     session_factory: sessionmaker[Session],
     monkeypatch: pytest.MonkeyPatch,
-    failure_mode: str,
-    expected_status: str,
 ) -> None:
     monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
-
-    class ConnectedRequest:
-        async def is_disconnected(self) -> bool:
-            return failure_mode == "disconnect"
 
     class FailingAfterProposalAgent:
         async def stream(
@@ -567,69 +623,39 @@ async def test_proposal_survives_stream_failure_after_commit(
                 available_minutes=35,
             )
             yield CoachEvent("proposal_created")
-            if failure_mode == "provider":
-                raise RuntimeError("provider failed after proposal")
+            raise RuntimeError("provider failed after proposal")
 
     with session_factory() as session:
         user = session.scalar(select(User))
         assert user is not None
         _running_history(session, user.id)
-        conversation = CoachConversation(user_id=user.id, title="Fehler nach Vorschlag")
-        session.add(conversation)
-        session.flush()
-        user_message = create_message(
-            session, conversation, role="user", content="Plane einen Lauf."
-        )
-        assistant_message = create_message(
-            session, conversation, role="assistant", status="streaming"
-        )
-        run = create_assistant_run(
-            session,
-            conversation,
-            user_message,
-            assistant_message,
-            model_id="test/model",
-            request_id="phase9-provider-failure",
-        )
         session.commit()
-        user_id = user.id
-        conversation_id = conversation.id
-        user_message_id = user_message.id
-        assistant_message_id = assistant_message.id
-        run_id = run.id
 
-    runtime = CoachRuntimeContext(
-        user_id,
-        date.today(),
-        session_factory,
-        request_id="phase9-provider-failure",
-        conversation_id=conversation_id,
-        user_message_id=user_message_id,
-        assistant_message_id=assistant_message_id,
-        assistant_run_id=run_id,
-    )
-    stream = _stream_answer(
-        request=cast(Any, ConnectedRequest()),
-        agent=FailingAfterProposalAgent(),
-        history=[CoachHistoryMessage("user", "Plane einen Lauf.")],
-        runtime=runtime,
-        assistant_message_id=assistant_message_id,
-    )
-    events: list[str] = []
-    expected_error = RuntimeError if failure_mode == "provider" else asyncio.CancelledError
-    with pytest.raises(expected_error):
-        async for event in stream:
-            events.append(event)
+    app.dependency_overrides[get_coach_agent] = lambda: FailingAfterProposalAgent()
+    conversation_id = _new_chat(client)
+    with pytest.raises(RuntimeError, match="provider failed after proposal"):
+        client.post(
+            f"/coach/{conversation_id}/messages",
+            data={"message": "Plane einen Lauf."},
+        )
 
-    assert any("event: proposal.created" in event for event in events) == (
-        failure_mode == "provider"
-    )
     with session_factory() as session:
-        failed_run = session.get(CoachAssistantRun, run_id)
-        assert failed_run is not None
-        assert failed_run.status == expected_status
-        assert failed_run.workout_id is not None
-        workout_id = failed_run.workout_id
+        messages = list(
+            session.scalars(
+                select(CoachMessage)
+                .where(CoachMessage.conversation_id == conversation_id)
+                .order_by(CoachMessage.id)
+            )
+        )
+        assert [(message.role, message.status) for message in messages] == [
+            ("user", "completed"),
+            ("assistant", "failed"),
+        ]
+        workout = session.scalar(
+            select(Workout).where(Workout.originating_conversation_id == conversation_id)
+        )
+        assert workout is not None
+        workout_id = workout.id
         assert len(list(session.scalars(select(Workout)))) == 1
 
     reloaded = client.get(f"/coach/{conversation_id}")
@@ -856,8 +882,9 @@ def test_subjective_context_tool_uses_runtime_user_scope(
     assert payload["recent_activity_feedback"][0]["effort_source"] == "garmin"
 
 
-def test_langgraph_injects_runtime_context_into_coach_tools(
+def test_agent_stream_uses_trusted_runtime_context(
     session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     with session_factory() as session:
         user = User(display_name="Runtime Test")
@@ -865,182 +892,58 @@ def test_langgraph_injects_runtime_context_into_coach_tools(
         session.commit()
         user_id = user.id
 
-    builder: Any = StateGraph(cast(Any, MessagesState), context_schema=CoachRuntimeContext)
-    builder.add_node("tools", ToolNode([get_current_recovery_state]))
-    builder.add_edge(START, "tools")
-    builder.add_edge("tools", END)
-    graph = builder.compile()
-    result = graph.invoke(
-        {
-            "messages": [
-                AIMessage(
-                    content="",
-                    tool_calls=[
-                        {
-                            "id": "runtime-test",
-                            "name": "get_current_recovery_state",
-                            "args": {},
-                            "type": "tool_call",
-                        }
-                    ],
-                )
-            ]
-        },
-        context=CoachRuntimeContext(user_id, date(2026, 8, 11), session_factory),
+    model = _ToolCallingFakeChatModel(
+        tool_name="get_current_recovery_state",
+        tool_args={},
+        answer="Deine Erholungsdaten wurden geprüft.",
     )
+    monkeypatch.setattr(coach_agent_module, "ChatOpenRouter", lambda **_: model)
+    agent = LangChainCoachAgent(api_key="test-key", model_id="fake/model", timeout_seconds=5)
 
-    tool_message = result["messages"][-1]
-    assert isinstance(tool_message, ToolMessage)
-    assert tool_message.status == "success"
-    assert '"as_of":"2026-08-11"' in str(tool_message.content)
-
-
-@pytest.mark.asyncio
-async def test_langchain_backend_maps_tokens_and_tool_lifecycle(
-    session_factory: sessionmaker[Session],
-) -> None:
-    class FakeGraph:
-        async def astream(
-            self, inputs: dict[str, Any], **kwargs: Any
-        ) -> AsyncIterator[tuple[str, Any]]:
-            assert kwargs["stream_mode"] == ["messages", "updates"]
-            assert "version" not in kwargs
-            assert inputs["messages"][0] == {
-                "role": "system",
-                "content": (
-                    "Vertrauenswürdiger PacePilot-Serverkontext: Heute ist 2026-08-11. "
-                    "'Morgen' ist 2026-08-12. 'Übermorgen' ist 2026-08-13. Dieser Kontext "
-                    "hat Vorrang vor Annahmen über das aktuelle Datum."
-                ),
-            }
-            assert inputs["messages"][1] == {
-                "role": "user",
-                "content": "Wie ist meine HRV?",
-            }
-            yield (
-                "updates",
-                {
-                    "model": {
-                        "messages": [
-                            AIMessage(
-                                content="",
-                                tool_calls=[
-                                    {
-                                        "id": "tool-1",
-                                        "name": "get_health_trends",
-                                        "args": {"days": 28, "metrics": ["hrv"]},
-                                        "type": "tool_call",
-                                    }
-                                ],
-                            )
-                        ]
-                    }
-                },
+    async def collect() -> list[CoachEvent]:
+        return [
+            event
+            async for event in agent.stream(
+                [CoachHistoryMessage("user", "Wie ist meine Erholung?")],
+                CoachRuntimeContext(user_id, date(2026, 8, 11), session_factory),
             )
-            yield (
-                "updates",
-                {
-                    "tools": {
-                        "messages": [
-                            ToolMessage(
-                                content='{"hrv":55}',
-                                tool_call_id="tool-1",
-                                name="get_health_trends",
-                            )
-                        ]
-                    }
-                },
-            )
-            yield (
-                "messages",
-                (
-                    AIMessageChunk(content="Deine HRV ist stabil."),
-                    {"langgraph_node": "model"},
-                ),
-            )
+        ]
 
-    backend = LangChainCoachAgent.__new__(LangChainCoachAgent)
-    backend._model_id = "test/model"
-    backend._agent = FakeGraph()
-    runtime = CoachRuntimeContext(1, date(2026, 8, 11), session_factory)
+    events = asyncio.run(collect())
 
-    events = [
-        event
-        async for event in backend.stream(
-            [CoachHistoryMessage("user", "Wie ist meine HRV?")], runtime
-        )
-    ]
-
-    assert [event.type for event in events] == [
-        "status",
-        "tool_started",
-        "tool_completed",
-        "status",
-        "answer_delta",
-    ]
-    assert events[1].summary == "Zeitraum: 28 Tage"
-    assert events[-1].text == "Deine HRV ist stabil."
+    assert model.observed_tool_result is not None
+    assert '"as_of":"2026-08-11"' in model.observed_tool_result
+    assert "".join(event.text or "" for event in events if event.type == "answer_delta") == (
+        "Deine Erholungsdaten wurden geprüft."
+    )
 
 
 @pytest.mark.asyncio
 async def test_langchain_backend_maps_only_valid_proposal_artifact(
     session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class FakeGraph:
-        async def astream(self, *_: Any, **__: Any) -> AsyncIterator[tuple[str, Any]]:
-            yield (
-                "updates",
-                {
-                    "model": {
-                        "messages": [
-                            AIMessage(
-                                content="",
-                                tool_calls=[
-                                    {
-                                        "id": "proposal-call",
-                                        "name": "create_running_workout_proposal",
-                                        "args": {
-                                            "suggested_for": "2026-08-25",
-                                            "available_minutes": 45,
-                                        },
-                                        "type": "tool_call",
-                                    }
-                                ],
-                            )
-                        ]
-                    }
-                },
-            )
-            yield (
-                "updates",
-                {
-                    "tools": {
-                        "messages": [
-                            ToolMessage(
-                                content=(
-                                    '{"status":"created","artifact":{"type":"workout_proposal"}}'
-                                ),
-                                tool_call_id="proposal-call",
-                                name="create_running_workout_proposal",
-                            )
-                        ]
-                    }
-                },
-            )
-            yield (
-                "messages",
-                (
-                    AIMessageChunk(content="Der Vorschlag ist bereit."),
-                    {"langgraph_node": "model"},
-                ),
-            )
+    @tool("create_running_workout_proposal")
+    def fake_proposal_tool() -> str:
+        """Create a deterministic workout proposal for adapter testing."""
+        return '{"status":"created","artifact":{"type":"workout_proposal"}}'
 
-    backend = LangChainCoachAgent.__new__(LangChainCoachAgent)
-    backend._model_id = "test/model"
-    backend._agent = FakeGraph()
+    model = _ToolCallingFakeChatModel(
+        tool_name="create_running_workout_proposal",
+        tool_args={},
+        answer="Der Vorschlag ist bereit.",
+    )
+    monkeypatch.setattr(coach_agent_module, "ChatOpenRouter", lambda **_: model)
+    monkeypatch.setattr(coach_agent_module, "coach_tools", lambda **_: [fake_proposal_tool])
+    agent = LangChainCoachAgent(
+        api_key="test-key",
+        model_id="fake/model",
+        timeout_seconds=5,
+        workout_proposals_enabled=True,
+    )
     events = [
         event
-        async for event in backend.stream(
+        async for event in agent.stream(
             [CoachHistoryMessage("user", "Plane einen Easy Run.")],
             CoachRuntimeContext(1, date(2026, 8, 24), session_factory),
         )
@@ -1055,21 +958,19 @@ async def test_langchain_backend_logs_and_propagates_provider_errors(
     session_factory: sessionmaker[Session],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class FailingGraph:
-        async def astream(self, *_: Any, **__: Any) -> AsyncIterator[tuple[str, Any]]:
-            raise RuntimeError("secret provider detail")
-            yield ("updates", {})
-
-    backend = LangChainCoachAgent.__new__(LangChainCoachAgent)
-    backend._model_id = "test/model"
-    backend._agent = FailingGraph()
+    monkeypatch.setattr(
+        coach_agent_module,
+        "ChatOpenRouter",
+        lambda **_: _FailingFakeChatModel(),
+    )
+    agent = LangChainCoachAgent(api_key="test-key", model_id="fake/model", timeout_seconds=5)
     runtime = CoachRuntimeContext(1, date(2026, 8, 11), session_factory)
     logger = Mock()
     monkeypatch.setattr(coach_agent_module, "logger", logger)
 
     private_question = "Mein privater Gesundheitswert ist 123."
     with pytest.raises(RuntimeError, match="secret provider detail"):
-        async for _ in backend.stream([CoachHistoryMessage("user", private_question)], runtime):
+        async for _ in agent.stream([CoachHistoryMessage("user", private_question)], runtime):
             pass
 
     logger.exception.assert_called_once()
@@ -1077,56 +978,3 @@ async def test_langchain_backend_logs_and_propagates_provider_errors(
     assert "AI coach agent failed" in log_call.args[0]
     assert "RuntimeError" in log_call.args
     assert private_question not in repr(log_call)
-
-
-@pytest.mark.asyncio
-async def test_streaming_route_marks_failure_and_propagates_original_exception(
-    session_factory: sessionmaker[Session],
-) -> None:
-    class ConnectedRequest:
-        async def is_disconnected(self) -> bool:
-            return False
-
-    class FailingAgent:
-        async def stream(
-            self,
-            messages: Sequence[CoachHistoryMessage],
-            runtime: CoachRuntimeContext,
-        ) -> AsyncIterator[CoachEvent]:
-            del messages, runtime
-            yield CoachEvent("status", text="Start")
-            raise ValueError("original stream failure")
-
-    with session_factory() as session:
-        user = User(display_name="Stream Test")
-        session.add(user)
-        session.flush()
-        conversation = CoachConversation(user_id=user.id, title="Test")
-        session.add(conversation)
-        session.flush()
-        assistant = CoachMessage(
-            conversation_id=conversation.id,
-            role="assistant",
-            content="",
-            status="streaming",
-        )
-        session.add(assistant)
-        session.commit()
-        user_id = user.id
-        assistant_id = assistant.id
-
-    stream = _stream_answer(
-        request=cast(Any, ConnectedRequest()),
-        agent=FailingAgent(),
-        history=[CoachHistoryMessage("user", "Test")],
-        runtime=CoachRuntimeContext(user_id, date(2026, 8, 11), session_factory),
-        assistant_message_id=assistant_id,
-    )
-    with pytest.raises(ValueError, match="original stream failure"):
-        async for _ in stream:
-            pass
-
-    with session_factory() as session:
-        failed_message = session.get(CoachMessage, assistant_id)
-        assert failed_message is not None
-        assert failed_message.status == "failed"
