@@ -1207,6 +1207,55 @@ deployment checklist before DD02, DD03, DD06A, or DD06B starts.
 
 **Dependencies on previous tasks:** None.
 
+#### DD01 deployment disposition
+
+Repository inventory covered `compose.yaml`, `.env.example`, the active README
+deployment/configuration guidance, historical Coach rollout documents, `.github/`,
+`scripts/`, `Dockerfile`, and `justfile`. No deployment automation or operational
+runbook calls a removed route or internal proposal API. No automation outside the
+application reads the removed Coach flags; their deployment consumers are Compose
+forwarding, the environment example, and README configuration guidance.
+
+| Contract | Current consumer | Canonical replacement | Migration required before deletion |
+| --- | --- | --- | --- |
+| `POST /coach/workout-proposals/running` | The Coach-page form posts to it; route tests and historical proposal docs reference it. No deployment automation consumer was found. | Conversational creation through `POST /coach/{conversation_id}/messages`; detailed artifact management remains in the normal workout UI. | DD02 removes the form, handler, route tests, and active documentation together. No route alias or deprecation period. |
+| `POST /coach/workout-proposals/easy-run` | No production caller was found; it is an alias exercised by tests and described by historical proposal docs. No deployment automation consumer was found. | The same conversational creation path as every supported workout format. | DD02 deletes the unused alias and its tests. Do not redirect or retain an alias. |
+| `GET /coach/planning-shadow` | Linked by the Coach page, the cycle-generation error state, and its own week navigation; route tests and historical planning docs reference it. No deployment automation consumer was found. | Weekly and cycle drafts are created in conversation and managed in the Plans UI through the existing planning services. | DD03 removes all links, the route/template/presentation policy, and its tests together. No plan data migration. |
+| `EasyRunProposalRequest` | No direct production request consumer was found; `RunningProposalRequest` inherits its fields and tests instantiate it directly. | `RunningProposalRequest` is the canonical deterministic request. | DD02 defines the canonical request without the compatibility base and migrates/removes coupled tests. No compatibility type alias. |
+| `RunningProposalService.create_easy_run()` | Tests only; production callers use `RunningProposalService.create()`. | `RunningProposalService.create(RunningProposalRequest, ...)`. | DD02 migrates surviving tests to `create()` and deletes the wrapper. No method alias. |
+| `COACH_WORKOUT_PROPOSALS_ENABLED` | Forwarded by Compose and documented in `.env.example`/README; runtime consumers gate Coach tools, proposal creation, lifecycle actions, and presentation. Historical phase 8/9 docs describe rollout. | No replacement variable. Conversational deterministic proposal creation is part of the coherent Coach capability, with normal ownership, validation, and workout lifecycle safeguards. | The corresponding DD06 deletion task removes deployment forwarding/docs and runtime gates before deployment; operators delete the variable from environment files. |
+| `COACH_GARMIN_SYNC_ENABLED` | Forwarded by Compose and documented in `.env.example`/README; runtime consumers gate generated-workout Garmin actions. Historical phase 8 docs describe rollout. | No replacement variable. Explicit accepted-revision Garmin actions use the existing publish/push safeguards and concrete Garmin incident controls. | The corresponding DD06 deletion task removes deployment forwarding/docs and generated-only gates before deployment; operators delete the variable. |
+| `COACH_DAILY_ADAPTATION_ENABLED` | Forwarded by Compose and documented in `.env.example`/README; runtime consumers gate adaptation routes/services and generated-workout lifecycle actions. Historical phase 10 docs describe rollout. | No replacement variable. Daily adaptation is a supported conversational capability backed by the deterministic adaptation service. | The corresponding DD06 deletion task removes deployment forwarding/docs and runtime gates before deployment; operators delete the variable. |
+| `COACH_PLAN_GENERATION_ENABLED` | Forwarded by Compose and documented in `.env.example`/README; runtime consumers gate Plans routes, planning shadow, lifecycle actions, and presentation. Historical phase 11/12 docs describe rollout. | No replacement variable. Plan creation is available in conversation and plan management remains in the Plans UI. | The corresponding DD06 deletion task removes deployment forwarding/docs and runtime gates before deployment; operators delete the variable. DD03 independently removes planning shadow. |
+| `COACH_ROLLOUT_USER_IDS` | Forwarded by Compose and documented in `.env.example`/README; `coach_feature_enabled()` applies it to every per-capability gate. Historical phase 13 docs describe rollout. | No replacement variable. Authenticated user scope, onboarding, ownership, and lifecycle checks remain the access boundary. | The corresponding DD06 deletion task removes deployment forwarding/docs, the parser/helper policy, and tests before deployment; operators delete the variable. No compatibility parser. |
+| `COACH_PLANNER_HISTORY_GATES_ENABLED` | Forwarded by Compose and documented in `.env.example`/README; configuration validation and proposal/weekly planning enforce it. | No replacement variable. History, frequency, consistency, and spacing signals become non-blocking training-fit warnings. | The corresponding DD06 deletion task removes deployment forwarding/docs, validators, hard gates, and gate-specific tests before deployment; operators delete the variable. No compatibility parser. |
+| `COACH_DEFERRED_QUALITY_TEMPLATES_ENABLED` | Forwarded by Compose and documented in `.env.example`/README; the development-only helper affects proposal, workout, weekly, and multiweek template availability. | No replacement variable. Every supported format uses the canonical template registry without a development bypass. | The corresponding DD06 deletion task removes deployment forwarding/docs, validators/helper, availability branches, and flag-specific tests before deployment; operators delete the variable. No compatibility parser. |
+
+Deployment controls explicitly outside this removal remain unchanged:
+
+- `LLM_API_KEY`, `LLM_MODEL`, and `LLM_TIMEOUT_SECONDS` keep provider
+  availability configurable.
+- `COACH_RATE_LIMIT_PER_MINUTE` keeps Coach mutation rate limiting configurable.
+- Garmin credentials, cooldown, stale-operation handling, serialization, and
+  reconciliation remain the concrete external-service controls and safeguards.
+
+Deletion-task gate checklist:
+
+- [x] DD01 repository inventory completed; DD01 has no predecessor dependency.
+- [x] No deployment automation migration is required for DD02 or DD03.
+- [ ] Before DD02, remove each in-application direct-proposal consumer in the
+  same change as its route/API deletion.
+- [ ] Before DD03, remove each in-application planning-shadow link in the same
+  change as the route/template deletion.
+- [ ] Before DD06A or DD06B starts, confirm that task's removed variables are
+  covered by this inventory. Before each deletion deploys, remove those variables
+  from Compose, `.env.example`, active README guidance, runtime
+  settings/consumers, and flag-specific tests; update historical rollout
+  documents where they could be mistaken for current operational guidance.
+- [ ] Re-run a repository search for every removed name in the corresponding
+  deletion task. Do not add compatibility aliases or parsers for zero-consumer
+  contracts.
+
 ### DD02: Remove The Direct Coach Proposal Form And Easy-Run Compatibility API
 
 **Goal:** Leave conversation as the Coach workout-creation entry point.
