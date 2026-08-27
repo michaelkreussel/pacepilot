@@ -57,6 +57,9 @@ domains that already provide useful deterministic behavior.
 - Established workout templates and deterministic planning methods remain the
   source of executable training content. The model interprets intent and
   explains results; it does not invent unchecked workout steps.
+- Training history, frequency, consistency, recovery, and health data inform the
+  recommendation and its warnings; they do not determine whether a supported
+  workout or training-plan draft is available.
 - Draft creation and analysis do not require confirmation. Explicit commands
   are required for accepting a revision, local scheduling, replacing an
   accepted workout, committing a plan, and publishing or pushing to Garmin.
@@ -90,6 +93,7 @@ domains that already provide useful deterministic behavior.
 | Progress tracking | **CHANGE** | The Coach compares planned work and goals with observed activities and feedback and explains evidence gaps. |
 | Structured feedback in conversation | **CHANGE** | User feedback can be recorded durably and is incorporated into later guidance and adaptations. |
 | Workout creation and modification | **CHANGE** | The Coach can create and revise deterministic draft workouts, while accepted content remains active until a replacement is explicitly confirmed. |
+| Training eligibility and health safeguards | **CHANGE** | History, frequency, load, recovery, and health signals become advice and warnings rather than hard workout/plan creation gates; genuinely severe personal-health signals require informed confirmation before a consequential same-day action. |
 | Daily adaptation | **CHANGE** | The existing keep/rest/reduce/replace assessment is available in conversation and never increases planned load. |
 | Weekly and multiweek planning | **CHANGE** | The Coach can create, explain, and revise plan drafts in conversation using the existing deterministic planners. |
 | Uncertainty and clarification | **CHANGE** | The Coach asks one focused question only when the missing answer could materially change advice; otherwise it proceeds with explicit assumptions. |
@@ -98,8 +102,9 @@ domains that already provide useful deterministic behavior.
 | Coach planning-shadow preview | **REMOVE** | The duplicate read-only weekly-plan mode and its presentation policy disappear. |
 | User-visible per-tool activity timeline | **REMOVE** | Internal tool start/finish rows and UI steps disappear; users see concise working, result, artifact, or failure states. |
 | Separate assistant-run entity | **REMOVE** | `CoachAssistantRun` and its duplicated lifecycle and reverse workout link disappear after required provenance is preserved. |
+| Persistent blocking contextual-validation runs | **REMOVE** | `WorkoutValidationRun` no longer stores reusable health-based permission; structural reports remain with revisions, while fresh fit assessments and exact acknowledgements are recorded with the consequential workout event. |
 | Unused compatibility and protocol contracts | **REMOVE** | Unused proposal APIs, analytics wrappers, aliases, and dead SSE fields disappear with their tests. |
-| Per-capability Coach rollout and development-bypass flags | **REMOVE** | The future Coach is a coherent configured capability; planner safety policy is not runtime-bypassable. |
+| Per-capability Coach rollout, hard-history-gate, and deferred-template flags | **REMOVE** | The future Coach exposes every supported format without rollout, training-frequency eligibility, or development-only availability flags. |
 
 ## KEEP Requirements
 
@@ -161,8 +166,11 @@ classifications.
 
 - Workout and plan content comes from versioned knowledge, validated formats,
   athlete context, and deterministic planning services.
-- Recent history, safety stops, quality spacing, available time, and template
-  constraints continue to bound proposal generation.
+- Registered format constraints and structural validity continue to bound
+  executable content. Recent history, training frequency, quality spacing,
+  recovery, and health affect fit, assumptions, and warnings; they do not block
+  a supported draft. An explicit time or volume budget remains an input to the
+  requested artifact, not an eligibility judgment.
 - Immutable workout, weekly-plan, and cycle revisions remain durable.
 - Draft generation is idempotent for the same command identity where retries are
   possible.
@@ -180,8 +188,31 @@ classifications.
 - Local scheduling remains an explicit command against an accepted revision and
   a displayed date. The Coach may present that command on an artifact, but it
   does not silently schedule a generated workout or plan member.
-- Only accepted, currently valid workout content can be published. Only known
-  published/calendar state can be pushed to a device.
+- Before an accept, schedule, replace, keep, publish, or push command affecting
+  today's session, command orchestration obtains a fresh versioned training-fit
+  assessment. If it reports an elevated personal-health concern, the Coach
+  clearly recommends against or changing the session and, if no matching
+  acknowledgement exists, asks whether the user still wants to proceed with
+  that exact workout revision on that date.
+- An informed acknowledgement is bound to the authenticated user, exact workout
+  revision, effective workout date, assessment policy version, and assessment
+  fingerprint. It remains usable for later explicit actions on that same
+  revision and date only while the assessment fingerprint and local calendar
+  date remain unchanged. New feedback, changed health inputs, a new revision,
+  rescheduling, or the next day requires reassessment and, when still elevated,
+  a new acknowledgement. It is recorded atomically with the first authorized
+  state transition so stale or cross-revision replay cannot authorize an
+  action.
+- The acknowledgement applies to the warned-about session, not to a particular
+  lifecycle action. Acceptance, scheduling, replacement, publication, and push
+  still each require their own normal explicit command; acknowledgement of the
+  health warning does not invoke or imply any of them.
+- The elevated signal does not prevent draft creation, silently cancel existing
+  work, or permanently prohibit the action after informed acknowledgement.
+- Only accepted, structurally valid workout content can be published. Health,
+  recovery, training history, and training-fit warnings never make an accepted
+  revision structurally invalid. Only known published/calendar state can be
+  pushed to a device.
 - Garmin operations remain serialized per account and recorded before network
   calls where needed for recovery.
 - Ambiguous external outcomes are preserved as unknown and are not blindly
@@ -254,8 +285,9 @@ provider/framework event.
 
 Each rule has one canonical owner:
 
-- template selection and contextual proposal eligibility belong to proposal or
-  planning generation;
+- template selection belongs to proposal or planning generation;
+- one planning/feedback-owned versioned policy produces training-fit assessments
+  for generation, adaptation, and fresh action-time checks;
 - structural workout validity and exact revision transitions belong to the
   workout lifecycle;
 - Garmin request/retry/reconciliation rules belong to Garmin operations; and
@@ -263,16 +295,22 @@ Each rule has one canonical owner:
   boundaries.
 
 Calling a lower-level boundary may enforce its own invariant, but the same
-contextual safety calculation or origin graph must not be rebuilt repeatedly in
-one synchronous operation.
+training-fit/warning calculation or origin graph must not be rebuilt repeatedly
+in one synchronous operation. Training-fit warnings are not recast as structural
+validation failures at a lower boundary.
 
 Transaction outcomes are explicit:
 
 1. the user message and pending assistant message are created atomically;
 2. each deterministic mutation commits its complete artifact and source link
    atomically;
-3. assistant completion or failure is one lifecycle update; and
-4. external Garmin operations retain their existing durable attempt boundary.
+3. for a local action, an elevated-warning acknowledgement and its exact
+   authorized workout transition commit atomically after a fresh assessment;
+4. for publish or push, the acknowledgement commits atomically with the durable
+   external authorization/operation attempt before the network call; the final
+   published/pushed transition is recorded separately only from the known
+   external outcome, and an ambiguous result remains unknown; and
+5. assistant completion or failure is one lifecycle update.
 
 Repositories continue to query and mutate sessions without hidden commits.
 The operation that defines an atomic outcome owns the transaction.
@@ -361,18 +399,105 @@ Coach maps only unambiguous statements to existing structured feedback fields;
 otherwise it asks one focused question or retains the statement as prose
 without inventing structured values.
 
-Stored feedback is visible in later context and invalidates affected safety or
-adaptation assessments through the existing feedback service. Existing Garmin
-versus manual feedback precedence remains deterministic.
+Stored feedback is visible in later context and invalidates affected
+training-fit/warning or adaptation assessments through the existing feedback
+service. Existing Garmin versus manual feedback precedence remains
+deterministic.
+
+### Advisory Training Safeguards
+
+Workout and plan availability must be separated from coaching judgment. Every
+registered workout format and deterministic plan generator remains available
+when the user has supplied the essential choices needed to construct a
+structurally valid artifact.
+
+The following are coaching signals, not creation eligibility gates:
+
+- fewer recent workouts, low weekly frequency, inconsistent weeks, or re-entry;
+- missing or incomplete wearable history;
+- a requested quality session close to another quality session;
+- a large change from recent duration, volume, or intensity;
+- an aggressive goal or short target horizon;
+- poor recovery, sleep, HRV, resting heart rate, stress, or Body Battery; and
+- subjective fatigue, poor feel, pain, or illness feedback.
+
+These signals may change the recommended workout or plan, reduce confidence,
+produce a prominent warning, or cause the Coach to propose a more conservative
+alternative. They must not prevent the requested supported draft from being
+created. In particular, no minimum based on population medians, twice-weekly
+training, a fixed number of consistent weeks, or complete Garmin history may be
+required to unlock a workout format or plan.
+
+Warnings have three simple outcomes:
+
+1. **Normal:** create the requested draft and explain its fit.
+2. **Caution:** create the requested draft, explain why the data suggests it may
+   be a poor fit, and offer a safer or more useful alternative.
+3. **Elevated personal-health concern:** create the draft, clearly recommend
+   changing or skipping the same-day session, identify the dated personal
+   signals behind the concern, and require an explicit informed confirmation
+   before accepting, scheduling, replacing, keeping, publishing, or pushing
+   that session.
+
+The three outcomes come from one deterministic, versioned training-fit policy,
+not model discretion. Its typed result contains the outcome, policy version,
+evaluation time and effective workout date, warning codes, dated evidence and
+coverage, feedback IDs, and a fingerprint of all authoritative inputs. Proposal,
+plan, adaptation, and action-time checks consume this same result.
+
+An elevated concern is limited to:
+
+- explicit current feedback for fever, systemic illness, cardiopulmonary warning
+  signs, or pain that alters gait; or
+- at least two independent health/recovery signals no older than two calendar
+  days that each cross a severe metric-specific deviation from a sufficiently
+  sampled personal baseline under the versioned policy.
+
+Exact metric thresholds and minimum baseline samples live in the versioned
+policy/knowledge constraints and are test fixtures. A single low readiness
+score, one anomalous metric, ordinary poor recovery, mild illness, missing data,
+low training frequency, or comparison with another athlete produces at most
+**Caution**. Unclear illness or pain triggers one focused question; if the user
+does not add detail, the supported draft remains available with a warning, and
+a potentially serious same-day action uses informed acknowledgement rather than
+a refusal. The Coach does not diagnose a medical condition.
+
+Existing contextual `SAFETY_STOP` results become **Elevated** assessments, not
+invalid workouts. Existing health/feedback `CLARIFY` results ask the focused
+question described above but do not suppress a draft when the user declines to
+answer. Proposal creation, plan generation, adaptation choices, acceptance,
+scheduling, publication, and push must not convert either outcome into a
+structural-invalid flag. Structural validation remains a separate result.
+
+Representability and essential inputs are deliberately narrow:
+
+- a single workout needs a registered format, an effective date, and a positive
+  duration/volume supported by that format or explicit permission to use its
+  documented default;
+- a weekly plan needs a start week and at least one persisted or supplied
+  availability slot; an active goal is optional;
+- a multiweek plan needs start and target dates in chronological order, at least
+  one recurring availability slot, and either a goal or an explicit general
+  training purpose; and
+- every artifact must satisfy its executable schema, ownership, and lifecycle
+  invariants.
+
+Creation may stop only when one of those inputs remains materially ambiguous
+after one focused question, the requested format is unsupported, chronology or
+the executable structure is invalid, or ownership/lifecycle invariants fail.
+Representability never includes training frequency, history depth, consistency,
+quality density or spacing, load progression, recovery, health, or target
+aggressiveness. The Coach explains the exact missing or unsupported choice and
+offers the nearest supported path.
 
 ### Workout Creation And Modification
 
 The Coach can:
 
-- create a dated, time-bounded running workout draft from supported training
-  formats;
+- create a dated, time-bounded running workout draft from every registered
+  training format regardless of recent training frequency or history depth;
 - explain why the selected session fits the athlete's goal, plan, recovery, and
-  recent training;
+  recent training, or why it is not currently recommended;
 - revise an existing draft within the parameters supported by its format;
 - request deterministic replacement or reduction of an accepted workout; and
 - show the resulting revision and validation state as an artifact.
@@ -380,34 +505,48 @@ The Coach can:
 The model chooses intent and bounded parameters. Deterministic planning expands
 the workout definition and validates it; the workout lifecycle persists the
 resulting draft or revision. Unsupported edits are explained rather than
-translated into arbitrary steps. Draft creation and draft editing need no
-confirmation. Replacing an accepted revision requires explicit confirmation.
-Scheduling an accepted revision requires an explicit date-bearing command;
-publishing and pushing remain separate explicit actions.
+translated into arbitrary steps. A requested but poorly fitting supported
+workout is still created with its warning and must not be silently replaced by
+the Coach's preferred alternative. Draft creation and draft editing need no
+confirmation. Replacing an accepted revision requires explicit confirmation;
+an elevated same-day health warning also requires acknowledgement. Scheduling
+an accepted revision requires an explicit date-bearing command; publishing and
+pushing remain separate explicit actions.
 
 ### Daily Adaptation
 
-For today's eligible accepted and scheduled running workout, the Coach can
+For today's user-owned accepted and scheduled running workout, the Coach can
 invoke the deterministic assessment and explain keep, rest, reduce-volume, or
-easy-replacement outcomes. The operation:
+easy-replacement outcomes. Health and history do not remove these choices. The
+operation:
 
 - uses the same request-scoped date and current feedback context as the answer;
-- never increases target, volume, or weekly load;
-- creates no executable candidate when clarification is required;
+- never increases target, volume, or weekly load as an automatic adaptation;
+  the user may separately request a more demanding supported draft;
+- creates no executable candidate only when the requested adaptation action or
+  an essential structural input is ambiguous; health/feedback uncertainty asks
+  one question but leaves the choices available with the applicable warning;
 - leaves changed or replacement content unaccepted until explicit user action;
-  and
+- keeps the current session available under an elevated health warning after
+  explicit informed confirmation rather than forcing rest; and
 - preserves current Garmin reconciliation and unknown-state safeguards.
 
 ### Weekly And Multiweek Plans
 
 The Coach can generate and explain weekly and multiweek draft plans from the
-active goal, profile, availability, history, and current state. Draft generation
+active goal or requested purpose, profile, availability, history, and current
+state. Once the essential dates, purpose where required, and availability
+choices are known, sparse history, low frequency, incomplete wearable data, an
+aggressive target, or re-entry status does not block a draft. Draft generation
 is direct and does not require a separate preview screen or AI review pass.
 
 The user can request bounded revisions through the same conversation. The
-deterministic planner remains authoritative for phase progression, taper,
-quality density, re-entry behavior, interruptions, target boundaries, and
-workout membership. Accepting a plan or cycle is explicit. Child workouts retain
+deterministic planner uses phase progression, taper, quality density, re-entry
+behavior, interruptions, and target boundaries to produce its recommended
+composition. Those methods generate warnings and alternatives rather than
+rejecting a representable user-requested plan solely because it exceeds the
+recommendation. Workout membership and structural plan validity remain
+deterministic. Accepting a plan or cycle is explicit. Child workouts retain
 their independent acceptance and Garmin lifecycle.
 
 ### Uncertainty And Refusal
@@ -417,13 +556,16 @@ The Coach distinguishes three outcomes:
 1. proceed and state a non-material assumption;
 2. ask one focused question because the answer could materially change advice
    or executable content; or
-3. stop a specific unsafe or invalid operation and explain the concrete reason.
+3. stop a structurally invalid, unauthorized, or invalid external operation and
+   explain the concrete reason.
 
 It does not use broad refusals for ordinary training questions, ask several
 questions when one would unblock progress, or run a second model review to
 simulate reliability. Medical emergencies and symptoms outside training advice
 may still receive a concise appropriate boundary; that boundary must not grow
-into a general-purpose safety framework.
+into a general-purpose safety framework. A workout or plan that is possible but
+not recommended receives a warning under the advisory policy; it is not treated
+as an invalid operation.
 
 ### Date, Concurrency, And Failures
 
@@ -498,6 +640,31 @@ Existing conversations, completed messages, workouts, revisions, generation
 metadata, plans, and Garmin state must survive. Per-tool telemetry may be
 discarded as specified above.
 
+### Blocking Contextual Validation Runs
+
+Remove `WorkoutValidationRun` as reusable permission for acceptance,
+scheduling, adaptation, publication, or push. Remove its model/table,
+relationships, repository and cache lookups, feedback invalidation updates,
+observability queries, account export/deletion enumeration, and tests that treat
+health or training context as a durable `valid = false` state.
+
+Structural validation reports remain on immutable workout revisions and are
+rechecked where required by lifecycle invariants. Training fit is assessed
+fresh under the versioned advisory policy. When an elevated warning is
+acknowledged, the existing local workout event or durable Garmin
+operation/attempt record, as appropriate, stores the policy version, assessment
+fingerprint, exact revision/date, and acknowledgement without creating another
+reusable validation entity. A failed or unknown external result retains this
+authorization record but does not claim publication or push succeeded.
+
+A forward Alembic migration drops `workout_validation_runs`. Its historical
+rows require no backfill and may be discarded because they are neither workout
+content nor accepted-revision authority. Existing revisions,
+`validation_report_json`, accepted state, workout events, and Garmin operation
+state must remain. After migration, delayed Garmin commands use structural and
+lifecycle validity plus the fresh action-time warning contract; they never use
+an old contextual `valid` value.
+
 ### Compatibility And Dead Contracts
 
 Remove these internal and same-application compatibility contracts:
@@ -521,15 +688,21 @@ Remove the future-state use of:
 - separate proposal, daily-adaptation, plan-generation, and generated-Garmin
   Coach flags;
 - the Coach rollout-user allowlist;
-- history-gate bypasses and deferred-template development overrides.
+- hard recent-history, frequency, consistent-week, and quality-spacing
+  eligibility rejections and `COACH_PLANNER_HISTORY_GATES_ENABLED`; and
+- deferred quality-template availability checks and
+  `COACH_DEFERRED_QUALITY_TEMPLATES_ENABLED`.
 
 Remove related settings, environment examples, Compose forwarding,
-Coach-prefixed feature helpers, template checks, and tests. Provider credentials
-and operational kill switches for an actual external-service incident are not
-capability rollout flags and may remain where they have a concrete operational
-owner. No database migration is required. Removed environment variables have no
-effect and receive no compatibility parser; deployment configuration and
-documentation must delete them before deployment.
+Coach-prefixed feature helpers, template checks, hard-gate error paths, and
+tests that require rejection based only on training history or spacing. The
+same signals remain as warning inputs under **CHANGE**; they are not discarded.
+Provider credentials and operational kill switches for an actual
+external-service incident are not capability rollout flags and may remain where
+they have a concrete operational owner. No database migration is required.
+Removed environment variables have no effect and receive no compatibility
+parser; deployment configuration and documentation must delete them before
+deployment.
 
 ## Desired Responsibilities And Module Boundaries
 
@@ -562,8 +735,8 @@ Dependencies do not point back upward. In particular:
 | Coach conversation execution | Bounded prose history, relevant operation selection, provider call, local event translation, assistant completion/failure | Durable athlete facts, workout definitions, plan algorithms, external mutation rules |
 | Coach provider adapter | OpenRouter/LangChain construction, prompt, framework event decoding, timeout/model limits | HTTP, database transactions, domain validation, presentation labels |
 | Analytics | User/date-scoped recovery, health, activity, training, feedback, upcoming-workout, and progress read models | Recommendations, mutations, provider schemas, UI rendering |
-| Planning and feedback | Goals/profile/availability commands, feedback commands, deterministic workout candidates, adaptation, weekly and cycle generation | Conversation lifecycle, workout revision persistence or transitions, provider behavior, Garmin transport |
-| Workout lifecycle | Immutable revisions, structural validity, exact acceptance, scheduling, replacement, lifecycle state, artifact events | Coach runs, prompt provenance policy, Garmin client details |
+| Planning and feedback | Goals/profile/availability commands, feedback commands, deterministic workout candidates, training-fit warnings, adaptation, weekly and cycle generation | Conversation lifecycle, workout revision persistence or transitions, provider behavior, Garmin transport |
+| Workout lifecycle | Immutable revisions, structural validity, exact acceptance, scheduling, replacement, required warning acknowledgement, lifecycle state, artifact events | Training-fit calculations, Coach runs, prompt provenance policy, Garmin client details |
 | Garmin operations | Publication, calendar/device operations, serialization, attempts, uncertain outcomes, reconciliation | Whether model prose implies consent, plan generation, conversation state |
 | Repositories | User-scoped query and persistence primitives, eager-loading contracts needed by callers | Commits, provider calls, cross-capability orchestration, presentation |
 
@@ -598,9 +771,16 @@ Database and filesystem account cleanup remain coordinated.
 - The default Coach surface is conversation, not a dashboard of forms or modes.
 - Relevant goal, feedback, workout, adaptation, and plan results appear as
   concise server-owned artifacts embedded in the conversation.
+- Workout and plan artifacts show advisory warnings with the dated personal
+  evidence, data coverage, recommendation, and alternative. A warning does not
+  hide or disable draft creation.
 - Artifact controls state the exact action and consequence. Acceptance,
   scheduling, replacement, publication, and push are never hidden behind a
   generic confirmation.
+- An elevated same-day health warning has a distinct acknowledgement control
+  that asks whether the user still wants to proceed with the exact revision on
+  that date. It is separate from the explicit lifecycle-action control and is
+  not represented as a disabled button or an unavoidable refusal.
 - The UI distinguishes advice, draft, accepted, published, pushed, failed, and
   incomplete states without reconstructing status from several raw flags in
   JavaScript.
@@ -651,13 +831,48 @@ boundaries rather than private LangGraph shapes or decorated tool internals.
 - Demonstrate conversational goal/profile updates, structured feedback,
   workout draft/revision, daily adaptation, and weekly/cycle draft generation
   through deterministic services.
+- Demonstrate that every registered workout format can produce a draft with
+  sparse history, fewer than two weekly sessions, inconsistent weeks, or close
+  quality-session spacing, while returning the relevant warning.
+- Demonstrate that weekly and multiweek drafts remain available with sparse or
+  incomplete wearable history, re-entry, and aggressive but representable
+  goals, while clearly stating confidence, assumptions, and poor fit.
+- Demonstrate that severe recent personal-health deviations and explicit serious
+  feedback do not block draft creation, but do require informed acknowledgement
+  before accepting, scheduling, replacing, or keeping the affected same-day
+  workout. Normal or missing data must not trigger that acknowledgement.
+- Demonstrate that ordinary poor recovery, one anomalous metric, mild illness,
+  and a single low readiness score produce **Caution**, not **Elevated**, for
+  both workouts and plans. Future-dated workouts do not use today's health as a
+  same-day confirmation gate.
+- Demonstrate action-time reassessment after health or feedback changes, and
+  reject stale, cross-user, cross-revision, cross-date, policy-version, or
+  fingerprint-mismatched acknowledgements. A matching acknowledgement may be
+  reused only for the same revision/date while inputs and the local date remain
+  unchanged.
+- Demonstrate that keep, reduce, replace, and rest adaptation choices remain
+  available under former `SAFETY_STOP`/health `CLARIFY` inputs and that an
+  elevated keep/replacement follows the informed-confirmation contract.
+- Demonstrate that delayed same-day publish or push refreshes the assessment,
+  requests acknowledgement when newly elevated, and proceeds after a matching
+  acknowledgement without changing structural validity. A provider failure or
+  unknown result retains the durable authorization/attempt but does not record a
+  successful published/pushed transition.
+- Demonstrate that missing essential user choices, unsupported formats,
+  structurally invalid content, ownership violations, and invalid lifecycle
+  transitions remain blocked with a specific explanation.
 - Demonstrate that draft prose cannot accept, schedule, replace, publish, or
   push and that explicit actions target the exact artifact revision and, for
   scheduling, the displayed date.
-- Preserve deterministic planner, adaptation, workout lifecycle, and Garmin
-  unknown-outcome tests.
-- Add migration coverage proving conversation/artifact preservation while run
-  and tool-call tables and redundant origins are removed.
+- Preserve deterministic planner composition, adaptation load limits, workout
+  lifecycle, and Garmin unknown-outcome tests. Replace tests whose asserted
+  outcome is rejection solely because of history, frequency, consistency,
+  quality spacing, recovery, or health data; those tests must assert warning and
+  artifact availability instead.
+- Add migration coverage proving conversation/artifact preservation while run,
+  tool-call, and contextual-validation tables and redundant origins are removed;
+  accepted revisions, immutable structural reports, workout events, and Garmin
+  state must survive.
 - Exercise the browser SSE parser and artifact rendering behavior rather than
   asserting JavaScript source substrings.
 
@@ -677,6 +892,7 @@ uv run pytest tests/test_training_agent.py
 uv run pytest tests/test_workout_proposals.py
 uv run pytest tests/test_daily_adaptation.py
 uv run pytest tests/test_weekly_plan_service.py tests/test_multiweek_planner.py
+uv run pytest tests/test_feedback.py tests/test_workout_service.py
 
 # Required for model or migration changes
 uv run pytest tests/test_migrations.py
@@ -707,6 +923,8 @@ npm run build:css
 
 - Adding a dependency, process, service, database, queue, or frontend framework.
 - Weakening explicit confirmation for accepted content or external actions.
+- Removing informed acknowledgement for an elevated same-day personal-health
+  warning or turning advisory training-fit signals back into creation gates.
 - Making the Coach autonomous or background initiated.
 - Deleting durable athlete, feedback, workout, plan, or conversation content.
 - Expanding executable workout generation beyond deterministic supported
@@ -715,10 +933,14 @@ npm run build:css
 ### Never
 
 - Treat model prose as authorization for a consequential action.
-- Send unaccepted or invalid content to Garmin.
+- Send unaccepted or structurally invalid content to Garmin.
 - Let model-visible input choose user identity, database/session access, request
   identity, artifact ownership, or the authoritative coaching date.
 - Fabricate missing data, progress, completion, or Garmin metrics.
+- Block a supported workout or plan draft solely because of training frequency,
+  history depth, consistency, quality spacing, recovery, wearable coverage, or
+  comparison with population norms.
+- Treat missing health data as evidence of danger or an elevated warning.
 - Add orchestration layers to preserve obsolete internal APIs or duplicate UI
   workflows.
 - Require live external credentials in automated tests.
@@ -736,6 +958,17 @@ The future state satisfies this specification when:
 - changed durable context is used in later guidance without requiring the user
   to repeat it;
 - recommendations expose material evidence, uncertainty, and assumptions;
+- every supported workout format and representable plan remains draftable
+  regardless of training frequency or history depth, with poor fit expressed as
+  advice, warnings, confidence, and alternatives rather than refusal;
+- genuinely severe personal-health signals produce a clear recommendation and
+  informed same-day action confirmation without preventing draft creation;
+- one versioned deterministic policy separates ordinary caution from elevated
+  concern using personal, dated, adequately covered evidence rather than model
+  discretion or population norms;
+- consequential same-day actions refresh that assessment and accept only an
+  acknowledgement bound to the exact user, revision, date, policy version, and
+  unchanged assessment fingerprint;
 - draft generation is direct while exact-revision acceptance, local scheduling,
   and Garmin actions remain explicit;
 - only one response can execute per conversation and failure states are durable,
@@ -743,8 +976,9 @@ The future state satisfies this specification when:
 - Coach routes contain HTTP concerns, provider details stay in one adapter, and
   analytics/planning/workout/Garmin packages do not depend on Coach
   implementation details;
-- `CoachAssistantRun`, `CoachToolCall`, duplicate proposal entry points, planning
-  shadow, dead contracts, and permanent per-capability rollout policy are gone;
+- `CoachAssistantRun`, `CoachToolCall`, `WorkoutValidationRun`, hard history and
+  contextual safety gates, duplicate proposal entry points, planning shadow,
+  dead contracts, and permanent per-capability rollout policy are gone;
 - existing conversations and all durable athlete, feedback, workout, plan, and
   Garmin state survive required migrations; and
 - focused behavioral tests and the full project verification commands pass.
@@ -759,6 +993,9 @@ The future state satisfies this specification when:
 - Replacing deterministic analytics with model calculations.
 - Adding a model self-review/revision loop or generic refusal framework without
   a concrete risk boundary.
+- Removing structural validation, ownership checks, exact-revision acceptance,
+  or Garmin lifecycle safeguards in the name of making training content
+  available.
 - Preserving private Python APIs, exact framework events, current route layout,
   or current UI steps for compatibility alone.
 - Solving detailed sleep-stage timezone presentation or introducing per-user
