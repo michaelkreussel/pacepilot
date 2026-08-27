@@ -1,24 +1,38 @@
+from collections.abc import Callable
 from typing import Annotated
 
 from fastapi import Depends
 
 from app.auth import CurrentUser
-from app.config import coach_feature_enabled, get_settings
+from app.config import coach_feature_enabled, coach_provider_configured, get_settings
 from app.services.coach.agent import CoachAgent, LangChainCoachAgent
 
+CoachProviderConfiguredDep = Annotated[bool, Depends(coach_provider_configured)]
+CoachAgentFactory = Callable[[], CoachAgent]
 
-def get_coach_agent(user: CurrentUser) -> CoachAgent | None:
+
+def get_coach_agent_factory(
+    user: CurrentUser, configured: CoachProviderConfiguredDep
+) -> CoachAgentFactory | None:
     settings = get_settings()
-    if not settings.llm_api_key or not settings.llm_model:
+    api_key = settings.llm_api_key
+    model_id = settings.llm_model
+    if not configured or not api_key or not model_id:
         return None
-    return LangChainCoachAgent(
-        api_key=settings.llm_api_key,
-        model_id=settings.llm_model,
-        timeout_seconds=settings.llm_timeout_seconds,
-        workout_proposals_enabled=coach_feature_enabled(
-            settings.coach_workout_proposals_enabled, user.id
-        ),
+    timeout_seconds = settings.llm_timeout_seconds
+    workout_proposals_enabled = coach_feature_enabled(
+        settings.coach_workout_proposals_enabled, user.id
     )
 
+    def create_agent() -> CoachAgent:
+        return LangChainCoachAgent(
+            api_key=api_key,
+            model_id=model_id,
+            timeout_seconds=timeout_seconds,
+            workout_proposals_enabled=workout_proposals_enabled,
+        )
 
-CoachAgentDep = Annotated[CoachAgent | None, Depends(get_coach_agent)]
+    return create_agent
+
+
+CoachAgentFactoryDep = Annotated[CoachAgentFactory | None, Depends(get_coach_agent_factory)]

@@ -11,7 +11,7 @@ from app.models import CoachConversation, CoachMessage
 from app.models.user import utcnow
 from app.services.coach.agent import CoachEvent
 from app.services.coach.conversation import CoachHistoryMessage, CoachRuntimeContext
-from app.services.coach.dependencies import get_coach_agent
+from app.services.coach.dependencies import get_coach_agent_factory
 
 
 class RecordingCoachAgent:
@@ -38,7 +38,7 @@ def test_follow_up_uses_only_the_latest_twenty_completed_messages(
     client: TestClient, session_factory: sessionmaker[Session]
 ) -> None:
     agent = RecordingCoachAgent()
-    app.dependency_overrides[get_coach_agent] = lambda: agent
+    app.dependency_overrides[get_coach_agent_factory] = lambda: lambda: agent
     conversation_id = _new_chat(client)
     with session_factory() as session:
         conversation = session.get(CoachConversation, conversation_id)
@@ -77,7 +77,7 @@ def test_incomplete_assistant_answer_is_excluded_from_follow_up_history(
     status: str,
 ) -> None:
     agent = RecordingCoachAgent()
-    app.dependency_overrides[get_coach_agent] = lambda: agent
+    app.dependency_overrides[get_coach_agent_factory] = lambda: lambda: agent
     conversation_id = _new_chat(client)
     with session_factory() as session:
         conversation = session.get(CoachConversation, conversation_id)
@@ -118,7 +118,7 @@ def test_follow_up_limits_prior_history_to_twelve_thousand_characters(
     client: TestClient, session_factory: sessionmaker[Session]
 ) -> None:
     agent = RecordingCoachAgent()
-    app.dependency_overrides[get_coach_agent] = lambda: agent
+    app.dependency_overrides[get_coach_agent_factory] = lambda: lambda: agent
     conversation_id = _new_chat(client)
     oldest = "A" * 5000
     middle = "B" * 5000
@@ -173,7 +173,7 @@ def test_active_response_rejects_another_message(
     client: TestClient, session_factory: sessionmaker[Session]
 ) -> None:
     agent = RecordingCoachAgent()
-    app.dependency_overrides[get_coach_agent] = lambda: agent
+    app.dependency_overrides[get_coach_agent_factory] = lambda: lambda: agent
     conversation_id = _new_chat(client)
     with session_factory() as session:
         conversation = session.get(CoachConversation, conversation_id)
@@ -209,7 +209,7 @@ def test_stale_response_is_interrupted_before_the_next_message(
     client: TestClient, session_factory: sessionmaker[Session]
 ) -> None:
     agent = RecordingCoachAgent()
-    app.dependency_overrides[get_coach_agent] = lambda: agent
+    app.dependency_overrides[get_coach_agent_factory] = lambda: lambda: agent
     conversation_id = _new_chat(client)
     with session_factory() as session:
         conversation = session.get(CoachConversation, conversation_id)
@@ -266,7 +266,7 @@ def test_partial_stream_failure_is_not_persisted_or_reused_as_history(
             raise RuntimeError("provider failed after partial answer")
 
     failing = FailingAfterAnswerAgent()
-    app.dependency_overrides[get_coach_agent] = lambda: failing
+    app.dependency_overrides[get_coach_agent_factory] = lambda: lambda: failing
     conversation_id = _new_chat(client)
 
     with pytest.raises(RuntimeError, match="provider failed after partial answer"):
@@ -295,7 +295,7 @@ def test_partial_stream_failure_is_not_persisted_or_reused_as_history(
     assert "Unfinished private answer" not in reloaded.text
 
     succeeding = RecordingCoachAgent()
-    app.dependency_overrides[get_coach_agent] = lambda: succeeding
+    app.dependency_overrides[get_coach_agent_factory] = lambda: lambda: succeeding
     follow_up = client.post(
         f"/coach/{conversation_id}/messages",
         data={"message": "follow-up-question"},
@@ -312,7 +312,7 @@ def test_completed_answer_is_persisted_and_visible_after_reload(
     client: TestClient, session_factory: sessionmaker[Session]
 ) -> None:
     agent = RecordingCoachAgent()
-    app.dependency_overrides[get_coach_agent] = lambda: agent
+    app.dependency_overrides[get_coach_agent_factory] = lambda: lambda: agent
     conversation_id = _new_chat(client)
 
     response = client.post(

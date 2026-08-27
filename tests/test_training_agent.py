@@ -33,12 +33,13 @@ from app.models import (
 )
 from app.models.user import utcnow
 from app.services.coach import agent as coach_agent_module
+from app.services.coach import dependencies as coach_dependencies_module
 from app.services.coach.agent import (
     CoachEvent,
     LangChainCoachAgent,
 )
 from app.services.coach.conversation import CoachHistoryMessage, CoachRuntimeContext
-from app.services.coach.dependencies import get_coach_agent
+from app.services.coach.dependencies import get_coach_agent_factory
 from app.services.coach.tools import (
     coach_tools,
     create_running_workout_proposal,
@@ -286,7 +287,7 @@ def test_coach_streams_and_persists_conversation(
 ) -> None:
     monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", False)
     fake = FakeCoachAgent()
-    app.dependency_overrides[get_coach_agent] = lambda: fake
+    app.dependency_overrides[get_coach_agent_factory] = lambda: lambda: fake
     conversation_id = _new_chat(client)
 
     response = client.post(
@@ -398,7 +399,7 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
             yield CoachEvent("answer_delta", text="Ich habe einen Vorschlag vorbereitet.")
 
     fake = ProposalAgent()
-    app.dependency_overrides[get_coach_agent] = lambda: fake
+    app.dependency_overrides[get_coach_agent_factory] = lambda: lambda: fake
     with session_factory() as session:
         user = session.scalar(select(User))
         assert user is not None
@@ -549,7 +550,7 @@ def test_invalid_proposal_date_returns_completed_stream_without_artifact(
                 text="Das Datum liegt in der Vergangenheit. Welches zukünftige Datum meinst du?",
             )
 
-    app.dependency_overrides[get_coach_agent] = lambda: InvalidDateAgent()
+    app.dependency_overrides[get_coach_agent_factory] = lambda: lambda: InvalidDateAgent()
     conversation_id = _new_chat(client)
 
     response = client.post(
@@ -630,7 +631,7 @@ def test_proposal_survives_provider_failure_after_commit(
         _running_history(session, user.id)
         session.commit()
 
-    app.dependency_overrides[get_coach_agent] = lambda: FailingAfterProposalAgent()
+    app.dependency_overrides[get_coach_agent_factory] = lambda: lambda: FailingAfterProposalAgent()
     conversation_id = _new_chat(client)
     with pytest.raises(RuntimeError, match="provider failed after proposal"):
         client.post(
@@ -665,7 +666,7 @@ def test_proposal_survives_provider_failure_after_commit(
 
 def test_follow_up_includes_bounded_conversation_history(client: TestClient) -> None:
     fake = FakeCoachAgent()
-    app.dependency_overrides[get_coach_agent] = lambda: fake
+    app.dependency_overrides[get_coach_agent_factory] = lambda: lambda: fake
     conversation_id = _new_chat(client)
 
     first = client.post(
@@ -690,7 +691,7 @@ def test_follow_up_includes_bounded_conversation_history(client: TestClient) -> 
 
 
 def test_coach_requires_configured_backend(client: TestClient) -> None:
-    app.dependency_overrides[get_coach_agent] = lambda: None
+    app.dependency_overrides[get_coach_agent_factory] = lambda: None
     conversation_id = _new_chat(client)
 
     response = client.post(
@@ -700,6 +701,75 @@ def test_coach_requires_configured_backend(client: TestClient) -> None:
 
     assert response.status_code == 503
     assert response.json()["detail"].startswith("Konfiguriere zuerst OpenRouter")
+
+
+def test_provider_is_constructed_only_for_an_accepted_answer(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "llm_api_key", "test-key")
+    monkeypatch.setattr(settings, "llm_model", "test-model")
+    constructed_agents: list[FakeCoachAgent] = []
+
+    def build_agent(**_: object) -> FakeCoachAgent:
+        agent = FakeCoachAgent()
+        constructed_agents.append(agent)
+        return agent
+
+    monkeypatch.setattr(coach_dependencies_module, "LangChainCoachAgent", build_agent)
+    assert client.get("/coach").status_code == 200
+    conversation_id = _new_chat(client)
+    assert client.get(f"/coach/{conversation_id}").status_code == 200
+    assert constructed_agents == []
+
+    missing = client.post(
+        "/coach/999/messages",
+        data={"message": "Wie erholt bin ich?"},
+    )
+    assert missing.status_code == 404
+    assert constructed_agents == []
+
+    accepted = client.post(
+        f"/coach/{conversation_id}/messages",
+        data={"message": "Wie erholt bin ich?"},
+    )
+    assert accepted.status_code == 200
+    assert len(constructed_agents) == 1
+
+
+def test_provider_construction_failure_marks_claimed_answer_failed(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "llm_api_key", "test-key")
+    monkeypatch.setattr(settings, "llm_model", "test-model")
+
+    def fail_construction(**_: object) -> None:
+        raise RuntimeError("provider construction failed")
+
+    monkeypatch.setattr(coach_dependencies_module, "LangChainCoachAgent", fail_construction)
+    conversation_id = _new_chat(client)
+
+    with pytest.raises(RuntimeError, match="provider construction failed"):
+        client.post(
+            f"/coach/{conversation_id}/messages",
+            data={"message": "Wie erholt bin ich?"},
+        )
+
+    with session_factory() as session:
+        messages = list(
+            session.scalars(
+                select(CoachMessage)
+                .where(CoachMessage.conversation_id == conversation_id)
+                .order_by(CoachMessage.id)
+            )
+        )
+        assert [(message.role, message.status) for message in messages] == [
+            ("user", "completed"),
+            ("assistant", "failed"),
+        ]
 
 
 def test_conversations_are_user_scoped(

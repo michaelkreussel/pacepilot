@@ -36,7 +36,6 @@ from app.repositories.coach import (
     start_tool_call,
 )
 from app.services.coach.agent import (
-    CoachAgent,
     CoachEvent,
 )
 from app.services.coach.conversation import (
@@ -44,7 +43,11 @@ from app.services.coach.conversation import (
     CoachRuntimeContext,
     prepare_execution,
 )
-from app.services.coach.dependencies import CoachAgentDep
+from app.services.coach.dependencies import (
+    CoachAgentFactory,
+    CoachAgentFactoryDep,
+    CoachProviderConfiguredDep,
+)
 from app.services.planning.weekly_planner import (
     WeeklyPlanCandidate,
     WeeklyPlannerError,
@@ -171,7 +174,7 @@ def _render_coach(
     request: Request,
     session: Session,
     user: CurrentUser,
-    agent: object | None,
+    configured: bool,
     conversation_id: int | None,
     *,
     proposal_error: str | None = None,
@@ -201,7 +204,7 @@ def _render_coach(
         context(
             request,
             active_page="coach",
-            configured=agent is not None,
+            configured=configured,
             model=settings.llm_model,
             conversations=conversations,
             conversation=selected,
@@ -228,9 +231,12 @@ def _render_coach(
 
 @router.get("", response_class=HTMLResponse)
 def coach(
-    request: Request, session: SessionDep, agent: CoachAgentDep, user: CurrentUser
+    request: Request,
+    session: SessionDep,
+    configured: CoachProviderConfiguredDep,
+    user: CurrentUser,
 ) -> HTMLResponse:
-    return _render_coach(request, session, user, agent, None)
+    return _render_coach(request, session, user, configured, None)
 
 
 WEEKDAY_LABELS = (
@@ -444,10 +450,10 @@ def coach_conversation(
     conversation_id: int,
     request: Request,
     session: SessionDep,
-    agent: CoachAgentDep,
+    configured: CoachProviderConfiguredDep,
     user: CurrentUser,
 ) -> HTMLResponse:
-    return _render_coach(request, session, user, agent, conversation_id)
+    return _render_coach(request, session, user, configured, conversation_id)
 
 
 @router.post("/conversations")
@@ -481,7 +487,7 @@ async def create_running_proposal(
     request: Request,
     session: SessionDep,
     user: CurrentUser,
-    agent: CoachAgentDep,
+    configured: CoachProviderConfiguredDep,
 ) -> Response:
     form = await request.form()
     proposal_date = str(form.get("suggested_for", ""))
@@ -515,7 +521,7 @@ async def create_running_proposal(
         request,
         session,
         user,
-        agent,
+        configured,
         None,
         proposal_error=error,
         proposal_date=proposal_date,
@@ -610,7 +616,7 @@ def _proposal_event_payload(runtime: CoachRuntimeContext) -> dict[str, object]:
 async def _stream_answer(
     *,
     request: Request,
-    agent: CoachAgent,
+    agent_factory: CoachAgentFactory,
     history: Sequence[CoachHistoryMessage],
     runtime: CoachRuntimeContext,
     assistant_message_id: int,
@@ -631,6 +637,7 @@ async def _stream_answer(
         {"message_id": assistant_message_id, "run_id": runtime.assistant_run_id},
     )
     try:
+        agent = agent_factory()
         async for event in agent.stream(history, runtime):
             if await request.is_disconnected():
                 raise asyncio.CancelledError
@@ -703,7 +710,7 @@ async def ask_coach(
     conversation_id: int,
     request: Request,
     session: SessionDep,
-    agent: CoachAgentDep,
+    agent_factory: CoachAgentFactoryDep,
     user: CurrentUser,
     message: Annotated[str, Form(max_length=4000)],
 ) -> StreamingResponse:
@@ -714,7 +721,7 @@ async def ask_coach(
     conversation = find_conversation(session, user.id, conversation_id)
     if conversation is None:
         raise HTTPException(status_code=404, detail="Chat nicht gefunden")
-    if agent is None:
+    if agent_factory is None:
         raise HTTPException(
             status_code=503,
             detail="Konfiguriere zuerst OpenRouter, bevor du den Coach fragst.",
@@ -738,7 +745,7 @@ async def ask_coach(
     return StreamingResponse(
         _stream_answer(
             request=request,
-            agent=agent,
+            agent_factory=agent_factory,
             history=execution.history,
             runtime=execution.runtime,
             assistant_message_id=execution.assistant_message_id,

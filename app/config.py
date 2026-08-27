@@ -95,6 +95,11 @@ def get_settings() -> Settings:
     return Settings()
 
 
+def coach_provider_configured() -> bool:
+    settings = get_settings()
+    return bool(settings.llm_api_key and settings.llm_model)
+
+
 DEFERRED_QUALITY_TEMPLATE_IDS = frozenset({"threshold_cruise", "vo2_intervals"})
 
 

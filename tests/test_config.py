@@ -3,7 +3,7 @@ from typing import Literal
 import pytest
 from pydantic import ValidationError
 
-from app.config import Settings, coach_feature_enabled, get_settings
+from app.config import Settings, coach_feature_enabled, coach_provider_configured, get_settings
 
 
 def test_production_requires_secure_session_configuration() -> None:
@@ -30,6 +30,28 @@ def test_coach_workout_features_default_to_disabled() -> None:
     assert settings.coach_plan_generation_enabled is False
     assert settings.coach_planner_history_gates_enabled is True
     assert settings.coach_deferred_quality_templates_enabled is False
+
+
+@pytest.mark.parametrize(
+    ("api_key", "model", "expected"),
+    (
+        (None, "", False),
+        ("test-key", "", False),
+        (None, "test-model", False),
+        ("test-key", "test-model", True),
+    ),
+)
+def test_coach_provider_requires_credentials_and_model(
+    monkeypatch: pytest.MonkeyPatch,
+    api_key: str | None,
+    model: str,
+    expected: bool,
+) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "llm_api_key", api_key)
+    monkeypatch.setattr(settings, "llm_model", model)
+
+    assert coach_provider_configured() is expected
 
 
 def test_coach_workout_features_require_proposals() -> None:
