@@ -32,6 +32,7 @@ from app.models import (
     WorkoutEvent,
 )
 from app.models.user import utcnow
+from app.services.analytics.health_trends import HEALTH_METRICS
 from app.services.coach import agent as coach_agent_module
 from app.services.coach import dependencies as coach_dependencies_module
 from app.services.coach.agent import (
@@ -44,8 +45,10 @@ from app.services.coach.tools import (
     coach_tools,
     create_running_workout_proposal,
     get_health_day,
+    get_health_trends,
     get_subjective_context,
 )
+from app.services.planning.registry import WORKOUT_FORMAT_IDS
 
 
 class FakeCoachAgent:
@@ -585,6 +588,14 @@ def test_proposal_tool_schema_exposes_no_runtime_or_workout_definition() -> None
     assert "assistant_run_id" not in serialized
     assert "idempotency" not in serialized
     assert "WorkoutDefinition" not in serialized
+    assert schema["properties"]["template_id"]["enum"] == list(WORKOUT_FORMAT_IDS)
+
+
+def test_health_trend_tool_schema_uses_analytics_metric_choices() -> None:
+    schema_model: Any = get_health_trends.tool_call_schema
+    schema = schema_model.model_json_schema()
+
+    assert schema["properties"]["metrics"]["items"]["enum"] == list(HEALTH_METRICS)
 
 
 def test_agent_registers_exactly_one_bounded_mutation_tool() -> None:

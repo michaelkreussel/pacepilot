@@ -48,6 +48,7 @@ from app.services.coach.dependencies import (
     CoachAgentFactoryDep,
     CoachProviderConfiguredDep,
 )
+from app.services.planning.registry import registered_workout_formats
 from app.services.planning.weekly_planner import (
     WeeklyPlanCandidate,
     WeeklyPlannerError,
@@ -60,13 +61,13 @@ from app.services.planning.workout_definition import (
     workout_metrics,
 )
 from app.services.planning.workout_proposals import (
-    RUNNING_PROPOSAL_TEMPLATE_LABELS,
     RunningProposalRequest,
     RunningProposalService,
     WorkoutProposalError,
 )
 from app.services.planning.workout_service import WorkoutTransitionError
 from app.services.planning.workout_templates import TemplateExpansionError
+from app.services.planning.workout_views import GOAL_TYPE_LABELS, PLAN_ROLE_LABELS
 from app.web import context, templates
 
 router = APIRouter(prefix="/coach", dependencies=[Depends(require_data_access)])
@@ -218,9 +219,9 @@ def _render_coach(
             proposal_minutes=proposal_minutes,
             proposal_template_id=proposal_template_id,
             proposal_templates=[
-                {"id": template_id, "label": label}
-                for template_id, label in RUNNING_PROPOSAL_TEMPLATE_LABELS.items()
-                if template_id not in DEFERRED_QUALITY_TEMPLATE_IDS
+                {"id": template.id, "label": template.name}
+                for template in registered_workout_formats()
+                if template.id not in DEFERRED_QUALITY_TEMPLATE_IDS
                 or deferred_quality_templates_enabled()
             ],
             proposal_idempotency_key=str(uuid4()),
@@ -248,11 +249,6 @@ WEEKDAY_LABELS = (
     "Samstag",
     "Sonntag",
 )
-ROLE_LABELS = {
-    "long_run": "Langer Lauf",
-    "strides": "Steigerungen",
-    "easy_run": "Lockerer Lauf",
-}
 SKIP_REASON_LABELS = {
     None: "Kein verfügbarer Tag passt für den Langen Lauf",
     "planner.budget_below_easy_minimum": "Zeitbudget unter dem Minimum für einen lockeren Lauf",
@@ -277,14 +273,6 @@ WARNING_LABELS = {
     "planner.deferred_quality_development_override": (
         "Development-Testvorlage: vor Annahme besonders sorgfältig prüfen"
     ),
-}
-
-GOAL_TYPE_LABELS = {
-    "general_fitness": "Allgemeine Fitness",
-    "5k": "5 km",
-    "10k": "10 km",
-    "half_marathon": "Halbmarathon",
-    "marathon": "Marathon",
 }
 
 CONFIDENCE_LABELS = {
@@ -363,7 +351,7 @@ def planning_shadow(
                 "available": weekday in availability_by_weekday,
                 "session": session_candidate,
                 "role_label": (
-                    ROLE_LABELS.get(session_candidate.role) if session_candidate else None
+                    PLAN_ROLE_LABELS.get(session_candidate.role) if session_candidate else None
                 ),
                 "warning_labels": (
                     [WARNING_LABELS.get(w, w) for w in session_candidate.warnings]

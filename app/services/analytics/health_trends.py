@@ -1,7 +1,7 @@
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
-from typing import Literal
+from typing import Literal, get_args
 
 from sqlalchemy.orm import Session
 
@@ -14,6 +14,23 @@ from app.services.analytics.subjective_feedback import effective_activity_feedba
 
 BASELINE_DAYS = 84
 BASELINE_GAP_DAYS = 7
+HealthMetric = Literal[
+    "resting_hr",
+    "hrv",
+    "sleep_duration",
+    "sleep_need",
+    "sleep_score",
+    "stress",
+    "body_battery_high",
+    "body_battery_charged",
+    "garmin_training_readiness",
+    "recovery_time",
+    "vo2max",
+    "training_load",
+    "acute_load",
+    "chronic_load",
+]
+HEALTH_METRICS: tuple[HealthMetric, ...] = get_args(HealthMetric)
 
 
 @dataclass(frozen=True)
@@ -24,7 +41,7 @@ class TrendPoint:
 
 @dataclass(frozen=True)
 class MetricTrend:
-    metric: str
+    metric: HealthMetric
     unit: str
     current: float | None
     current_day: date | None
@@ -147,7 +164,7 @@ def _cap_date(value: date | None, end: date) -> date | None:
 def _metric_trend[Row: DailyHealth | DailyFitness](
     rows: Sequence[Row],
     *,
-    metric: str,
+    metric: HealthMetric,
     unit: str,
     value: Callable[[Row], int | float | None],
     days: int,

@@ -1,7 +1,7 @@
 import json
 from dataclasses import asdict
 from datetime import date, datetime, timedelta
-from typing import Annotated, Literal
+from typing import Annotated
 
 from langchain.tools import ToolRuntime, tool
 from langchain_core.tools import BaseTool
@@ -10,33 +10,18 @@ from pydantic import Field
 from app.models import CoachMessage, User
 from app.repositories.coach import find_assistant_run
 from app.services.analytics.athlete_data import AthleteDataService
-from app.services.analytics.health_trends import MetricTrend
+from app.services.analytics.health_trends import HealthMetric
 from app.services.coach.conversation import CoachRuntimeContext
+from app.services.planning.registry import get_knowledge_registry
 from app.services.planning.workout_proposals import (
-    RUNNING_PROPOSAL_TEMPLATE_LABELS,
     RunningProposalRequest,
     RunningProposalService,
+    RunningTemplateId,
     WorkoutProposalError,
 )
 from app.services.planning.workout_service import ProposalOrigin, WorkoutServiceError
 from app.services.planning.workout_templates import TemplateExpansionError
 
-HealthMetric = Literal[
-    "resting_hr",
-    "hrv",
-    "sleep_duration",
-    "sleep_need",
-    "sleep_score",
-    "stress",
-    "body_battery_high",
-    "body_battery_charged",
-    "garmin_training_readiness",
-    "recovery_time",
-    "vo2max",
-    "training_load",
-    "acute_load",
-    "chronic_load",
-]
 COACH_TOOL_CONTRACT_VERSION = "coach-tools-v2"
 
 
@@ -48,21 +33,6 @@ def _json_default(value: object) -> str:
 
 def _json(value: object) -> str:
     return json.dumps(value, default=_json_default, ensure_ascii=False, separators=(",", ":"))
-
-
-def _trend_payload(trend: MetricTrend) -> dict[str, object]:
-    payload = asdict(trend)
-    baseline = payload.get("personal_baseline")
-    difference = payload.get("difference_from_baseline")
-    payload["difference_from_baseline_percent"] = (
-        round(float(difference) / float(baseline) * 100, 1)
-        if isinstance(baseline, (int, float))
-        and baseline != 0
-        and isinstance(difference, (int, float))
-        else None
-    )
-    payload["points"] = payload["points"][-31:]  # type: ignore[index]
-    return payload
 
 
 @tool
@@ -110,17 +80,10 @@ def get_health_trends(
     Body Battery, readiness, recovery time, VO2max, or training load.
     """
     with runtime.context.session_factory() as session:
-        trends = AthleteDataService(
+        payload = AthleteDataService(
             session, runtime.context.user_id, as_of=runtime.context.as_of
-        ).get_health_trends(days)
-    return _json(
-        {
-            "start": trends.start,
-            "end": trends.end,
-            "metrics": {name: _trend_payload(getattr(trends, name)) for name in metrics},
-            "coverage": tuple(asdict(item) for item in trends.coverage),
-        }
-    )
+        ).get_health_trends_payload(days, metrics)
+    return _json(payload)
 
 
 @tool
@@ -207,14 +170,7 @@ def create_running_workout_proposal(
     runtime: ToolRuntime[CoachRuntimeContext],
     suggested_for: date,
     available_minutes: Annotated[int, Field(ge=20, le=1440)],
-    template_id: Literal[
-        "easy_run",
-        "recovery_run",
-        "long_run",
-        "strides",
-        "threshold_cruise",
-        "vo2_intervals",
-    ] = "easy_run",
+    template_id: RunningTemplateId = "easy_run",
 ) -> str:
     """Create one unaccepted running workout through PacePilot's deterministic planner.
 
@@ -333,6 +289,7 @@ def describe_tool_call(tool_name: str, arguments: dict[str, object]) -> tuple[st
         day = arguments.get("suggested_for")
         minutes = arguments.get("available_minutes")
         template_id = arguments.get("template_id", "easy_run")
-        template_label = RUNNING_PROPOSAL_TEMPLATE_LABELS.get(template_id, str(template_id))
+        template = get_knowledge_registry().workouts.get(str(template_id))
+        template_label = template.name if template is not None else str(template_id)
         return label, f"{template_label} · {day} · {minutes} Minuten"
     return label, None

@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import pytest
 
@@ -13,8 +13,8 @@ from app.models import (
     User,
 )
 from app.services.analytics import AthleteDataService
-from app.services.analytics.health_trends import preferred_readiness
-from app.services.analytics.training_trends import get_training_summary
+from app.services.analytics.health_trends import HEALTH_METRICS, preferred_readiness
+from app.services.analytics.training_trends import get_training_summary, get_weekly_training_trend
 
 
 def _user(session, name: str = "Trends") -> User:
@@ -159,6 +159,49 @@ def test_health_trends_use_calendar_windows_and_prior_baseline(session_factory):
         assert hrv_coverage.status == "ok"
         assert hrv_coverage.backfill_complete is True
         assert hrv_coverage.oldest_synced_date == date(2026, 4, 1)
+
+
+def test_selected_health_trend_payload_is_metric_scoped_and_point_bounded(session_factory):
+    as_of = date(2026, 6, 30)
+    with session_factory() as session:
+        user = _user(session)
+        session.add_all(
+            DailyHealth(
+                user_id=user.id,
+                day=as_of - timedelta(days=39 - offset),
+                hrv_average=40 + offset,
+            )
+            for offset in range(40)
+        )
+        session.commit()
+
+        payload = AthleteDataService(session, user.id, as_of=as_of).get_health_trends_payload(
+            40, ("hrv",)
+        )
+
+    assert set(payload) == {"start", "end", "metrics", "coverage"}
+    assert set(payload["metrics"]) == {"hrv"}
+    hrv = payload["metrics"]["hrv"]
+    assert hrv["metric"] == "hrv"
+    assert len(hrv["points"]) == 31
+    assert hrv["points"][0] == {"day": date(2026, 5, 31), "value": 49.0}
+    assert hrv["points"][-1] == {"day": as_of, "value": 79.0}
+    assert HEALTH_METRICS == (
+        "resting_hr",
+        "hrv",
+        "sleep_duration",
+        "sleep_need",
+        "sleep_score",
+        "stress",
+        "body_battery_high",
+        "body_battery_charged",
+        "garmin_training_readiness",
+        "recovery_time",
+        "vo2max",
+        "training_load",
+        "acute_load",
+        "chronic_load",
+    )
 
 
 def test_training_summary_respects_boundaries_and_sport_specific_metrics(session_factory):
@@ -311,7 +354,7 @@ def test_weekly_trends_include_zero_weeks_and_rolling_volume(session_factory):
         )
         session.commit()
 
-        points = AthleteDataService(session, user.id, as_of=as_of).get_training_load_trend(2)
+        points = get_weekly_training_trend(session, user.id, weeks=2, as_of=as_of)
 
         assert [point.week_start for point in points] == [date(2026, 6, 15), date(2026, 6, 22)]
         assert points[0].week_end == date(2026, 6, 21)

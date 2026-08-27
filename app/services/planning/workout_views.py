@@ -18,6 +18,21 @@ from app.services.planning.workout_definition import (
 )
 from app.services.planning.workout_revision import default_context_fingerprint
 
+PLAN_ROLE_LABELS = {
+    "easy_run": "Lockerer Lauf",
+    "long_run": "Langer Lauf",
+    "strides": "Steigerungen",
+    "threshold_cruise": "Schwellenintervalle",
+    "vo2_intervals": "VO₂max-Intervalle",
+}
+GOAL_TYPE_LABELS = {
+    "general_fitness": "Allgemeine Fitness",
+    "5k": "5 km",
+    "10k": "10 km",
+    "half_marathon": "Halbmarathon",
+    "marathon": "Marathon",
+}
+
 
 @dataclass(frozen=True)
 class WorkoutRevisionView:

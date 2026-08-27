@@ -32,7 +32,11 @@ from app.services.planning.weekly_plan_service import (
     plan_proposals_between,
 )
 from app.services.planning.weekly_planner import plan_shadow_week
-from app.services.planning.workout_views import CalendarWorkout
+from app.services.planning.workout_views import (
+    GOAL_TYPE_LABELS,
+    PLAN_ROLE_LABELS,
+    CalendarWorkout,
+)
 from app.web import context, templates
 
 router = APIRouter(prefix="/plans", dependencies=[Depends(require_planning_access)])
@@ -51,21 +55,6 @@ MONTH_NAMES = (
     "November",
     "Dezember",
 )
-PLAN_ROLE_LABELS = {
-    "easy_run": "Lockerer Lauf",
-    "long_run": "Langer Lauf",
-    "strides": "Steigerungen",
-    "threshold_cruise": "Schwellenintervalle",
-    "vo2_intervals": "VO₂max-Intervalle",
-}
-
-GOAL_TYPE_LABELS = {
-    "general_fitness": "Allgemeine Fitness",
-    "5k": "5 km",
-    "10k": "10 km",
-    "half_marathon": "Halbmarathon",
-    "marathon": "Marathon",
-}
 
 
 def _proposal_items(

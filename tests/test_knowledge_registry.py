@@ -5,9 +5,11 @@ import pytest
 
 from app.services.planning.registry import (
     KNOWLEDGE_ROOT,
+    WORKOUT_FORMAT_IDS,
     KnowledgeRegistryError,
     _load_yaml,
     load_knowledge_registry,
+    registered_workout_formats,
 )
 from app.services.planning.registry_models import ConstraintSet, EvidenceIndex
 
@@ -32,6 +34,37 @@ def test_registry_is_deterministic_and_references_resolve() -> None:
         set(artifact.evidence_refs) <= set(first.evidence)
         for artifact in [*first.workouts.values(), *first.constraints.values()]
     )
+
+
+def test_registry_owns_workout_format_choices_and_metadata() -> None:
+    formats = registered_workout_formats()
+
+    assert tuple(format.id for format in formats) == WORKOUT_FORMAT_IDS
+    assert {format.id: format.name for format in formats} == {
+        "easy_run": "Lockerer Dauerlauf",
+        "recovery_run": "Regenerationslauf",
+        "long_run": "Langer lockerer Lauf",
+        "strides": "Lockerer Lauf mit Steigerungen",
+        "threshold_cruise": "Schwellenintervalle",
+        "vo2_intervals": "VO₂max-Intervalle",
+    }
+
+
+def test_registry_discovers_new_workout_format_document(tmp_path: Path) -> None:
+    root = tmp_path / "knowledge"
+    copytree(KNOWLEDGE_ROOT, root)
+    source = root / "workouts" / "easy_run.yaml"
+    added = root / "workouts" / "test_run.yaml"
+    added.write_text(
+        source.read_text(encoding="utf-8")
+        .replace("id: easy_run", "id: test_run", 1)
+        .replace("name: Lockerer Dauerlauf", "name: Testlauf", 1),
+        encoding="utf-8",
+    )
+
+    registry = load_knowledge_registry(root)
+
+    assert registry.workouts["test_run"].name == "Testlauf"
 
 
 def test_active_rules_are_grounded_and_runtime_safety_ids_are_registered() -> None:

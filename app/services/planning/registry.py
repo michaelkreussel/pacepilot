@@ -3,10 +3,10 @@ import json
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Annotated, Any, Protocol
 
 import yaml
-from pydantic import BaseModel
+from pydantic import AfterValidator, BaseModel, WithJsonSchema
 from yaml.resolver import BaseResolver
 
 from app.services.planning.registry_models import (
@@ -19,7 +19,7 @@ from app.services.planning.registry_models import (
 )
 
 KNOWLEDGE_ROOT = Path(__file__).parents[3] / "knowledge"
-WORKOUT_FILES = (
+_LEGACY_WORKOUT_FILE_ORDER = (
     "easy_run.yaml",
     "recovery_run.yaml",
     "long_run.yaml",
@@ -95,7 +95,16 @@ def _unique_by_id[T: RegistryItem](items: list[T], kind: str) -> dict[str, T]:
 def load_knowledge_registry(root: Path = KNOWLEDGE_ROOT) -> KnowledgeRegistry:
     evidence_index = _load_yaml(root / "evidence" / "index.yaml", EvidenceIndex)
     workouts = [
-        _load_yaml(root / "workouts" / filename, WorkoutTemplate) for filename in WORKOUT_FILES
+        _load_yaml(path, WorkoutTemplate)
+        for path in sorted(
+            (root / "workouts").glob("*.yaml"),
+            key=lambda path: (
+                _LEGACY_WORKOUT_FILE_ORDER.index(path.name)
+                if path.name in _LEGACY_WORKOUT_FILE_ORDER
+                else len(_LEGACY_WORKOUT_FILE_ORDER),
+                path.name,
+            ),
+        )
     ]
     constraint_sets = [
         _load_yaml(root / "constraints" / filename, ConstraintSet) for filename in CONSTRAINT_FILES
@@ -145,3 +154,23 @@ def load_knowledge_registry(root: Path = KNOWLEDGE_ROOT) -> KnowledgeRegistry:
 @cache
 def get_knowledge_registry() -> KnowledgeRegistry:
     return load_knowledge_registry()
+
+
+def registered_workout_formats() -> tuple[WorkoutTemplate, ...]:
+    return tuple(get_knowledge_registry().workouts.values())
+
+
+WORKOUT_FORMAT_IDS = tuple(item.id for item in registered_workout_formats())
+
+
+def _validate_workout_format_id(value: str) -> str:
+    if value not in WORKOUT_FORMAT_IDS:
+        raise ValueError(f"Unsupported workout format: {value}")
+    return value
+
+
+WorkoutFormatId = Annotated[
+    str,
+    AfterValidator(_validate_workout_format_id),
+    WithJsonSchema({"type": "string", "enum": list(WORKOUT_FORMAT_IDS)}),
+]

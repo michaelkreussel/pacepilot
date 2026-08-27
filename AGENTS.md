@@ -20,6 +20,7 @@ For substantial changes, prefer:
 5. Add or update relevant tests.
 6. Review the resulting diff once.
 7. Run final verification.
+8. In the completion report, briefly explain in plain language what the task changed.
 
 - Do not perform unrelated cleanup.
 - Keep behavior-preserving refactoring separate from intentional behavior

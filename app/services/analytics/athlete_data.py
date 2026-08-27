@@ -1,5 +1,6 @@
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta
+from typing import Any
 
 from sqlalchemy.orm import Session
 
@@ -11,6 +12,7 @@ from app.services.analytics.fitness_trends import (
     get_garmin_fitness_metrics,
 )
 from app.services.analytics.health_trends import (
+    HealthMetric,
     HealthTrends,
     HrvBaseline,
     MetricTrend,
@@ -31,12 +33,10 @@ from app.services.analytics.training_trends import (
     RecentWorkout,
     TrainingSummary,
     TrainingTimelinePoint,
-    WeeklyTrainingPoint,
     get_activity_details,
     get_recent_workouts,
     get_training_summary,
     get_training_timeline,
-    get_weekly_training_trend,
 )
 from app.services.planning.workout_definition import workout_metrics
 
@@ -127,6 +127,19 @@ class AthleteDataService:
     def get_health_trends(self, days: int = 28) -> HealthTrends:
         return get_health_trends(self.session, self.user_id, days=days, as_of=self.as_of)
 
+    def get_health_trends_payload(
+        self, days: int, metrics: tuple[HealthMetric, ...]
+    ) -> dict[str, Any]:
+        trends = self.get_health_trends(days)
+        return {
+            "start": trends.start,
+            "end": trends.end,
+            "metrics": {
+                name: _bounded_metric_trend_payload(getattr(trends, name)) for name in metrics
+            },
+            "coverage": tuple(asdict(item) for item in trends.coverage),
+        }
+
     def get_training_summary(self, days: int = 28) -> TrainingSummary:
         return get_training_summary(self.session, self.user_id, days=days, as_of=self.as_of)
 
@@ -145,12 +158,6 @@ class AthleteDataService:
     def get_recent_workouts(self, limit: int = 10) -> tuple[RecentWorkout, ...]:
         return get_recent_workouts(self.session, self.user_id, limit=limit, as_of=self.as_of)
 
-    def get_weekly_running_volume(self, weeks: int = 12) -> tuple[WeeklyTrainingPoint, ...]:
-        return get_weekly_training_trend(self.session, self.user_id, weeks=weeks, as_of=self.as_of)
-
-    def get_training_load_trend(self, weeks: int = 12) -> tuple[WeeklyTrainingPoint, ...]:
-        return get_weekly_training_trend(self.session, self.user_id, weeks=weeks, as_of=self.as_of)
-
     def get_training_timeline(
         self, days: int = 28, *, bucket_days: int = 7
     ) -> tuple[TrainingTimelinePoint, ...]:
@@ -164,12 +171,6 @@ class AthleteDataService:
 
     def get_hrv_baseline(self, days: int = 28) -> HrvBaseline:
         return get_hrv_baseline(self.session, self.user_id, days=days, as_of=self.as_of)
-
-    def get_sleep_trend(self, days: int = 28) -> MetricTrend:
-        return self.get_health_trends(days).sleep_duration
-
-    def get_vo2max_trend(self, days: int = 365) -> MetricTrend:
-        return self.get_health_trends(days).vo2max
 
     def get_garmin_fitness_metrics(self, days: int = 365) -> GarminFitnessAnalytics:
         return get_garmin_fitness_metrics(self.session, self.user_id, days=days, as_of=self.as_of)
@@ -272,3 +273,18 @@ class AthleteDataService:
                 )
             )
         return tuple(upcoming)
+
+
+def _bounded_metric_trend_payload(trend: MetricTrend) -> dict[str, Any]:
+    payload = asdict(trend)
+    baseline = payload.get("personal_baseline")
+    difference = payload.get("difference_from_baseline")
+    payload["difference_from_baseline_percent"] = (
+        round(float(difference) / float(baseline) * 100, 1)
+        if isinstance(baseline, (int, float))
+        and baseline != 0
+        and isinstance(difference, (int, float))
+        else None
+    )
+    payload["points"] = payload["points"][-31:]
+    return payload

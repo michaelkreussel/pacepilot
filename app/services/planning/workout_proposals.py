@@ -4,7 +4,6 @@ from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import date
 from math import ceil
-from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
@@ -21,7 +20,7 @@ from app.services.analytics.athlete_data import AthleteDataService
 from app.services.analytics.running_intensity import RunningShadowAnalysis
 from app.services.garmin.heart_rate_zones import is_valid_normalized_heart_rate_zone_profile
 from app.services.planning.load_estimate import IntensityDomainTime, LoadEstimate
-from app.services.planning.registry import get_knowledge_registry
+from app.services.planning.registry import WorkoutFormatId, get_knowledge_registry
 from app.services.planning.registry_models import (
     ContinuousStructure,
     IntervalStructure,
@@ -58,22 +57,7 @@ from app.services.planning.workout_templates import (
 
 PROPOSAL_SOURCE = "coach_single"
 PROPOSAL_RULE_SET_VERSION = f"running-workout-candidate-v3+{SAFETY_RULE_SET_VERSION}"
-type RunningTemplateId = Literal[
-    "easy_run",
-    "recovery_run",
-    "long_run",
-    "strides",
-    "threshold_cruise",
-    "vo2_intervals",
-]
-RUNNING_PROPOSAL_TEMPLATE_LABELS: dict[str, str] = {
-    "easy_run": "Lockerer Dauerlauf",
-    "recovery_run": "Regenerationslauf",
-    "long_run": "Langer lockerer Lauf",
-    "strides": "Lockerer Lauf mit Steigerungen",
-    "threshold_cruise": "Schwellenintervalle",
-    "vo2_intervals": "VO₂max-Intervalle",
-}
+RunningTemplateId = WorkoutFormatId
 QUALITY_TEMPLATE_IDS = frozenset({"strides", *DEFERRED_QUALITY_TEMPLATE_IDS})
 
 
