@@ -20,7 +20,10 @@ For substantial changes, prefer:
 5. Add or update relevant tests.
 6. Review the resulting diff once.
 7. Run final verification.
-8. In the completion report, briefly explain in plain language what the task changed.
+8. In the completion report, briefly explain in plain language what changed,
+   whether it affects the backend, frontend, or both, and what users can see.
+   If an end user can test the change, include exact testing steps and the
+   expected result; otherwise, state that no end-user testing is needed.
 
 - Do not perform unrelated cleanup.
 - Keep behavior-preserving refactoring separate from intentional behavior
