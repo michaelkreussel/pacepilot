@@ -1,17 +1,17 @@
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from datetime import date, datetime, timedelta
 from typing import Annotated, Literal
 
 from langchain.tools import ToolRuntime, tool
 from langchain_core.tools import BaseTool
 from pydantic import Field
-from sqlalchemy.orm import Session, sessionmaker
 
 from app.models import CoachMessage, User
 from app.repositories.coach import find_assistant_run
 from app.services.analytics.athlete_data import AthleteDataService
 from app.services.analytics.health_trends import MetricTrend
+from app.services.coach.conversation import CoachRuntimeContext
 from app.services.planning.workout_proposals import (
     RUNNING_PROPOSAL_TEMPLATE_LABELS,
     RunningProposalRequest,
@@ -38,18 +38,6 @@ HealthMetric = Literal[
     "chronic_load",
 ]
 COACH_TOOL_CONTRACT_VERSION = "coach-tools-v2"
-
-
-@dataclass(frozen=True)
-class CoachRuntimeContext:
-    user_id: int
-    as_of: date
-    session_factory: sessionmaker[Session]
-    request_id: str | None = None
-    conversation_id: int | None = None
-    user_message_id: int | None = None
-    assistant_message_id: int | None = None
-    assistant_run_id: int | None = None
 
 
 def _json_default(value: object) -> str:

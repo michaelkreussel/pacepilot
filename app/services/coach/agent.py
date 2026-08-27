@@ -13,7 +13,8 @@ from langchain.agents.middleware import (
 )
 from langchain_openrouter import ChatOpenRouter
 
-from app.services.coach.tools import CoachRuntimeContext, coach_tools, describe_tool_call
+from app.services.coach.conversation import CoachHistoryMessage, CoachRuntimeContext
+from app.services.coach.tools import coach_tools, describe_tool_call
 
 logger = logging.getLogger(__name__)
 COACH_PROMPT_TEMPLATE_VERSION = "coach-prompt-v2"
@@ -74,12 +75,6 @@ def _date_context_message(as_of: date) -> dict[str, str]:
             "Dieser Kontext hat Vorrang vor Annahmen über das aktuelle Datum."
         ),
     }
-
-
-@dataclass(frozen=True)
-class CoachHistoryMessage:
-    role: Literal["user", "assistant"]
-    content: str
 
 
 @dataclass(frozen=True)

@@ -35,12 +35,11 @@ from app.models.user import utcnow
 from app.services.coach import agent as coach_agent_module
 from app.services.coach.agent import (
     CoachEvent,
-    CoachHistoryMessage,
     LangChainCoachAgent,
 )
+from app.services.coach.conversation import CoachHistoryMessage, CoachRuntimeContext
 from app.services.coach.dependencies import get_coach_agent
 from app.services.coach.tools import (
-    CoachRuntimeContext,
     coach_tools,
     create_running_workout_proposal,
     get_health_day,

@@ -27,9 +27,7 @@ from app.onboarding import require_data_access
 from app.repositories.coach import (
     complete_message,
     conversation_messages,
-    create_assistant_run,
     create_conversation,
-    create_message,
     fail_message,
     find_assistant_run,
     find_conversation,
@@ -40,10 +38,13 @@ from app.repositories.coach import (
 from app.services.coach.agent import (
     CoachAgent,
     CoachEvent,
+)
+from app.services.coach.conversation import (
     CoachHistoryMessage,
+    CoachRuntimeContext,
+    prepare_execution,
 )
 from app.services.coach.dependencies import CoachAgentDep
-from app.services.coach.tools import CoachRuntimeContext
 from app.services.planning.weekly_planner import (
     WeeklyPlanCandidate,
     WeeklyPlannerError,
@@ -67,9 +68,6 @@ from app.web import context, templates
 
 router = APIRouter(prefix="/coach", dependencies=[Depends(require_data_access)])
 logger = logging.getLogger(__name__)
-
-MAX_HISTORY_MESSAGES = 20
-MAX_HISTORY_CHARACTERS = 12_000
 
 
 @dataclass(frozen=True)
@@ -167,23 +165,6 @@ def _has_active_response(session: Session, messages: Sequence[CoachMessage]) -> 
             fail_message(session, message.id, interrupted=True)
     session.flush()
     return any(message.status == "streaming" for message in messages)
-
-
-def _bounded_history(messages: Sequence[CoachMessage]) -> list[CoachHistoryMessage]:
-    history: list[CoachHistoryMessage] = []
-    characters = 0
-    for message in reversed(messages):
-        if message.status != "completed" or message.role not in {"user", "assistant"}:
-            continue
-        if len(history) >= MAX_HISTORY_MESSAGES:
-            break
-        remaining = MAX_HISTORY_CHARACTERS - characters
-        if remaining <= 0:
-            break
-        content = message.content[-remaining:]
-        history.append(CoachHistoryMessage(message.role, content))
-        characters += len(content)
-    return list(reversed(history))
 
 
 def _render_coach(
@@ -742,45 +723,25 @@ async def ask_coach(
     if _has_active_response(session, existing_messages):
         raise HTTPException(status_code=409, detail="In diesem Chat läuft bereits eine Antwort.")
 
-    if conversation.title == "Neuer Chat":
-        conversation.title = message[:157] + ("..." if len(message) > 157 else "")
-    user_message = create_message(session, conversation, role="user", content=message)
-    assistant = create_message(
+    execution = prepare_execution(
         session,
         conversation,
-        role="assistant",
-        status="streaming",
-        model_id=get_settings().llm_model,
-    )
-    assistant_run = create_assistant_run(
-        session,
-        conversation,
-        user_message,
-        assistant,
+        existing_messages,
+        user_id=user.id,
+        question=message,
         model_id=get_settings().llm_model,
         request_id=request.state.request_id,
+        as_of=date.today(),
     )
     session.commit()
 
-    factory = sessionmaker(bind=session.get_bind(), autoflush=False, expire_on_commit=False)
-    runtime = CoachRuntimeContext(
-        user_id=user.id,
-        as_of=date.today(),
-        session_factory=factory,
-        request_id=request.state.request_id,
-        conversation_id=conversation.id,
-        user_message_id=user_message.id,
-        assistant_message_id=assistant.id,
-        assistant_run_id=assistant_run.id,
-    )
-    history = [*_bounded_history(existing_messages), CoachHistoryMessage("user", message)]
     return StreamingResponse(
         _stream_answer(
             request=request,
             agent=agent,
-            history=history,
-            runtime=runtime,
-            assistant_message_id=assistant.id,
+            history=execution.history,
+            runtime=execution.runtime,
+            assistant_message_id=execution.assistant_message_id,
         ),
         media_type="text/event-stream",
         headers={

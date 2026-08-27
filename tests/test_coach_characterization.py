@@ -9,9 +9,9 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.main import app
 from app.models import CoachConversation, CoachMessage
 from app.models.user import utcnow
-from app.services.coach.agent import CoachEvent, CoachHistoryMessage
+from app.services.coach.agent import CoachEvent
+from app.services.coach.conversation import CoachHistoryMessage, CoachRuntimeContext
 from app.services.coach.dependencies import get_coach_agent
-from app.services.coach.tools import CoachRuntimeContext
 
 
 class RecordingCoachAgent:

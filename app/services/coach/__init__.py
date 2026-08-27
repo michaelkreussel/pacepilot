@@ -1,1 +1,1 @@
-"""LangChain orchestration for the read-only PacePilot health coach."""
+"""Conversation and provider services for the PacePilot Coach."""
