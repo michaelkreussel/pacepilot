@@ -157,11 +157,45 @@ def test_openrouter_timeout_is_converted_to_sdk_milliseconds(
             )
         ]
 
-    assert asyncio.run(collect()) == [CoachEvent("failed")]
+    assert asyncio.run(collect()) == [CoachEvent("failed", failure_category="missing_final_answer")]
 
     model: Any = captured["model"]
     assert model.request_timeout == 60_000
     assert model.max_tokens == 2000
+
+
+def test_provider_failure_logs_only_a_privacy_safe_category(
+    session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class FailingAgent:
+        async def astream(self, *_: Any, **__: Any) -> AsyncIterator[object]:
+            raise RuntimeError("private provider response detail")
+            yield object()
+
+    monkeypatch.setattr(
+        coach_provider_module,
+        "create_agent",
+        lambda *_args, **_kwargs: FailingAgent(),
+    )
+    provider = OpenRouterCoachProvider(
+        api_key="test-key", model_id="test/model", timeout_seconds=60
+    )
+    caplog.set_level(logging.WARNING, logger=coach_provider_module.__name__)
+
+    async def collect() -> list[CoachEvent]:
+        return [
+            event
+            async for event in provider.stream(
+                [CoachHistoryMessage("user", "Test")],
+                CoachRuntimeContext(1, date(2026, 8, 28), session_factory),
+            )
+        ]
+
+    assert asyncio.run(collect()) == [CoachEvent("failed", failure_category="provider_error")]
+    assert "failure_category=provider_error" in caplog.text
+    assert "private provider response detail" not in caplog.text
 
 
 class _ReasoningFakeChatModel(BaseChatModel):
@@ -796,7 +830,10 @@ def test_proposal_survives_provider_failure_after_commit(
 
     reloaded = client.get(f"/coach/{conversation_id}")
     assert reloaded.status_code == 200
-    assert "Diese Antwort wurde nicht abgeschlossen" in reloaded.text
+    assert (
+        "Diese Antwort konnte nicht abgeschlossen werden. Bitte versuche es erneut."
+        in reloaded.text
+    )
     assert "Unbestätigt" in reloaded.text
     assert f'href="/workouts/{workout_id}"' in reloaded.text
     assert cast(str, failed["html"]) in reloaded.text
@@ -1254,11 +1291,11 @@ async def test_provider_adapter_logs_and_maps_provider_errors(
         async for event in agent.stream([CoachHistoryMessage("user", private_question)], runtime)
     ]
 
-    assert events == [CoachEvent("failed")]
-    logger.exception.assert_called_once()
-    log_call = logger.exception.call_args
+    assert events == [CoachEvent("failed", failure_category="provider_error")]
+    logger.warning.assert_called_once()
+    log_call = logger.warning.call_args
     assert "AI coach agent failed" in log_call.args[0]
-    assert "RuntimeError" in log_call.args
+    assert "failure_category=provider_error" in log_call.args[0]
     assert private_question not in repr(log_call)
 
 
@@ -1282,4 +1319,4 @@ async def test_provider_adapter_maps_missing_answer_to_failed(
         )
     ]
 
-    assert events == [CoachEvent("failed")]
+    assert events == [CoachEvent("failed", failure_category="missing_final_answer")]

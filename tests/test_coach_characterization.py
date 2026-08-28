@@ -1,11 +1,13 @@
 import asyncio
 from collections.abc import AsyncIterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from datetime import date, timedelta
 from pathlib import Path
 from threading import Barrier
 
 import pytest
+from fastapi import Request
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
@@ -315,11 +317,16 @@ def test_loading_conversation_repairs_and_displays_a_stale_response(
     response = client.get(f"/coach/{conversation_id}")
 
     assert response.status_code == 200
-    assert "Diese Antwort wurde nicht abgeschlossen" in response.text
+    assert (
+        "Diese Antwort konnte nicht abgeschlossen werden. Bitte versuche es erneut."
+        in response.text
+    )
     with session_factory() as session:
         stale = session.get(CoachMessage, stale_id)
         assert stale is not None
         assert stale.status == "interrupted"
+        assert stale.failure_category == "interrupted"
+        assert stale.content == ""
         assert stale.completed_at is not None
 
 
@@ -356,7 +363,52 @@ def test_stale_response_is_interrupted_before_the_next_message(
         assert stale.status == "interrupted"
         assert stale.completed_at is not None
     reloaded = client.get(f"/coach/{conversation_id}")
-    assert "Diese Antwort wurde nicht abgeschlossen" in reloaded.text
+    assert (
+        "Diese Antwort konnte nicht abgeschlossen werden. Bitte versuche es erneut."
+        in reloaded.text
+    )
+
+
+def test_disconnect_marks_the_started_answer_interrupted(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class PartialAnswerAgent:
+        async def stream(
+            self,
+            messages: Sequence[CoachHistoryMessage],
+            runtime: CoachRuntimeContext,
+        ) -> AsyncIterator[CoachEvent]:
+            del messages, runtime
+            yield CoachEvent("answer_text", text="Private partial answer")
+            yield CoachEvent("completed")
+
+    async def disconnected(_request: Request) -> bool:
+        return True
+
+    monkeypatch.setattr(Request, "is_disconnected", disconnected)
+    app.dependency_overrides[get_coach_agent_factory] = lambda: lambda: PartialAnswerAgent()
+    conversation_id = _new_chat(client)
+
+    with suppress(asyncio.CancelledError):
+        client.post(
+            f"/coach/{conversation_id}/messages",
+            data={"message": "Disconnect this answer"},
+        )
+
+    with session_factory() as session:
+        assistant = session.scalar(
+            select(CoachMessage).where(
+                CoachMessage.conversation_id == conversation_id,
+                CoachMessage.role == "assistant",
+            )
+        )
+        assert assistant is not None
+        assert assistant.status == "interrupted"
+        assert assistant.failure_category == "interrupted"
+        assert assistant.content == ""
+        assert assistant.completed_at is not None
 
 
 def test_partial_stream_failure_is_not_persisted_or_reused_as_history(
@@ -407,11 +459,13 @@ def test_partial_stream_failure_is_not_persisted_or_reused_as_history(
             ("user", "completed", "first-question"),
             ("assistant", "failed", ""),
         ]
-        assert messages[1].failure_category == "failed"
+        assert messages[1].failure_category == "provider_error"
 
     reloaded = client.get(f"/coach/{conversation_id}")
     assert reloaded.status_code == 200
-    assert "Diese Antwort wurde nicht abgeschlossen" in reloaded.text
+    failure_copy = "Diese Antwort konnte nicht abgeschlossen werden. Bitte versuche es erneut."
+    assert failure_copy in failed.text
+    assert failure_copy in reloaded.text
     assert "Unfinished private answer" not in reloaded.text
 
     succeeding = RecordingCoachAgent()
@@ -426,6 +480,48 @@ def test_partial_stream_failure_is_not_persisted_or_reused_as_history(
         ("user", "first-question"),
         ("user", "follow-up-question"),
     ]
+
+
+def test_missing_final_answer_text_is_a_durable_failed_outcome(
+    client: TestClient, session_factory: sessionmaker[Session]
+) -> None:
+    class EmptyCompletionAgent:
+        async def stream(
+            self,
+            messages: Sequence[CoachHistoryMessage],
+            runtime: CoachRuntimeContext,
+        ) -> AsyncIterator[CoachEvent]:
+            del messages, runtime
+            yield CoachEvent("completed")
+
+    app.dependency_overrides[get_coach_agent_factory] = lambda: lambda: EmptyCompletionAgent()
+    conversation_id = _new_chat(client)
+
+    response = client.post(
+        f"/coach/{conversation_id}/messages",
+        data={"message": "Return no answer"},
+    )
+
+    failure_copy = "Diese Antwort konnte nicht abgeschlossen werden. Bitte versuche es erneut."
+    assert response.status_code == 200
+    assert "event: error" in response.text
+    assert failure_copy in response.text
+    with session_factory() as session:
+        assistant = session.scalar(
+            select(CoachMessage).where(
+                CoachMessage.conversation_id == conversation_id,
+                CoachMessage.role == "assistant",
+            )
+        )
+        assert assistant is not None
+        assert assistant.status == "failed"
+        assert assistant.failure_category == "missing_final_answer"
+        assert assistant.content == ""
+        assert assistant.completed_at is not None
+
+    reloaded = client.get(f"/coach/{conversation_id}")
+    assert reloaded.status_code == 200
+    assert failure_copy in reloaded.text
 
 
 def test_completed_answer_is_persisted_and_visible_after_reload(

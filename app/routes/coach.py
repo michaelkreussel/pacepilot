@@ -528,6 +528,7 @@ async def _stream_answer(
     started_at = monotonic()
     answer: list[str] = []
     proposal_emitted = False
+    failure_category = "internal_error"
     if runtime.conversation_id is None or runtime.user_message_id is None:
         raise RuntimeError("Coach stream context is incomplete")
     conversation_id = runtime.conversation_id
@@ -556,6 +557,7 @@ async def _stream_answer(
                 ),
             }
         yield _event("run.started", started_payload)
+        failure_category = "provider_error"
         agent = agent_factory()
         async for event in agent.stream(history, runtime):
             if await request.is_disconnected():
@@ -565,12 +567,16 @@ async def _stream_answer(
                 yield _event("answer.delta", {"text": event.text})
             elif event.type == "artifact_available" and event.artifact_type == "workout":
                 if not proposal_emitted:
+                    failure_category = "internal_error"
                     yield _event("proposal.created", _proposal_event_payload(runtime))
                     proposal_emitted = True
+                    failure_category = "provider_error"
             elif event.type == "completed":
                 content = "".join(answer).strip()
                 if not content:
+                    failure_category = "missing_final_answer"
                     raise CoachProviderError("Coach provider completed without answer text")
+                failure_category = "internal_error"
                 with runtime.session_factory() as session:
                     complete_message(session, assistant_message_id, content)
                     session.commit()
@@ -596,11 +602,17 @@ async def _stream_answer(
                 )
                 return
             elif event.type == "failed":
+                failure_category = (
+                    "missing_final_answer"
+                    if event.failure_category == "missing_final_answer"
+                    else "provider_error"
+                )
                 raise CoachProviderError("Coach provider execution failed")
+        failure_category = "provider_error"
         raise CoachProviderError("Coach provider stream ended without completion")
     except asyncio.CancelledError:
         with runtime.session_factory() as session:
-            fail_message(session, assistant_message_id, interrupted=True)
+            fail_message(session, assistant_message_id, failure_category="interrupted")
             session.commit()
         logger.warning(
             "AI coach stream interrupted request_id=%s user_id=%s assistant_message_id=%s "
@@ -613,20 +625,24 @@ async def _stream_answer(
         raise
     except Exception as exc:
         with runtime.session_factory() as session:
-            fail_message(session, assistant_message_id)
+            fail_message(
+                session,
+                assistant_message_id,
+                failure_category=failure_category,
+            )
             session.commit()
             assistant_message = session.get(CoachMessage, assistant_message_id)
             if assistant_message is None:
                 raise RuntimeError("Failed Coach message is missing") from exc
             card = _proposal_card(session, runtime.user_id, conversation_id, assistant_message)
             failed_html = _message_html(request, assistant_message, card)
-        logger.exception(
+        logger.warning(
             "AI coach stream failed request_id=%s user_id=%s assistant_message_id=%s "
-            "error_type=%s duration_ms=%s",
+            "failure_category=%s duration_ms=%s",
             runtime.request_id,
             runtime.user_id,
             assistant_message_id,
-            type(exc).__name__,
+            failure_category,
             round((monotonic() - started_at) * 1000),
         )
         yield _event("error", {"message_id": assistant_message_id, "html": failed_html})

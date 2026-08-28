@@ -1,10 +1,15 @@
 from datetime import datetime
+from typing import Literal
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.models import CoachConversation, CoachMessage, CoachToolCall
 from app.models.user import utcnow
+
+CoachFailureCategory = Literal[
+    "provider_error", "missing_final_answer", "interrupted", "internal_error"
+]
 
 
 def list_conversations(
@@ -150,6 +155,7 @@ def interrupt_stale_responses(
 
     completed_at = utcnow()
     for message in stale_messages:
+        message.content = ""
         message.status = "interrupted"
         message.failure_category = "interrupted"
         message.completed_at = completed_at
@@ -169,12 +175,15 @@ def complete_message(session: Session, message_id: int, content: str) -> None:
     message.conversation.updated_at = completed_at
 
 
-def fail_message(session: Session, message_id: int, *, interrupted: bool = False) -> None:
+def fail_message(
+    session: Session, message_id: int, *, failure_category: CoachFailureCategory
+) -> None:
     message = session.get(CoachMessage, message_id)
     if message is None:
         return
-    message.status = "interrupted" if interrupted else "failed"
-    message.failure_category = message.status
+    message.content = ""
+    message.status = "interrupted" if failure_category == "interrupted" else "failed"
+    message.failure_category = failure_category
     completed_at = utcnow()
     message.completed_at = completed_at
     message.conversation.updated_at = completed_at

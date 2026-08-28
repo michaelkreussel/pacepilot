@@ -340,28 +340,27 @@ class OpenRouterCoachProvider:
                                 and _contains_proposal_artifact(getattr(message, "content", None))
                             ):
                                 yield CoachEvent("artifact_available", artifact_type="workout")
-        except Exception as exc:
-            logger.exception(
-                "AI coach agent failed model=%s user_id=%s error_type=%s "
-                "status_code=%s duration_ms=%s tool_calls=%s",
+        except Exception:
+            logger.warning(
+                "AI coach agent failed model=%s user_id=%s failure_category=provider_error "
+                "duration_ms=%s tool_calls=%s",
                 self._model_id,
                 runtime.user_id,
-                type(exc).__name__,
-                getattr(exc, "status_code", None),
                 round((monotonic() - started_at) * 1000),
                 tool_calls,
             )
-            yield CoachEvent("failed")
+            yield CoachEvent("failed", failure_category="provider_error")
             return
         if not produced_text:
             logger.warning(
-                "AI coach agent returned no text model=%s user_id=%s duration_ms=%s tool_calls=%s",
+                "AI coach agent returned no text model=%s user_id=%s "
+                "failure_category=missing_final_answer duration_ms=%s tool_calls=%s",
                 self._model_id,
                 runtime.user_id,
                 round((monotonic() - started_at) * 1000),
                 tool_calls,
             )
-            yield CoachEvent("failed")
+            yield CoachEvent("failed", failure_category="missing_final_answer")
             return
         logger.info(
             "AI coach agent completed model=%s user_id=%s duration_ms=%s tool_calls=%s",

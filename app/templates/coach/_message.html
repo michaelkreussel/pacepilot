@@ -30,7 +30,7 @@
       </details>
       <div class="whitespace-pre-wrap text-sm leading-6 text-foreground" data-answer-text>{{ item.content }}</div>
       <div data-proposal-artifacts>{% if card %}{% include "workouts/_coach_proposal_card.html" %}{% endif %}</div>
-      {% if state in ['failed', 'interrupted'] %}<p class="mt-2 text-xs text-danger-emphasis" data-coach-error role="status">Diese Antwort wurde nicht abgeschlossen.</p>{% endif %}
+      {% if state in ['failed', 'interrupted'] %}<p class="mt-2 text-xs text-danger-emphasis" data-coach-error role="status">Diese Antwort konnte nicht abgeschlossen werden. Bitte versuche es erneut.</p>{% endif %}
     </div>
   </div>
 </article>
