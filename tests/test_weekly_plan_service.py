@@ -96,6 +96,7 @@ def test_persist_week_creates_plan_revision_and_normal_workout_proposals(
         plan = session.scalar(select(TrainingPlan))
         assert plan is not None
         assert plan.current_revision_id == revision.id
+        assert plan.accepted_revision_id is None
         assert revision.revision_number == 1
         memberships = list(
             session.scalars(select(TrainingPlanWorkout).order_by(TrainingPlanWorkout.position))
@@ -209,20 +210,28 @@ def test_new_revision_is_current_without_mutating_previous_revision(session_fact
     with session_factory() as session:
         user = _user(session)
         first = persist_week_candidate(session, user, candidate)
+        plan = session.scalar(select(TrainingPlan))
+        assert plan is not None
+        plan.accepted_revision_id = first.id
+        session.commit()
+        workouts = list(session.scalars(select(Workout)))
+        assert all(workout.accepted_revision_id is None for workout in workouts)
+        assert all(workout.approval_status == "proposed" for workout in workouts)
+
         second = persist_week_candidate(session, user, changed)
 
         assert first.revision_number == 1
         assert second.revision_number == 2
         assert first.input_fingerprint == candidate.input_fingerprint
-        plan = session.scalar(select(TrainingPlan))
-        assert plan is not None
         assert plan.current_revision_id == second.id
+        assert plan.accepted_revision_id == first.id
         visible = plan_proposals_between(session, user.id, MONDAY, MONDAY + timedelta(days=6))
         assert {membership.plan_revision_id for membership, _ in visible} == {second.id}
 
         reactivated = persist_week_candidate(session, user, candidate)
         assert reactivated.id == first.id
         assert plan.current_revision_id == first.id
+        assert plan.accepted_revision_id == first.id
         visible = plan_proposals_between(session, user.id, MONDAY, MONDAY + timedelta(days=6))
         assert {membership.plan_revision_id for membership, _ in visible} == {first.id}
 

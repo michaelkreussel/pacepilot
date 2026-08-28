@@ -142,6 +142,7 @@ class TrainingPlan(Base):
     week_start: Mapped[date] = mapped_column(Date)
     status: Mapped[str] = mapped_column(String(20), default="active")
     current_revision_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    accepted_revision_id: Mapped[int | None] = mapped_column(Integer, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
@@ -489,11 +490,29 @@ event.listen(
     TrainingPlan.__table__,
     "after_create",
     DDL(
-        "CREATE TRIGGER validate_training_plan_current_revision "
-        "BEFORE UPDATE OF current_revision_id ON training_plans "
-        "WHEN NEW.current_revision_id IS NOT NULL AND NOT EXISTS ("
-        "SELECT 1 FROM training_plan_revisions "
-        "WHERE id = NEW.current_revision_id AND plan_id = NEW.id) "
-        "BEGIN SELECT RAISE(ABORT, 'Current revision must belong to its plan'); END"
+        "CREATE TRIGGER validate_training_plan_revision_pointers "
+        "BEFORE UPDATE OF current_revision_id, accepted_revision_id ON training_plans "
+        "WHEN (NEW.current_revision_id IS NOT NULL AND NOT EXISTS ("
+        "SELECT 1 FROM training_plan_revisions WHERE id = NEW.current_revision_id "
+        "AND plan_id = NEW.id AND owner_user_id = NEW.user_id)) OR "
+        "(NEW.accepted_revision_id IS NOT NULL AND NOT EXISTS ("
+        "SELECT 1 FROM training_plan_revisions WHERE id = NEW.accepted_revision_id "
+        "AND plan_id = NEW.id AND owner_user_id = NEW.user_id)) "
+        "BEGIN SELECT RAISE(ABORT, 'Plan revision must belong to its plan and user'); END"
+    ).execute_if(dialect="sqlite"),
+)
+event.listen(
+    TrainingPlan.__table__,
+    "after_create",
+    DDL(
+        "CREATE TRIGGER validate_training_plan_revision_pointers_insert "
+        "BEFORE INSERT ON training_plans "
+        "WHEN (NEW.current_revision_id IS NOT NULL AND NOT EXISTS ("
+        "SELECT 1 FROM training_plan_revisions WHERE id = NEW.current_revision_id "
+        "AND plan_id = NEW.id AND owner_user_id = NEW.user_id)) OR "
+        "(NEW.accepted_revision_id IS NOT NULL AND NOT EXISTS ("
+        "SELECT 1 FROM training_plan_revisions WHERE id = NEW.accepted_revision_id "
+        "AND plan_id = NEW.id AND owner_user_id = NEW.user_id)) "
+        "BEGIN SELECT RAISE(ABORT, 'Plan revision must belong to its plan and user'); END"
     ).execute_if(dialect="sqlite"),
 )
