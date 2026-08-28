@@ -21,7 +21,7 @@ class FeedbackNotFoundError(LookupError):
     pass
 
 
-class FeedbackService:
+class FeedbackCommands:
     def __init__(self, session: Session, user: User) -> None:
         self.session = session
         self.user = user
@@ -61,7 +61,6 @@ class FeedbackService:
         )
         self.session.add(feedback)
         self._invalidate_context(workout_ids={workout.id})
-        self.session.commit()
         return feedback
 
     def record_post_session(
@@ -95,8 +94,85 @@ class FeedbackService:
         self.session.add(feedback)
         workout_ids = {activity.workout_id} if activity.workout_id is not None else set()
         self._invalidate_context(workout_ids=workout_ids)
-        self.session.commit()
         return feedback
+
+    def delete_pre_session(self, feedback_id: int) -> int | None:
+        feedback = self.session.scalar(
+            select(PreSessionFeedback).where(
+                PreSessionFeedback.id == feedback_id,
+                PreSessionFeedback.user_id == self.user.id,
+            )
+        )
+        if feedback is None:
+            raise FeedbackNotFoundError("Feedback nicht gefunden")
+        workout_id = feedback.workout_id
+        self._purge_validation_evidence(f"pre:{feedback.id}")
+        self.session.delete(feedback)
+        self._invalidate_context(workout_ids={workout_id} if workout_id else set())
+        return workout_id
+
+    def delete_post_session(self, feedback_id: int) -> int | None:
+        feedback = self.session.scalar(
+            select(PostSessionFeedback).where(
+                PostSessionFeedback.id == feedback_id,
+                PostSessionFeedback.user_id == self.user.id,
+            )
+        )
+        if feedback is None:
+            raise FeedbackNotFoundError("Feedback nicht gefunden")
+        activity_id = feedback.activity_id
+        workout_ids = {feedback.workout_id} if feedback.workout_id else set()
+        self._purge_validation_evidence(f"post:{feedback.id}")
+        self.session.delete(feedback)
+        self._invalidate_context(workout_ids=workout_ids)
+        return activity_id
+
+    def _invalidate_context(self, *, workout_ids: set[int]) -> None:
+        now = utcnow()
+        user_workout_ids = select(Workout.id).where(Workout.user_id == self.user.id)
+        self.session.execute(
+            update(WorkoutValidationRun)
+            .where(
+                WorkoutValidationRun.workout_id.in_(user_workout_ids),
+                WorkoutValidationRun.expires_at > now,
+            )
+            .values(expires_at=now)
+        )
+        if workout_ids:
+            self.session.execute(
+                update(Workout)
+                .where(Workout.id.in_(workout_ids), Workout.user_id == self.user.id)
+                .values(lock_version=Workout.lock_version + 1)
+            )
+        today = utcnow().date()
+        self.session.execute(
+            update(Workout)
+            .where(
+                Workout.user_id == self.user.id,
+                Workout.scheduled_for == today,
+                Workout.id.not_in(workout_ids),
+                Workout.deleted_at.is_(None),
+            )
+            .values(lock_version=Workout.lock_version + 1)
+        )
+
+    def _purge_validation_evidence(self, feedback_reference: str) -> None:
+        runs = list(
+            self.session.scalars(
+                select(WorkoutValidationRun)
+                .join(Workout, Workout.id == WorkoutValidationRun.workout_id)
+                .where(Workout.user_id == self.user.id)
+            )
+        )
+        for run in runs:
+            if feedback_reference in run.feedback_ids_json:
+                self.session.delete(run)
+
+
+class FeedbackQueries:
+    def __init__(self, session: Session, user: User) -> None:
+        self.session = session
+        self.user = user
 
     def pre_session_for_workout(self, workout_id: int) -> list[PreSessionFeedback]:
         return list(
@@ -140,39 +216,6 @@ class FeedbackService:
             )
         )
 
-    def delete_pre_session(self, feedback_id: int) -> int | None:
-        feedback = self.session.scalar(
-            select(PreSessionFeedback).where(
-                PreSessionFeedback.id == feedback_id,
-                PreSessionFeedback.user_id == self.user.id,
-            )
-        )
-        if feedback is None:
-            raise FeedbackNotFoundError("Feedback nicht gefunden")
-        workout_id = feedback.workout_id
-        self._purge_validation_evidence(f"pre:{feedback.id}")
-        self.session.delete(feedback)
-        self._invalidate_context(workout_ids={workout_id} if workout_id else set())
-        self.session.commit()
-        return workout_id
-
-    def delete_post_session(self, feedback_id: int) -> int | None:
-        feedback = self.session.scalar(
-            select(PostSessionFeedback).where(
-                PostSessionFeedback.id == feedback_id,
-                PostSessionFeedback.user_id == self.user.id,
-            )
-        )
-        if feedback is None:
-            raise FeedbackNotFoundError("Feedback nicht gefunden")
-        activity_id = feedback.activity_id
-        workout_ids = {feedback.workout_id} if feedback.workout_id else set()
-        self._purge_validation_evidence(f"post:{feedback.id}")
-        self.session.delete(feedback)
-        self._invalidate_context(workout_ids=workout_ids)
-        self.session.commit()
-        return activity_id
-
     def export_data(self) -> dict[str, object]:
         pre = list(
             self.session.scalars(
@@ -194,47 +237,6 @@ class FeedbackService:
             "pre_session_feedback": [self._pre_json(item) for item in pre],
             "post_session_feedback": [self._post_json(item) for item in post],
         }
-
-    def _invalidate_context(self, *, workout_ids: set[int]) -> None:
-        now = utcnow()
-        user_workout_ids = select(Workout.id).where(Workout.user_id == self.user.id)
-        self.session.execute(
-            update(WorkoutValidationRun)
-            .where(
-                WorkoutValidationRun.workout_id.in_(user_workout_ids),
-                WorkoutValidationRun.expires_at > now,
-            )
-            .values(expires_at=now)
-        )
-        if workout_ids:
-            self.session.execute(
-                update(Workout)
-                .where(Workout.id.in_(workout_ids), Workout.user_id == self.user.id)
-                .values(lock_version=Workout.lock_version + 1)
-            )
-        today = utcnow().date()
-        self.session.execute(
-            update(Workout)
-            .where(
-                Workout.user_id == self.user.id,
-                Workout.scheduled_for == today,
-                Workout.id.not_in(workout_ids),
-                Workout.deleted_at.is_(None),
-            )
-            .values(lock_version=Workout.lock_version + 1)
-        )
-
-    def _purge_validation_evidence(self, feedback_reference: str) -> None:
-        runs = list(
-            self.session.scalars(
-                select(WorkoutValidationRun)
-                .join(Workout, Workout.id == WorkoutValidationRun.workout_id)
-                .where(Workout.user_id == self.user.id)
-            )
-        )
-        for run in runs:
-            if feedback_reference in run.feedback_ids_json:
-                self.session.delete(run)
 
     @staticmethod
     def _pain_json(item: PreSessionFeedback | PostSessionFeedback) -> dict[str, object]:

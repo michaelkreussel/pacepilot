@@ -17,7 +17,11 @@ from app.models import (
 )
 from app.models.user import utcnow
 from app.services.analytics.subjective_feedback import effective_activity_feedback
-from app.services.planning.feedback_service import FeedbackNotFoundError, FeedbackService
+from app.services.planning.feedback_service import (
+    FeedbackCommands,
+    FeedbackNotFoundError,
+    FeedbackQueries,
+)
 from app.services.planning.safety_triage import (
     IllnessSignal,
     PainInput,
@@ -188,6 +192,86 @@ def test_post_session_pain_and_difficult_session_are_deterministic() -> None:
     }
 
 
+def test_feedback_record_commands_are_transaction_neutral(
+    session_factory: sessionmaker[Session],
+) -> None:
+    with session_factory() as session:
+        user = User(display_name="Runner")
+        session.add(user)
+        session.flush()
+        workout = WorkoutService(session, user).create(_workout_input())
+        activity = Activity(
+            user_id=user.id,
+            garmin_activity_id="transaction-neutral",
+            name="Run",
+            activity_type="running",
+            started_at=utcnow(),
+        )
+        session.add(activity)
+        session.commit()
+        user_id = user.id
+        workout_id = workout.id
+        activity_id = activity.id
+
+        commands = FeedbackCommands(session, user)
+        commands.record_pre_session(
+            workout_id,
+            PreSessionFeedbackInput(fatigue=3),
+        )
+        commands.record_post_session(
+            activity_id,
+            PostSessionFeedbackInput(session_rpe=5),
+        )
+
+        queries = FeedbackQueries(session, user)
+        assert len(queries.pre_session_for_workout(workout_id)) == 1
+        assert len(queries.post_session_for_activity(activity_id)) == 1
+        session.rollback()
+
+    with session_factory() as session:
+        user = session.get(User, user_id)
+        assert user is not None
+        queries = FeedbackQueries(session, user)
+        assert queries.pre_session_for_workout(workout_id) == []
+        assert queries.post_session_for_activity(activity_id) == []
+
+
+def test_feedback_delete_commands_return_ids_without_committing(
+    session_factory: sessionmaker[Session],
+) -> None:
+    with session_factory() as session:
+        user = User(display_name="Runner")
+        session.add(user)
+        session.flush()
+        workout = WorkoutService(session, user).create(_workout_input())
+        activity = Activity(
+            user_id=user.id,
+            garmin_activity_id="rollback-delete",
+            name="Run",
+            activity_type="running",
+            started_at=utcnow(),
+        )
+        session.add(activity)
+        session.commit()
+        commands = FeedbackCommands(session, user)
+        pre = commands.record_pre_session(workout.id, PreSessionFeedbackInput(fatigue=3))
+        post = commands.record_post_session(
+            activity.id,
+            PostSessionFeedbackInput(session_rpe=5),
+        )
+        session.commit()
+
+        assert commands.delete_pre_session(pre.id) == workout.id
+        assert commands.delete_post_session(post.id) == activity.id
+        queries = FeedbackQueries(session, user)
+        assert queries.all_pre_session() == []
+        assert queries.all_post_session() == []
+        session.rollback()
+
+        assert [item.id for item in queries.all_pre_session()] == [pre.id]
+        assert [item.id for item in queries.all_post_session()] == [post.id]
+
+
 def test_new_safety_feedback_invalidates_acceptance_and_delete_does_not_reuse_cache(
     session_factory: sessionmaker[Session],
 ) -> None:
@@ -199,7 +283,7 @@ def test_new_safety_feedback_invalidates_acceptance_and_delete_does_not_reuse_ca
         workout = service.create(_workout_input())
         stale_command = _accept_command(service, workout)
 
-        feedback = FeedbackService(session, user).record_pre_session(
+        feedback = FeedbackCommands(session, user).record_pre_session(
             workout.id,
             PreSessionFeedbackInput(
                 motivation=5,
@@ -214,6 +298,7 @@ def test_new_safety_feedback_invalidates_acceptance_and_delete_does_not_reuse_ca
                 ),
             ),
         )
+        session.commit()
         with pytest.raises(WorkoutConflictError) as stale:
             service.accept(workout.id, stale_command)
         assert stale.value.code == "workout.validation_context_stale"
@@ -232,7 +317,8 @@ def test_new_safety_feedback_invalidates_acceptance_and_delete_does_not_reuse_ca
             assert validation.report_json["outcome"] == "safety_stop"
 
         stopped_fingerprint = service.acceptance_context(workout.id).fingerprint
-        FeedbackService(session, user).delete_pre_session(feedback.id)
+        FeedbackCommands(session, user).delete_pre_session(feedback.id)
+        session.commit()
         assert not any(
             f"pre:{feedback.id}" in run.feedback_ids_json
             for run in session.scalars(
@@ -264,7 +350,7 @@ def test_same_day_safety_stop_blocks_delayed_garmin_sync(
                 scheduled_for=date.today(),
             ),
         )
-        FeedbackService(session, user).record_pre_session(
+        FeedbackCommands(session, user).record_pre_session(
             workout.id,
             PreSessionFeedbackInput(
                 motivation=5,
@@ -274,6 +360,7 @@ def test_same_day_safety_stop_blocks_delayed_garmin_sync(
                 illness_signal=IllnessSignal.FEVER,
             ),
         )
+        session.commit()
 
         with pytest.raises(WorkoutTransitionError) as stopped:
             service.publish(workout.id)
@@ -291,7 +378,7 @@ def test_future_sync_does_not_require_unrelated_daily_feedback(
         service = WorkoutService(session, user)
         future = service.create(_workout_input(date.today() + timedelta(days=2)))
         signal_workout = service.create(_workout_input(date.today()))
-        FeedbackService(session, user).record_pre_session(
+        FeedbackCommands(session, user).record_pre_session(
             signal_workout.id,
             PreSessionFeedbackInput(
                 motivation=3,
@@ -301,6 +388,7 @@ def test_future_sync_does_not_require_unrelated_daily_feedback(
                 illness_signal=IllnessSignal.FEVER,
             ),
         )
+        session.commit()
         assert future.current_revision_id is not None
         revision = session.get(WorkoutRevision, future.current_revision_id)
         assert revision is not None
@@ -320,7 +408,7 @@ def test_feedback_expires_after_versioned_freshness_window(
         session.flush()
         service = WorkoutService(session, user)
         workout = service.create(_workout_input(date.today() + timedelta(days=30)))
-        feedback = FeedbackService(session, user).record_pre_session(
+        feedback = FeedbackCommands(session, user).record_pre_session(
             workout.id,
             PreSessionFeedbackInput(
                 motivation=3,
@@ -330,6 +418,7 @@ def test_feedback_expires_after_versioned_freshness_window(
                 illness_signal=IllnessSignal.FEVER,
             ),
         )
+        session.commit()
         feedback.recorded_at = utcnow() - timedelta(days=8)
         session.commit()
 
@@ -355,7 +444,7 @@ def test_positive_wearable_readiness_cannot_override_safety_stop(
         )
         service = WorkoutService(session, user)
         workout = service.create(_workout_input())
-        FeedbackService(session, user).record_pre_session(
+        FeedbackCommands(session, user).record_pre_session(
             workout.id,
             PreSessionFeedbackInput(
                 motivation=5,
@@ -365,6 +454,7 @@ def test_positive_wearable_readiness_cannot_override_safety_stop(
                 illness_signal=IllnessSignal.CARDIOPULMONARY_WARNING,
             ),
         )
+        session.commit()
 
         assert service.acceptance_context(workout.id).report.outcome == TriageOutcome.SAFETY_STOP
 
@@ -387,9 +477,10 @@ def test_effective_activity_feedback_drives_safety_context(
         )
         session.add(activity)
         session.commit()
-        FeedbackService(session, user).record_post_session(
+        FeedbackCommands(session, user).record_post_session(
             activity.id, PostSessionFeedbackInput(session_rpe=9, overall_feel=2)
         )
+        session.commit()
 
         manual_context = workout_service.acceptance_context(workout.id)
         assert manual_context.report.outcome == TriageOutcome.WARN
@@ -424,8 +515,8 @@ def test_post_feedback_export_survives_garmin_activity_deletion_and_can_be_delet
         )
         session.add(activity)
         session.commit()
-        service = FeedbackService(session, user)
-        feedback = service.record_post_session(
+        commands = FeedbackCommands(session, user)
+        feedback = commands.record_post_session(
             activity.id,
             PostSessionFeedbackInput(
                 completion_percent=80,
@@ -435,19 +526,21 @@ def test_post_feedback_export_survives_garmin_activity_deletion_and_can_be_delet
                 notes="Bewusst verkürzt",
             ),
         )
+        session.commit()
 
         session.delete(activity)
         session.commit()
         session.refresh(feedback)
         assert feedback.activity_id is None
 
-        payload = service.export_data()
+        payload = FeedbackQueries(session, user).export_data()
         exported = payload["post_session_feedback"]
         assert isinstance(exported, list)
         assert exported[0]["activity_id"] is None
         assert exported[0]["notes"] == "Bewusst verkürzt"
 
-        service.delete_post_session(feedback.id)
+        commands.delete_post_session(feedback.id)
+        session.commit()
         assert session.get(PostSessionFeedback, feedback.id) is None
 
 
@@ -462,7 +555,7 @@ def test_feedback_service_is_user_scoped(session_factory: sessionmaker[Session])
         session.commit()
 
         with pytest.raises(FeedbackNotFoundError):
-            FeedbackService(session, owner).delete_pre_session(feedback.id)
+            FeedbackCommands(session, owner).delete_pre_session(feedback.id)
 
 
 def test_effective_activity_feedback_prefers_garmin_and_falls_back_per_field(
@@ -490,13 +583,15 @@ def test_effective_activity_feedback_prefers_garmin_and_falls_back_per_field(
         )
         session.add_all([garmin, manual])
         session.commit()
-        service = FeedbackService(session, user)
-        service.record_post_session(
+        commands = FeedbackCommands(session, user)
+        commands.record_post_session(
             garmin.id, PostSessionFeedbackInput(session_rpe=3, overall_feel=2)
         )
-        service.record_post_session(
+        session.commit()
+        commands.record_post_session(
             manual.id, PostSessionFeedbackInput(session_rpe=7, overall_feel=3)
         )
+        session.commit()
 
         feedback = effective_activity_feedback(session, user.id, [garmin, manual])
 

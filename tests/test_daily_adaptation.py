@@ -27,7 +27,7 @@ from app.services.planning.daily_adaptation import (
     generate_daily_adaptation_candidates,
     reduce_volume,
 )
-from app.services.planning.feedback_service import FeedbackService
+from app.services.planning.feedback_service import FeedbackCommands
 from app.services.planning.load_estimate import IntensityDomainTime, LoadEstimate
 from app.services.planning.safety_triage import (
     PreSessionFeedbackInput,
@@ -476,10 +476,11 @@ def test_feedback_and_week_changes_invalidate_adaptation_context(
         service = DailyAdaptationService(session, user, as_of=today)
         initial = service.assess_today(workout.id)
 
-        FeedbackService(session, user).record_pre_session(
+        FeedbackCommands(session, user).record_pre_session(
             workout.id,
             PreSessionFeedbackInput(fatigue=5, available_minutes=30),
         )
+        session.commit()
         after_feedback = service.assess_today(workout.id)
 
         assert after_feedback.context_fingerprint != initial.context_fingerprint
@@ -936,10 +937,11 @@ def test_apply_rejects_stale_context(session_factory, monkeypatch: pytest.Monkey
         service = DailyAdaptationService(session, user, as_of=today)
         stale = service.assess_today(workout.id)
 
-        FeedbackService(session, user).record_pre_session(
+        FeedbackCommands(session, user).record_pre_session(
             workout.id,
             PreSessionFeedbackInput(fatigue=5, available_minutes=30),
         )
+        session.commit()
 
         with pytest.raises(DailyAdaptationError) as conflict:
             service.apply(
@@ -1182,10 +1184,11 @@ def test_safety_stop_rest_can_remove_existing_garmin_calendar_entry(
         session.commit()
         service = WorkoutService(session, user, connect_garmin=lambda *_args: garmin)
         service.publish(workout.id)
-        FeedbackService(session, user).record_pre_session(
+        FeedbackCommands(session, user).record_pre_session(
             workout.id,
             PreSessionFeedbackInput(illness_signal="fever"),
         )
+        session.commit()
         adaptation = DailyAdaptationService(session, user, as_of=today)
         preview = adaptation.assess_today(workout.id)
         assert [item.adaptation_class for item in preview.assessment.candidates] == [

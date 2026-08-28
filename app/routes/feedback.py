@@ -9,7 +9,11 @@ from pydantic import ValidationError
 from app.auth import CurrentUser
 from app.database import SessionDep
 from app.onboarding import require_data_access, require_planning_access
-from app.services.planning.feedback_service import FeedbackNotFoundError, FeedbackService
+from app.services.planning.feedback_service import (
+    FeedbackCommands,
+    FeedbackNotFoundError,
+    FeedbackQueries,
+)
 from app.services.planning.safety_triage import (
     IllnessSignal,
     PainInput,
@@ -71,7 +75,8 @@ async def record_pre_session_feedback(
             pain=pain,
             illness_signal=illness,
         )
-        FeedbackService(session, user).record_pre_session(workout_id, data)
+        FeedbackCommands(session, user).record_pre_session(workout_id, data)
+        session.commit()
     except (FeedbackNotFoundError, ValidationError, ValueError):
         return _error_redirect(
             f"/workouts/{workout_id}",
@@ -107,7 +112,8 @@ async def record_post_session_feedback(
             stopped_reason=str(form.get("stopped_reason", "")).strip() or None,
             notes=str(form.get("notes", "")).strip() or None,
         )
-        FeedbackService(session, user).record_post_session(activity_id, data)
+        FeedbackCommands(session, user).record_post_session(activity_id, data)
+        session.commit()
     except (FeedbackNotFoundError, ValidationError, ValueError):
         return _error_redirect(
             f"/activities/{activity_id}",
@@ -129,7 +135,8 @@ def delete_pre_session_feedback(
     user: CurrentUser,
 ) -> RedirectResponse:
     try:
-        FeedbackService(session, user).delete_pre_session(feedback_id)
+        FeedbackCommands(session, user).delete_pre_session(feedback_id)
+        session.commit()
     except FeedbackNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return RedirectResponse(
@@ -147,7 +154,8 @@ def delete_post_session_feedback(
     user: CurrentUser,
 ) -> RedirectResponse:
     try:
-        FeedbackService(session, user).delete_post_session(feedback_id)
+        FeedbackCommands(session, user).delete_post_session(feedback_id)
+        session.commit()
     except FeedbackNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return RedirectResponse(
@@ -161,7 +169,7 @@ def delete_post_session_feedback(
     dependencies=[Depends(require_data_access)],
 )
 def export_feedback(session: SessionDep, user: CurrentUser) -> Response:
-    payload = FeedbackService(session, user).export_data()
+    payload = FeedbackQueries(session, user).export_data()
     return Response(
         json.dumps(payload, ensure_ascii=False, indent=2),
         media_type="application/json",

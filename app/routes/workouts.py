@@ -24,7 +24,7 @@ from app.services.planning.daily_adaptation import (
     DailyAdaptationPreview,
     DailyAdaptationService,
 )
-from app.services.planning.feedback_service import FeedbackService
+from app.services.planning.feedback_service import FeedbackQueries
 from app.services.planning.validator import WorkoutInput, WorkoutValidationError, validate_workout
 from app.services.planning.workout_definition import (
     DefinitionValidationError,
@@ -269,7 +269,7 @@ def workout_detail(
             request,
             active_page="plans",
             workout=_get_workout(service, workout_id),
-            pre_session_feedback=FeedbackService(
+            pre_session_feedback=FeedbackQueries(
                 service.session, service.user
             ).pre_session_for_workout(workout_id),
             adaptation_preview=_adaptation_preview(service, workout_id),
@@ -411,7 +411,7 @@ async def confirm_workout(
                 request,
                 active_page="plans",
                 workout=_get_workout(service, workout_id),
-                pre_session_feedback=FeedbackService(
+                pre_session_feedback=FeedbackQueries(
                     service.session, service.user
                 ).pre_session_for_workout(workout_id),
                 error=str(exc),
