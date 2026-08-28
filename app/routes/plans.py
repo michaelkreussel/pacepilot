@@ -4,28 +4,24 @@ from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth import CurrentUser
 from app.config import coach_feature_enabled, get_settings
 from app.database import SessionDep
-from app.models import (
-    AthleteGoal,
-    TrainingCycle,
-    TrainingPlanRevision,
-    TrainingPlanWorkout,
-    Workout,
-)
 from app.onboarding import require_planning_access
 from app.repositories.workouts import workouts_between
 from app.services.planning.multiweek_planner import (
     TrainingCyclePersistenceError,
     accept_training_cycle_revision,
-    get_training_cycle,
-    list_training_cycle_weeks,
     persist_training_cycle,
     plan_training_cycle,
+)
+from app.services.planning.planning_queries import (
+    get_current_training_cycle,
+    list_goals,
+    list_training_cycle_week_details,
+    list_training_cycles,
 )
 from app.services.planning.weekly_plan_service import (
     persist_week_candidate,
@@ -83,13 +79,7 @@ def new_training_cycle(
 ) -> HTMLResponse:
     if not coach_feature_enabled(get_settings().coach_plan_generation_enabled, user.id):
         raise HTTPException(status_code=404, detail="Seite nicht gefunden")
-    goals = list(
-        session.scalars(
-            select(AthleteGoal)
-            .where(AthleteGoal.user_id == user.id, AthleteGoal.status == "active")
-            .order_by(AthleteGoal.target_date, AthleteGoal.id)
-        )
-    )
+    goals = list_goals(session, user.id, status="active")
     current_week_start = date.today() - timedelta(days=date.today().weekday())
     start = (
         current_week_start
@@ -180,36 +170,12 @@ def training_cycle_detail(
 ) -> HTMLResponse:
     if not coach_feature_enabled(get_settings().coach_plan_generation_enabled, user.id):
         raise HTTPException(status_code=404, detail="Seite nicht gefunden")
-    loaded = get_training_cycle(session, user.id, cycle_id)
+    loaded = get_current_training_cycle(session, user.id, cycle_id)
     if loaded is None:
         raise HTTPException(status_code=404, detail="Mehrwochenplan nicht gefunden")
-    cycle, revision = loaded
-    weeks = []
-    for membership in list_training_cycle_weeks(session, user.id, revision.id):
-        rows = session.execute(
-            select(TrainingPlanWorkout, Workout)
-            .join(Workout, Workout.id == TrainingPlanWorkout.workout_id)
-            .join(
-                TrainingPlanRevision,
-                TrainingPlanRevision.id == TrainingPlanWorkout.plan_revision_id,
-            )
-            .where(
-                TrainingPlanWorkout.plan_revision_id == membership.training_plan_revision_id,
-                TrainingPlanWorkout.owner_user_id == user.id,
-                Workout.user_id == user.id,
-                Workout.deleted_at.is_(None),
-            )
-            .order_by(TrainingPlanWorkout.position)
-        ).all()
-        weeks.append(
-            {
-                "membership": membership,
-                "workouts": [
-                    {"membership": workout_membership, "workout": workout}
-                    for workout_membership, workout in rows
-                ],
-            }
-        )
+    cycle = loaded.cycle
+    revision = loaded.revision
+    weeks = list_training_cycle_week_details(session, user.id, revision.id)
     return templates.TemplateResponse(
         request,
         "plans/cycle.html",
@@ -235,13 +201,7 @@ def training_plan(
     month: Annotated[int, Query(ge=-120, le=120)] = 0,
 ) -> HTMLResponse:
     today = date.today()
-    cycles = list(
-        session.scalars(
-            select(TrainingCycle)
-            .where(TrainingCycle.user_id == user.id)
-            .order_by(TrainingCycle.target_date.desc(), TrainingCycle.id.desc())
-        )
-    )
+    cycles = list_training_cycles(session, user.id)
 
     if view == "month":
         month_index = today.year * 12 + today.month - 1 + month

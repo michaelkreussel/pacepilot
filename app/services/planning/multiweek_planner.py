@@ -9,8 +9,6 @@ from sqlalchemy.orm import Session
 
 from app.config import deferred_quality_templates_enabled
 from app.models import (
-    AthleteGoal,
-    AthletePlanningProfile,
     TrainingCycle,
     TrainingCycleRevision,
     TrainingCycleWeek,
@@ -18,6 +16,7 @@ from app.models import (
     TrainingPlanRevision,
     User,
 )
+from app.services.planning.planning_queries import get_active_goal, get_planning_profile
 from app.services.planning.registry import get_knowledge_registry
 from app.services.planning.registry_models import ContinuousStructure
 from app.services.planning.weekly_plan_service import (
@@ -719,17 +718,11 @@ def plan_training_cycle(
     event_type: str | None = None,
     interrupted_weeks: frozenset[int] = frozenset(),
 ) -> TrainingCycleCandidate:
-    goal = session.get(AthleteGoal, goal_id) if goal_id is not None else None
-    if goal_id is not None and (goal is None or goal.user_id != user.id or goal.status != "active"):
+    goal = get_active_goal(session, user.id, goal_id=goal_id) if goal_id is not None else None
+    if goal_id is not None and goal is None:
         raise MultiweekPlannerError("Aktives Ziel nicht gefunden.", code="cycle.goal_not_found")
     if goal_id is None:
-        goal_query = select(AthleteGoal).where(
-            AthleteGoal.user_id == user.id,
-            AthleteGoal.status == "active",
-        )
-        if event_type is not None:
-            goal_query = goal_query.where(AthleteGoal.event_type == event_type)
-        goal = session.scalar(goal_query.order_by(AthleteGoal.target_date, AthleteGoal.id))
+        goal = get_active_goal(session, user.id, event_type=event_type)
     selected_type = event_type or (goal.event_type if goal is not None else None)
     if selected_type is None:
         raise MultiweekPlannerError(
@@ -745,7 +738,7 @@ def plan_training_cycle(
             "Das Zieldatum muss dem aktiven Athletenziel entsprechen.",
             code="cycle.target_date_mismatch",
         )
-    profile = session.get(AthletePlanningProfile, user.id)
+    profile = get_planning_profile(session, user.id)
     weekly_candidates = tuple(
         plan_shadow_week(session, user, week_start=start_date + timedelta(weeks=offset))
         for offset in range(_week_count(start_date, target_date))
@@ -968,38 +961,6 @@ def accept_training_cycle_revision(
     cycle.accepted_revision_id = revision.id
     session.commit()
     return revision
-
-
-def get_training_cycle(
-    session: Session, user_id: int, cycle_id: int
-) -> tuple[TrainingCycle, TrainingCycleRevision] | None:
-    cycle = session.scalar(
-        select(TrainingCycle).where(TrainingCycle.id == cycle_id, TrainingCycle.user_id == user_id)
-    )
-    if cycle is None or cycle.current_revision_id is None:
-        return None
-    revision = session.scalar(
-        select(TrainingCycleRevision).where(
-            TrainingCycleRevision.id == cycle.current_revision_id,
-            TrainingCycleRevision.owner_user_id == user_id,
-        )
-    )
-    return (cycle, revision) if revision is not None else None
-
-
-def list_training_cycle_weeks(
-    session: Session, user_id: int, revision_id: int
-) -> list[TrainingCycleWeek]:
-    return list(
-        session.scalars(
-            select(TrainingCycleWeek)
-            .where(
-                TrainingCycleWeek.owner_user_id == user_id,
-                TrainingCycleWeek.cycle_revision_id == revision_id,
-            )
-            .order_by(TrainingCycleWeek.position)
-        )
-    )
 
 
 def _cycle_confidence(weekly_candidates: tuple[WeeklyPlanCandidate, ...]) -> str:

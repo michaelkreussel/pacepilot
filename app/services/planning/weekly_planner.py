@@ -3,21 +3,14 @@ import json
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import deferred_quality_templates_enabled, get_settings
-from app.models import (
-    AthleteAvailability,
-    AthleteGoal,
-    AthletePlanningProfile,
-    PerformanceAnchor,
-    User,
-)
+from app.models import User
 from app.repositories.activities import activities_between
 from app.services.analytics.activity_semantics import is_running_sport
 from app.services.analytics.athlete_data import AthleteDataService
-from app.services.analytics.running_intensity import PerformanceAnchorInput
+from app.services.planning.planning_queries import get_planning_inputs
 from app.services.planning.registry import get_knowledge_registry
 from app.services.planning.registry_models import ContinuousStructure
 from app.services.planning.safety_triage import build_proposal_safety_context
@@ -571,38 +564,11 @@ def plan_shadow_week(session: Session, user: User, *, week_start: date) -> Weekl
             "Ein aktueller Sicherheitshinweis blockiert die Wochenplanung.",
             code="planner.safety_blocked",
         )
-    profile = session.get(AthletePlanningProfile, user.id)
-    goals = session.scalars(
-        select(AthleteGoal)
-        .where(AthleteGoal.user_id == user.id, AthleteGoal.status == "active")
-        .order_by(AthleteGoal.target_date, AthleteGoal.id)
-    ).all()
-    availability_rows = session.scalars(
-        select(AthleteAvailability)
-        .where(
-            AthleteAvailability.user_id == user.id,
-            AthleteAvailability.available.is_(True),
-        )
-        .order_by(AthleteAvailability.weekday)
-    ).all()
-    anchors = session.scalars(
-        select(PerformanceAnchor)
-        .where(PerformanceAnchor.user_id == user.id)
-        .order_by(PerformanceAnchor.achieved_on, PerformanceAnchor.id)
-    ).all()
-    anchor_inputs = tuple(
-        PerformanceAnchorInput(
-            kind=anchor.kind,
-            achieved_on=anchor.achieved_on,
-            distance_m=anchor.distance_m,
-            duration_s=anchor.duration_s,
-            reliable=anchor.reliable,
-        )
-        for anchor in anchors
-    )
     as_of = date.today()
+    planning_inputs = get_planning_inputs(session, user.id, as_of=as_of)
+    profile = planning_inputs.profile
     shadow = AthleteDataService(session, user.id, as_of=as_of).get_running_shadow_analysis(
-        performance_anchors=anchor_inputs
+        performance_anchors=planning_inputs.performance_anchors
     )
     window28 = shadow.baseline.window(28)
     window56 = shadow.baseline.window(56)
@@ -611,7 +577,7 @@ def plan_shadow_week(session: Session, user: User, *, week_start: date) -> Weekl
         as_of=as_of,
         availability=tuple(
             DayAvailability(weekday=row.weekday, available_minutes=int(row.available_minutes or 0))
-            for row in availability_rows
+            for row in planning_inputs.availability
         ),
         preferred_long_run_weekday=(
             profile.preferred_long_run_weekday if profile is not None else None
@@ -627,7 +593,7 @@ def plan_shadow_week(session: Session, user: User, *, week_start: date) -> Weekl
                 status=goal.status,
                 target_date=goal.target_date,
             )
-            for goal in goals
+            for goal in planning_inputs.goals
         ),
         baseline_confidence=window56.quality.confidence,
         typical_weekly_runs_median=(

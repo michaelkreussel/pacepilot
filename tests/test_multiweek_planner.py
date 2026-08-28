@@ -26,6 +26,14 @@ from app.services.planning.multiweek_planner import (
     persist_training_cycle,
     plan_training_cycle,
 )
+from app.services.planning.planning_queries import (
+    get_accepted_training_cycle,
+    get_current_training_cycle,
+    list_accepted_training_cycles,
+    list_current_training_plans,
+    list_training_cycle_week_details,
+    list_training_cycles,
+)
 from app.services.planning.registry import get_knowledge_registry
 from app.services.planning.weekly_planner import (
     DayAvailability,
@@ -619,3 +627,73 @@ def test_cycle_acceptance_is_explicit_and_user_scoped(session_factory) -> None:
                 session, other, cycle_id=revision.cycle_id, revision_id=revision.id
             )
         assert not_found.value.code == "cycle.not_found"
+
+
+def test_current_plans_and_cycle_revisions_are_user_scoped(session_factory) -> None:
+    candidate = compose_training_cycle(
+        _weekly_candidates(),
+        start_date=START,
+        target_date=START + timedelta(weeks=7, days=6),
+        event_type="half_marathon",
+    )
+    with session_factory() as session:
+        user = _user(session)
+        other = _user(session)
+        revision = persist_training_cycle(session, user, candidate)
+
+        current = get_current_training_cycle(session, user.id, revision.cycle_id)
+        assert current is not None
+        assert current.cycle.id == revision.cycle_id
+        assert current.revision.id == revision.id
+        assert get_current_training_cycle(session, other.id, revision.cycle_id) is None
+        assert get_accepted_training_cycle(session, user.id, revision.cycle_id) is None
+        assert [cycle.id for cycle in list_training_cycles(session, user.id)] == [revision.cycle_id]
+        assert list_training_cycles(session, other.id) == ()
+        assert [
+            week.membership.position
+            for week in list_training_cycle_week_details(session, user.id, revision.id)
+        ] == list(range(8))
+        assert list_training_cycle_week_details(session, other.id, revision.id) == ()
+
+        plans = list_current_training_plans(
+            session,
+            user.id,
+            starts_on=candidate.start_date,
+            ends_on=candidate.target_date,
+        )
+        assert [plan.week_start for plan in plans] == [
+            START + timedelta(weeks=offset) for offset in range(8)
+        ]
+        assert [
+            plan.week_start
+            for plan in list_current_training_plans(
+                session,
+                user.id,
+                starts_on=START + timedelta(weeks=3),
+                ends_on=START + timedelta(weeks=3),
+            )
+        ] == [START + timedelta(weeks=3)]
+        assert (
+            list_current_training_plans(
+                session,
+                other.id,
+                starts_on=candidate.start_date,
+                ends_on=candidate.target_date,
+            )
+            == ()
+        )
+
+        accept_training_cycle_revision(
+            session,
+            user,
+            cycle_id=revision.cycle_id,
+            revision_id=revision.id,
+        )
+
+        accepted = get_accepted_training_cycle(session, user.id, revision.cycle_id)
+        assert accepted is not None
+        assert accepted.revision.id == revision.id
+        assert [item.revision.id for item in list_accepted_training_cycles(session, user.id)] == [
+            revision.id
+        ]
+        assert list_accepted_training_cycles(session, other.id) == ()

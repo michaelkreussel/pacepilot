@@ -13,7 +13,11 @@ from app.models import (
     User,
 )
 from app.services.analytics import AthleteDataService
-from app.services.analytics.running_intensity import PerformanceAnchorInput
+from app.services.planning.planning_queries import (
+    get_active_goal,
+    get_planning_inputs,
+    list_performance_anchors,
+)
 
 
 def _user(session, name: str = "Planner") -> User:
@@ -98,13 +102,28 @@ def test_planning_inputs_are_user_scoped_and_validated(session_factory) -> None:
         )
         session.commit()
 
-        assert session.get(AthletePlanningProfile, second.id).experience_level is None
-        goals_first = session.query(AthleteGoal).filter(AthleteGoal.user_id == first.id).all()
-        assert len(goals_first) == 2
-        anchors_second = (
-            session.query(PerformanceAnchor).filter(PerformanceAnchor.user_id == second.id).all()
-        )
-        assert anchors_second == []
+        first_inputs = get_planning_inputs(session, first.id, as_of=date(2026, 8, 1))
+        second_inputs = get_planning_inputs(session, second.id, as_of=date(2026, 8, 1))
+
+        assert first_inputs.as_of == date(2026, 8, 1)
+        assert first_inputs.profile is not None
+        assert first_inputs.profile.experience_level == "intermediate"
+        assert [goal.event_type for goal in first_inputs.goals] == [
+            "half_marathon",
+            "10k",
+        ]
+        assert [slot.weekday for slot in first_inputs.availability] == [0, 5]
+        assert [anchor.kind for anchor in first_inputs.performance_anchors] == [
+            "race",
+            "time_trial",
+        ]
+        assert second_inputs.profile is not None
+        assert second_inputs.profile.experience_level is None
+        assert [goal.event_type for goal in second_inputs.goals] == ["general_fitness"]
+        assert second_inputs.availability == ()
+        assert second_inputs.performance_anchors == ()
+        assert get_active_goal(session, first.id, event_type="10k") == first_inputs.goals[1]
+        assert get_active_goal(session, first.id, goal_id=second_inputs.goals[0].id) is None
 
         session.add(
             AthleteAvailability(user_id=first.id, weekday=0, available=True, available_minutes=45)
@@ -166,18 +185,8 @@ def test_persisted_anchors_feed_intensity_guidance(session_factory) -> None:
         )
         session.commit()
 
-        anchors = session.query(PerformanceAnchor).filter_by(user_id=user.id).all()
         shadow = AthleteDataService(session, user.id, as_of=as_of).get_running_shadow_analysis(
-            performance_anchors=tuple(
-                PerformanceAnchorInput(
-                    kind=anchor.kind,
-                    achieved_on=anchor.achieved_on,
-                    distance_m=anchor.distance_m,
-                    duration_s=anchor.duration_s,
-                    reliable=anchor.reliable,
-                )
-                for anchor in anchors
-            )
+            performance_anchors=list_performance_anchors(session, user.id)
         )
 
         assert shadow.intensity.mode == "pace_anchor"
@@ -201,19 +210,8 @@ def test_stale_anchor_is_ignored_with_warning(session_factory) -> None:
             )
         )
         session.commit()
-        anchors = session.query(PerformanceAnchor).filter_by(user_id=user.id).all()
-
         shadow = AthleteDataService(session, user.id, as_of=as_of).get_running_shadow_analysis(
-            performance_anchors=tuple(
-                PerformanceAnchorInput(
-                    kind=anchor.kind,
-                    achieved_on=anchor.achieved_on,
-                    distance_m=anchor.distance_m,
-                    duration_s=anchor.duration_s,
-                    reliable=anchor.reliable,
-                )
-                for anchor in anchors
-            )
+            performance_anchors=list_performance_anchors(session, user.id)
         )
 
         assert shadow.intensity.pace_anchor is None

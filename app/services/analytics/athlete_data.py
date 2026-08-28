@@ -23,7 +23,7 @@ from app.services.analytics.health_trends import (
 )
 from app.services.analytics.running_baseline import RunningBaseline, get_running_baseline
 from app.services.analytics.running_intensity import (
-    PerformanceAnchorInput,
+    PerformanceAnchorLike,
     RunningShadowAnalysis,
     build_running_shadow_analysis,
 )
@@ -182,7 +182,7 @@ class AthleteDataService:
         return get_running_baseline(self.session, self.user_id, as_of=self.as_of)
 
     def get_running_shadow_analysis(
-        self, *, performance_anchors: tuple[PerformanceAnchorInput, ...] = ()
+        self, *, performance_anchors: tuple[PerformanceAnchorLike, ...] = ()
     ) -> RunningShadowAnalysis:
         baseline = self.get_running_baseline()
         return build_running_shadow_analysis(

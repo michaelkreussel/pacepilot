@@ -4,7 +4,7 @@ import math
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import date, datetime
-from typing import Any
+from typing import Any, Protocol
 
 from sqlalchemy.orm import Session
 
@@ -45,6 +45,23 @@ class PerformanceAnchorInput:
     distance_m: float
     duration_s: float
     reliable: bool = True
+
+
+class PerformanceAnchorLike(Protocol):
+    @property
+    def kind(self) -> str: ...
+
+    @property
+    def achieved_on(self) -> date: ...
+
+    @property
+    def distance_m(self) -> float: ...
+
+    @property
+    def duration_s(self) -> float: ...
+
+    @property
+    def reliable(self) -> bool: ...
 
 
 @dataclass(frozen=True)
@@ -141,9 +158,9 @@ def _latest_threshold(rows: list[DailyFitness]) -> tuple[DailyFitness, float] | 
 
 
 def _valid_performance_anchors(
-    anchors: tuple[PerformanceAnchorInput, ...], as_of: date
-) -> tuple[list[tuple[PerformanceAnchorInput, float]], tuple[str, ...]]:
-    valid: list[tuple[PerformanceAnchorInput, float]] = []
+    anchors: tuple[PerformanceAnchorLike, ...], as_of: date
+) -> tuple[list[tuple[PerformanceAnchorLike, float]], tuple[str, ...]]:
+    valid: list[tuple[PerformanceAnchorLike, float]] = []
     warnings: list[str] = []
     allowed_kinds = {"manual", "race", "time_trial"}
     for anchor in anchors:
@@ -170,7 +187,7 @@ def _valid_performance_anchors(
 
 
 def _critical_speed(
-    anchors: list[tuple[PerformanceAnchorInput, float]], baseline_confidence: str
+    anchors: list[tuple[PerformanceAnchorLike, float]], baseline_confidence: str
 ) -> CriticalSpeedResult:
     if baseline_confidence not in {"high", "medium"}:
         return CriticalSpeedResult(
@@ -253,7 +270,7 @@ def get_running_intensity_guidance(
     baseline: RunningBaseline,
     *,
     as_of: date | None = None,
-    performance_anchors: tuple[PerformanceAnchorInput, ...] = (),
+    performance_anchors: tuple[PerformanceAnchorLike, ...] = (),
 ) -> RunningIntensityGuidance:
     end = as_of or baseline.as_of
     if end != baseline.as_of:
@@ -335,13 +352,15 @@ def get_running_intensity_guidance(
         ),
         "performance_anchors": [
             {
-                **asdict(anchor),
+                "kind": anchor.kind,
+                "achieved_on": anchor.achieved_on,
                 "distance_m": (
                     anchor.distance_m if math.isfinite(anchor.distance_m) else "non_finite"
                 ),
                 "duration_s": (
                     anchor.duration_s if math.isfinite(anchor.duration_s) else "non_finite"
                 ),
+                "reliable": anchor.reliable,
             }
             for anchor in sorted(
                 performance_anchors,
@@ -442,7 +461,7 @@ def build_running_shadow_analysis(
     user_id: int,
     baseline: RunningBaseline,
     *,
-    performance_anchors: tuple[PerformanceAnchorInput, ...] = (),
+    performance_anchors: tuple[PerformanceAnchorLike, ...] = (),
 ) -> RunningShadowAnalysis:
     intensity = get_running_intensity_guidance(
         session,
