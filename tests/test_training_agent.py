@@ -30,6 +30,7 @@ from app.models import (
     User,
     Workout,
     WorkoutEvent,
+    WorkoutRevision,
 )
 from app.models.user import utcnow
 from app.services.analytics.health_trends import HEALTH_METRICS
@@ -41,6 +42,7 @@ from app.services.coach.agent import (
 )
 from app.services.coach.conversation import CoachHistoryMessage, CoachRuntimeContext
 from app.services.coach.dependencies import get_coach_agent_factory
+from app.services.coach.presentation import workout_artifact_presentation
 from app.services.coach.tools import (
     coach_tools,
     create_running_workout_proposal,
@@ -49,6 +51,7 @@ from app.services.coach.tools import (
     get_subjective_context,
 )
 from app.services.planning.registry import WORKOUT_FORMAT_IDS
+from app.services.planning.workout_views import workout_lifecycle_projection
 
 
 class FakeCoachAgent:
@@ -77,6 +80,40 @@ class FakeCoachAgent:
         )
         yield CoachEvent("answer_delta", text="Du wirkst heute etwas weniger erholt. ")
         yield CoachEvent("answer_delta", text="Dein Ruhepuls liegt leicht über deinem Basiswert.")
+
+
+@pytest.mark.parametrize(
+    ("approval_status", "status", "schedule_status", "accepted_revision_id", "key", "label"),
+    [
+        ("proposed", "draft", "unscheduled", None, "draft", "Unbestätigt"),
+        ("accepted", "confirmed", "unscheduled", 1, "accepted", "Angenommen"),
+        ("accepted", "confirmed", "scheduled", 1, "scheduled", "Eingeplant"),
+        ("accepted", "published", "scheduled", 1, "published", "Bei Garmin"),
+        ("accepted", "pushed", "scheduled", 1, "pushed", "An Uhr gesendet"),
+        ("rejected", "draft", "unscheduled", None, "rejected", "Abgelehnt"),
+    ],
+)
+def test_workout_lifecycle_projection_is_canonical(
+    approval_status: str,
+    status: str,
+    schedule_status: str,
+    accepted_revision_id: int | None,
+    key: str,
+    label: str,
+) -> None:
+    workout = cast(
+        Workout,
+        SimpleNamespace(
+            approval_status=approval_status,
+            status=status,
+            local_schedule_status=schedule_status,
+            accepted_revision_id=accepted_revision_id,
+        ),
+    )
+
+    projection = workout_lifecycle_projection(workout)
+
+    assert (projection.key, projection.label) == (key, label)
 
 
 def test_global_logging_writes_module_records_to_rotating_file(tmp_path: Path) -> None:
@@ -407,6 +444,11 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
         user = session.scalar(select(User))
         assert user is not None
         _running_history(session, user.id)
+        latest_run = session.scalar(
+            select(Activity).where(Activity.user_id == user.id).order_by(Activity.started_at.desc())
+        )
+        assert latest_run is not None
+        latest_run.workout_rpe = 8
         session.commit()
     conversation_id = _new_chat(client)
 
@@ -419,11 +461,13 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
     assert response.text.count("event: proposal.created") == 1
     assert '"card_url":"/coach/' in response.text
     assert fake.runtime is not None
-    assert f'"run_id":{fake.runtime.assistant_run_id}' in response.text
+    assistant_run_id = fake.runtime.assistant_run_id
+    assert assistant_run_id is not None
+    assert f'"run_id":{assistant_run_id}' in response.text
 
     function = cast(Any, create_running_workout_proposal).func
     with session_factory() as session:
-        run = session.get(CoachAssistantRun, fake.runtime.assistant_run_id)
+        run = session.get(CoachAssistantRun, assistant_run_id)
         assert run is not None
         assert run.status == "completed"
         assert run.workout_id is not None
@@ -452,11 +496,60 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
         )
         assert propose_event is not None
         assert propose_event.idempotency_key == (
-            f"coach-run:{fake.runtime.assistant_run_id}:{run.created_at.isoformat()}:"
+            f"coach-run:{assistant_run_id}:{run.created_at.isoformat()}:"
             "create_running_workout_proposal:v2"
         )
         assert len(list(session.scalars(select(Workout)))) == 1
         workout_id = workout.id
+        revision = session.get(WorkoutRevision, workout.current_revision_id)
+        assert revision is not None
+        artifact = workout_artifact_presentation(
+            session,
+            user.id,
+            conversation_id,
+            assistant_run_id,
+        )
+        assert artifact is not None
+        assert (
+            artifact.artifact_type,
+            artifact.workout_id,
+            artifact.revision_id,
+            artifact.accepted_revision_id,
+        ) == ("workout", workout.id, revision.id, None)
+        assert artifact.lifecycle.key == "draft"
+        assert [
+            (action.key, action.endpoint, action.revision_id, action.scheduled_for)
+            for action in artifact.lifecycle_actions
+        ] == [
+            ("accept", f"/workouts/{workout.id}/confirm", revision.id, revision.suggested_for),
+            ("reject", f"/workouts/{workout.id}/reject", revision.id, revision.suggested_for),
+        ]
+        assert artifact.warning is not None
+        assert artifact.warning.outcome == "warn"
+        assert artifact.warning.evidence is not None
+        assert artifact.warning.evidence.assessed_on == date.today()
+        assert artifact.warning.coverage_percent is not None
+        assert artifact.warning.recommendation
+        assert artifact.warning_acknowledgement is not None
+        assert (
+            artifact.warning_acknowledgement.revision_id,
+            artifact.warning_acknowledgement.scheduled_for,
+        ) == (revision.id, revision.suggested_for)
+        assert artifact.warning_acknowledgement.key == "acknowledge_warning"
+        assert artifact.warning_acknowledgement not in artifact.lifecycle_actions
+
+        other_user = User(display_name="Andere Person")
+        session.add(other_user)
+        session.flush()
+        assert (
+            workout_artifact_presentation(
+                session,
+                other_user.id,
+                conversation_id,
+                assistant_run_id,
+            )
+            is None
+        )
 
     page = client.get(f"/coach/{conversation_id}")
     assert page.status_code == 200
@@ -464,15 +557,10 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
     assert "60 Minuten" in page.text
     assert "Unbestätigt" in page.text
     assert f'href="/workouts/{workout_id}"' in page.text
-    card = client.get(
-        f"/coach/{conversation_id}/runs/{fake.runtime.assistant_run_id}/proposal-card"
-    )
+    card = client.get(f"/coach/{conversation_id}/runs/{assistant_run_id}/proposal-card")
     assert card.status_code == 200
     assert f'data-workout-id="{workout_id}"' in card.text
-    assert (
-        client.get(f"/coach/999/runs/{fake.runtime.assistant_run_id}/proposal-card").status_code
-        == 404
-    )
+    assert client.get(f"/coach/999/runs/{assistant_run_id}/proposal-card").status_code == 404
 
     with session_factory() as session:
         workout = session.get(Workout, workout_id)
@@ -482,9 +570,7 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
         workout.local_schedule_status = "scheduled"
         workout.scheduled_for = date.today() + timedelta(days=1)
         session.commit()
-    updated_card = client.get(
-        f"/coach/{conversation_id}/runs/{fake.runtime.assistant_run_id}/proposal-card"
-    )
+    updated_card = client.get(f"/coach/{conversation_id}/runs/{assistant_run_id}/proposal-card")
     assert "Eingeplant" in updated_card.text
     assert "im lokalen Kalender eingeplant" in updated_card.text
     assert "weder angenommen noch eingeplant" not in updated_card.text
@@ -504,7 +590,7 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
     deleted = client.post(f"/coach/{conversation_id}/delete", follow_redirects=False)
     assert deleted.status_code == 303
     with session_factory() as session:
-        assert session.get(CoachAssistantRun, fake.runtime.assistant_run_id) is None
+        assert session.get(CoachAssistantRun, assistant_run_id) is None
         workout = session.get(Workout, workout_id)
         assert workout is not None
         assert workout.originating_conversation_id is None
@@ -672,6 +758,7 @@ def test_proposal_survives_provider_failure_after_commit(
     reloaded = client.get(f"/coach/{conversation_id}")
     assert reloaded.status_code == 200
     assert "Diese Antwort wurde nicht abgeschlossen" in reloaded.text
+    assert "Unbestätigt" in reloaded.text
     assert f'href="/workouts/{workout_id}"' in reloaded.text
 
 

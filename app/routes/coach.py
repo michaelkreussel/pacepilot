@@ -2,7 +2,6 @@ import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator, Sequence
-from dataclasses import dataclass
 from datetime import date, timedelta
 from time import monotonic
 from typing import Annotated
@@ -21,7 +20,7 @@ from app.config import (
     get_settings,
 )
 from app.database import SessionDep
-from app.models import CoachMessage, Workout, WorkoutRevision
+from app.models import CoachMessage
 from app.models.user import utcnow
 from app.onboarding import require_data_access
 from app.repositories.coach import (
@@ -29,7 +28,6 @@ from app.repositories.coach import (
     conversation_messages,
     create_conversation,
     fail_message,
-    find_assistant_run,
     find_conversation,
     finish_tool_call,
     list_conversations,
@@ -48,17 +46,15 @@ from app.services.coach.dependencies import (
     CoachAgentFactoryDep,
     CoachProviderConfiguredDep,
 )
+from app.services.coach.presentation import (
+    WorkoutArtifactPresentation,
+    workout_artifact_presentation,
+)
 from app.services.planning.registry import registered_workout_formats
 from app.services.planning.weekly_planner import (
     WeeklyPlanCandidate,
     WeeklyPlannerError,
     plan_shadow_week,
-)
-from app.services.planning.workout_definition import (
-    HeartRateRangeTarget,
-    RpeRangeTarget,
-    StepBlockV2,
-    workout_metrics,
 )
 from app.services.planning.workout_proposals import (
     RunningProposalRequest,
@@ -74,89 +70,15 @@ router = APIRouter(prefix="/coach", dependencies=[Depends(require_data_access)])
 logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
-class CoachProposalCard:
-    workout_id: int
-    assistant_run_id: int
-    name: str
-    suggested_for: date | None
-    duration_minutes: int
-    target_label: str
-    status_label: str
-    status_description: str
-
-
-def _proposal_card(
-    session: Session, user_id: int, conversation_id: int, run_id: int
-) -> CoachProposalCard | None:
-    run = find_assistant_run(session, user_id, conversation_id, run_id)
-    if run is None or run.workout_id is None:
-        return None
-    workout = session.get(Workout, run.workout_id)
-    if (
-        workout is None
-        or workout.user_id != user_id
-        or workout.deleted_at is not None
-        or workout.source_type != "coach_single"
-        or workout.originating_conversation_id != conversation_id
-        or workout.originating_user_message_id != run.user_message_id
-        or workout.originating_assistant_message_id != run.assistant_message_id
-        or workout.current_revision_id is None
-    ):
-        return None
-    revision = session.get(WorkoutRevision, workout.current_revision_id)
-    if revision is None or revision.workout_id != workout.id:
-        return None
-    definition = revision.definition_model
-    target_label = "Lokale Intensitätsleitplanken"
-    if len(definition.blocks) == 1 and isinstance(definition.blocks[0], StepBlockV2):
-        target = definition.blocks[0].target
-        if isinstance(target, HeartRateRangeTarget):
-            target_label = f"HF {target.lower_bpm}–{target.upper_bpm} bpm"
-        elif isinstance(target, RpeRangeTarget):
-            target_label = f"RPE {target.lower_rpe}–{target.upper_rpe}"
-    if workout.approval_status == "rejected":
-        status_label = "Abgelehnt"
-        status_description = "Dieser Vorschlag wurde abgelehnt und wird nicht ausgeführt."
-    elif workout.status == "pushed":
-        status_label = "An Uhr gesendet"
-        status_description = "Die angenommene Revision wurde an das Garmin-Gerät gesendet."
-    elif workout.status == "published":
-        status_label = "Bei Garmin"
-        status_description = "Die angenommene Revision wurde zu Garmin übertragen."
-    elif workout.local_schedule_status == "scheduled":
-        status_label = "Eingeplant"
-        status_description = "Die angenommene Revision ist im lokalen Kalender eingeplant."
-    elif workout.accepted_revision_id is not None:
-        status_label = "Angenommen"
-        status_description = "Die geprüfte Revision wurde angenommen, aber nicht eingeplant."
-    else:
-        status_label = "Unbestätigt"
-        status_description = (
-            "Der deterministische Vorschlag ist weder angenommen noch eingeplant. "
-            "Prüfe ihn vor jeder weiteren Aktion."
-        )
-    return CoachProposalCard(
-        workout_id=workout.id,
-        assistant_run_id=run.id,
-        name=revision.name,
-        suggested_for=revision.suggested_for,
-        duration_minutes=round(workout_metrics(definition).duration_seconds / 60),
-        target_label=target_label,
-        status_label=status_label,
-        status_description=status_description,
-    )
-
-
 def _proposal_cards(
     session: Session, user_id: int, conversation_id: int, messages: Sequence[CoachMessage]
-) -> dict[int, CoachProposalCard]:
-    cards: dict[int, CoachProposalCard] = {}
+) -> dict[int, WorkoutArtifactPresentation]:
+    cards: dict[int, WorkoutArtifactPresentation] = {}
     for message in messages:
         run = message.generated_run
         if run is None:
             continue
-        card = _proposal_card(session, user_id, conversation_id, run.id)
+        card = workout_artifact_presentation(session, user_id, conversation_id, run.id)
         if card is not None:
             cards[message.id] = card
     return cards
@@ -459,7 +381,7 @@ def proposal_card(
     session: SessionDep,
     user: CurrentUser,
 ) -> HTMLResponse:
-    card = _proposal_card(session, user.id, conversation_id, run_id)
+    card = workout_artifact_presentation(session, user.id, conversation_id, run_id)
     if card is None:
         raise HTTPException(status_code=404, detail="Vorschlag nicht gefunden")
     return templates.TemplateResponse(
@@ -584,7 +506,7 @@ def _proposal_event_payload(runtime: CoachRuntimeContext) -> dict[str, object]:
     if runtime.conversation_id is None or runtime.assistant_run_id is None:
         raise RuntimeError("Proposal event has no local assistant run")
     with runtime.session_factory() as session:
-        card = _proposal_card(
+        card = workout_artifact_presentation(
             session,
             runtime.user_id,
             runtime.conversation_id,

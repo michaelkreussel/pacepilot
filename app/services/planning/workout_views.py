@@ -12,6 +12,9 @@ from app.models import (
     WorkoutRevision,
 )
 from app.services.planning.workout_definition import (
+    HeartRateRangeTarget,
+    RpeRangeTarget,
+    StepBlockV2,
     WorkoutDefinitionModel,
     parse_definition,
     workout_metrics,
@@ -32,6 +35,54 @@ GOAL_TYPE_LABELS = {
     "half_marathon": "Halbmarathon",
     "marathon": "Marathon",
 }
+
+
+@dataclass(frozen=True)
+class WorkoutLifecycleProjection:
+    key: str
+    label: str
+    description: str
+
+
+def workout_lifecycle_projection(workout: Workout) -> WorkoutLifecycleProjection:
+    if workout.approval_status == "rejected":
+        return WorkoutLifecycleProjection(
+            key="rejected",
+            label="Abgelehnt",
+            description="Dieser Vorschlag wurde abgelehnt und wird nicht ausgeführt.",
+        )
+    if workout.status == "pushed":
+        return WorkoutLifecycleProjection(
+            key="pushed",
+            label="An Uhr gesendet",
+            description="Die angenommene Revision wurde an das Garmin-Gerät gesendet.",
+        )
+    if workout.status == "published":
+        return WorkoutLifecycleProjection(
+            key="published",
+            label="Bei Garmin",
+            description="Die angenommene Revision wurde zu Garmin übertragen.",
+        )
+    if workout.local_schedule_status == "scheduled":
+        return WorkoutLifecycleProjection(
+            key="scheduled",
+            label="Eingeplant",
+            description="Die angenommene Revision ist im lokalen Kalender eingeplant.",
+        )
+    if workout.accepted_revision_id is not None:
+        return WorkoutLifecycleProjection(
+            key="accepted",
+            label="Angenommen",
+            description="Die geprüfte Revision wurde angenommen, aber nicht eingeplant.",
+        )
+    return WorkoutLifecycleProjection(
+        key="draft",
+        label="Unbestätigt",
+        description=(
+            "Der deterministische Vorschlag ist weder angenommen noch eingeplant. "
+            "Prüfe ihn vor jeder weiteren Aktion."
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -69,6 +120,17 @@ class WorkoutRevisionView:
     @property
     def duration_minutes(self) -> int:
         return round(workout_metrics(self.definition_model).duration_seconds / 60)
+
+    @property
+    def target_label(self) -> str:
+        definition = self.definition_model
+        if len(definition.blocks) == 1 and isinstance(definition.blocks[0], StepBlockV2):
+            target = definition.blocks[0].target
+            if isinstance(target, HeartRateRangeTarget):
+                return f"HF {target.lower_bpm}–{target.upper_bpm} bpm"
+            if isinstance(target, RpeRangeTarget):
+                return f"RPE {target.lower_rpe}–{target.upper_rpe}"
+        return "Lokale Intensitätsleitplanken"
 
     @property
     def source_label(self) -> str:
