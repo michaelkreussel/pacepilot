@@ -11,14 +11,17 @@ from app.models import (
     User,
     Workout,
     WorkoutGarminAttempt,
+    WorkoutGarminBinding,
     WorkoutGarminOperation,
     WorkoutRevision,
 )
 from app.models.user import utcnow
 from app.services.garmin.client import GarminUnavailableError
+from app.services.garmin.workout_operations import GarminWorkoutOperations
 from app.services.planning.validator import WorkoutInput, WorkoutValidationError
 from app.services.planning.workout_definition import default_definition
 from app.services.planning.workout_revision import (
+    AcceptedWorkoutExecution,
     AcceptRevisionCommand,
     RevisionIdentity,
     ScheduleWorkoutCommand,
@@ -99,6 +102,64 @@ def test_service_validates_commands_before_persisting(
         assert exc_info.value.code == "workout.name_required"
         assert str(exc_info.value) == "Bitte einen Namen angeben."
         assert session.scalar(select(Workout)) is None
+
+
+def test_garmin_operations_own_durable_upload_and_outcome_mapping(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(get_settings(), "garmin_call_delay_seconds", 0)
+
+    class FakeGarmin:
+        def upload_workout(self, _payload: dict[str, Any]) -> dict[str, str]:
+            with session_factory() as observer:
+                operation = observer.scalar(select(WorkoutGarminOperation))
+                attempt = observer.scalar(select(WorkoutGarminAttempt))
+                assert operation is not None and operation.status == "pending"
+                assert attempt is not None and attempt.status == "pending"
+            return {"workoutId": "remote-boundary"}
+
+    with session_factory() as session:
+        user = User(display_name="Athlete")
+        session.add(user)
+        session.flush()
+        account = GarminAccount(user_id=user.id, connected_at=utcnow())
+        session.add(account)
+        session.commit()
+        service = WorkoutService(session, user)
+        workout = service.create(_input())
+        service.confirm(workout.id, _accept_command(session, workout))
+        assert workout.accepted_revision_id is not None
+        revision = session.get(WorkoutRevision, workout.accepted_revision_id)
+        binding = session.scalar(
+            select(WorkoutGarminBinding).where(WorkoutGarminBinding.workout_id == workout.id)
+        )
+        assert revision is not None and binding is not None
+        execution = AcceptedWorkoutExecution(
+            workout_id=workout.id,
+            revision_id=revision.id,
+            revision_number=revision.revision_number,
+            name=revision.name,
+            sport=revision.sport,
+            description=revision.description,
+            definition_version=revision.definition_version,
+            definition=revision.definition,
+            scheduled_for=None,
+            garmin_workout_id=None,
+        )
+
+        identity = GarminWorkoutOperations(
+            session,
+            account,
+            connect_garmin=lambda *_args: FakeGarmin(),
+        ).upload(workout, binding, revision, execution)
+
+        assert identity is not None
+        assert identity.garmin_workout_id == "remote-boundary"
+        assert binding.active_remote_identity_id == identity.id
+        assert binding.content_status == "synced"
+        assert workout.garmin_workout_id == "remote-boundary"
+        operation = session.scalar(select(WorkoutGarminOperation))
+        assert operation is not None and operation.status == "succeeded"
 
 
 def test_service_owns_manual_lifecycle_and_garmin_orchestration(
