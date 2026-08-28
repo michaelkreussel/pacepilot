@@ -21,7 +21,6 @@ from app.config import (
 )
 from app.database import SessionDep
 from app.models import CoachMessage
-from app.models.user import utcnow
 from app.onboarding import require_data_access
 from app.repositories.coach import (
     complete_message,
@@ -33,9 +32,11 @@ from app.repositories.coach import (
 )
 from app.services.coach.agent import CoachProviderError
 from app.services.coach.conversation import (
+    ActiveResponseConflictError,
     CoachHistoryMessage,
     CoachRuntimeContext,
     prepare_execution,
+    repair_stale_responses,
 )
 from app.services.coach.dependencies import (
     CoachAgentFactory,
@@ -100,15 +101,6 @@ def _message_html(
     return templates.get_template("coach/_message.html").render(values)
 
 
-def _has_active_response(session: Session, messages: Sequence[CoachMessage]) -> bool:
-    stale_before = utcnow() - timedelta(minutes=10)
-    for message in messages:
-        if message.status == "streaming" and message.created_at < stale_before:
-            fail_message(session, message.id, interrupted=True)
-    session.flush()
-    return any(message.status == "streaming" for message in messages)
-
-
 def _render_coach(
     request: Request,
     session: Session,
@@ -129,10 +121,14 @@ def _render_coach(
         selected = find_conversation(session, user.id, conversation_id)
         if selected is None:
             raise HTTPException(status_code=404, detail="Chat nicht gefunden")
+        if repair_stale_responses(session, user.id, conversation_id):
+            session.commit()
         loaded = conversation_messages(session, user.id, conversation_id)
         messages = loaded or []
     elif conversations:
         selected = conversations[0]
+        if repair_stale_responses(session, user.id, selected.id):
+            session.commit()
         loaded = conversation_messages(session, user.id, selected.id)
         messages = loaded or []
 
@@ -471,8 +467,9 @@ def delete_conversation(
     if conversation is None:
         raise HTTPException(status_code=404, detail="Chat nicht gefunden")
 
+    repair_stale_responses(session, user.id, conversation_id)
     messages = conversation_messages(session, user.id, conversation_id) or []
-    if _has_active_response(session, messages):
+    if any(message.status == "streaming" for message in messages):
         raise HTTPException(
             status_code=409,
             detail="Dieser Chat kann während einer laufenden Antwort nicht gelöscht werden.",
@@ -654,21 +651,24 @@ async def ask_coach(
             detail="Konfiguriere zuerst OpenRouter, bevor du den Coach fragst.",
         )
     existing_messages = conversation_messages(session, user.id, conversation_id) or []
-    if _has_active_response(session, existing_messages):
-        raise HTTPException(status_code=409, detail="In diesem Chat läuft bereits eine Antwort.")
-
-    execution = prepare_execution(
-        session,
-        conversation,
-        existing_messages,
-        user_id=user.id,
-        question=message,
-        model_id=get_settings().llm_model,
-        request_id=request.state.request_id,
-        prompt_template_version=COACH_PROMPT_TEMPLATE_VERSION,
-        operation_contract_version=COACH_TOOL_CONTRACT_VERSION,
-        as_of=date.today(),
-    )
+    try:
+        execution = prepare_execution(
+            session,
+            conversation,
+            existing_messages,
+            user_id=user.id,
+            question=message,
+            model_id=get_settings().llm_model,
+            request_id=request.state.request_id,
+            prompt_template_version=COACH_PROMPT_TEMPLATE_VERSION,
+            operation_contract_version=COACH_TOOL_CONTRACT_VERSION,
+            as_of=date.today(),
+        )
+    except ActiveResponseConflictError as exc:
+        session.rollback()
+        raise HTTPException(
+            status_code=409, detail="In diesem Chat läuft bereits eine Antwort."
+        ) from exc
     session.commit()
 
     return StreamingResponse(

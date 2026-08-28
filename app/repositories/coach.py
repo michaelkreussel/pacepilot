@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
@@ -94,6 +96,66 @@ def create_message(
     session.add(message)
     session.flush()
     return message
+
+
+def claim_response(
+    session: Session,
+    conversation: CoachConversation,
+    *,
+    title: str,
+    question: str,
+    model_id: str,
+    request_id: str | None,
+    prompt_template_version: str,
+    operation_contract_version: str,
+) -> tuple[CoachMessage, CoachMessage]:
+    with session.begin_nested():
+        conversation.title = title
+        user_message = create_message(session, conversation, role="user", content=question)
+        assistant_message = create_message(
+            session,
+            conversation,
+            role="assistant",
+            status="streaming",
+            model_id=model_id,
+            request_id=request_id,
+            prompt_template_version=prompt_template_version,
+            operation_contract_version=operation_contract_version,
+        )
+    return user_message, assistant_message
+
+
+def interrupt_stale_responses(
+    session: Session,
+    user_id: int,
+    conversation_id: int,
+    *,
+    stale_before: datetime,
+) -> int:
+    stale_messages = list(
+        session.scalars(
+            select(CoachMessage)
+            .join(CoachConversation)
+            .where(
+                CoachConversation.user_id == user_id,
+                CoachMessage.conversation_id == conversation_id,
+                CoachMessage.role == "assistant",
+                CoachMessage.status == "streaming",
+                CoachMessage.created_at < stale_before,
+            )
+        )
+    )
+    if not stale_messages:
+        return 0
+
+    completed_at = utcnow()
+    for message in stale_messages:
+        message.status = "interrupted"
+        message.failure_category = "interrupted"
+        message.completed_at = completed_at
+        message.conversation.updated_at = completed_at
+    session.flush()
+    return len(stale_messages)
 
 
 def complete_message(session: Session, message_id: int, content: str) -> None:

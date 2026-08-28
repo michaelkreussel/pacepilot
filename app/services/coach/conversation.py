@@ -1,15 +1,22 @@
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from typing import Literal
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.models import CoachConversation, CoachMessage
-from app.repositories.coach import create_message
+from app.models.user import utcnow
+from app.repositories.coach import claim_response, interrupt_stale_responses
 
 MAX_HISTORY_MESSAGES = 20
 MAX_HISTORY_CHARACTERS = 12_000
+ACTIVE_RESPONSE_TIMEOUT = timedelta(minutes=10)
+
+
+class ActiveResponseConflictError(Exception):
+    pass
 
 
 @dataclass(frozen=True)
@@ -59,6 +66,15 @@ def conversation_title(current_title: str, question: str) -> str:
     return question[:157] + ("..." if len(question) > 157 else "")
 
 
+def repair_stale_responses(session: Session, user_id: int, conversation_id: int) -> int:
+    return interrupt_stale_responses(
+        session,
+        user_id,
+        conversation_id,
+        stale_before=utcnow() - ACTIVE_RESPONSE_TIMEOUT,
+    )
+
+
 def prepare_execution(
     session: Session,
     conversation: CoachConversation,
@@ -72,18 +88,22 @@ def prepare_execution(
     operation_contract_version: str,
     as_of: date,
 ) -> CoachExecutionPreparation:
-    conversation.title = conversation_title(conversation.title, question)
-    user_message = create_message(session, conversation, role="user", content=question)
-    assistant_message = create_message(
-        session,
-        conversation,
-        role="assistant",
-        status="streaming",
-        model_id=model_id,
-        request_id=request_id,
-        prompt_template_version=prompt_template_version,
-        operation_contract_version=operation_contract_version,
-    )
+    repair_stale_responses(session, user_id, conversation.id)
+    try:
+        user_message, assistant_message = claim_response(
+            session,
+            conversation,
+            title=conversation_title(conversation.title, question),
+            question=question,
+            model_id=model_id,
+            request_id=request_id,
+            prompt_template_version=prompt_template_version,
+            operation_contract_version=operation_contract_version,
+        )
+    except IntegrityError as exc:
+        if "UNIQUE constraint failed: coach_messages.conversation_id" not in str(exc.orig):
+            raise
+        raise ActiveResponseConflictError from exc
     factory = sessionmaker(bind=session.get_bind(), autoflush=False, expire_on_commit=False)
     runtime = CoachRuntimeContext(
         user_id=user_id,

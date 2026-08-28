@@ -1,16 +1,27 @@
+import asyncio
 from collections.abc import AsyncIterator, Sequence
-from datetime import timedelta
+from concurrent.futures import ThreadPoolExecutor
+from datetime import date, timedelta
+from pathlib import Path
+from threading import Barrier
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.database import Base
 from app.main import app
-from app.models import CoachAssistantRun, CoachConversation, CoachMessage
+from app.models import CoachAssistantRun, CoachConversation, CoachMessage, User
 from app.models.user import utcnow
+from app.repositories.coach import conversation_messages, find_conversation
 from app.services.coach.agent import CoachEvent
-from app.services.coach.conversation import CoachHistoryMessage, CoachRuntimeContext
+from app.services.coach.conversation import (
+    ActiveResponseConflictError,
+    CoachHistoryMessage,
+    CoachRuntimeContext,
+    prepare_execution,
+)
 from app.services.coach.dependencies import get_coach_agent_factory
 from app.services.coach.provider import (
     COACH_PROMPT_TEMPLATE_VERSION,
@@ -208,6 +219,108 @@ def test_active_response_rejects_another_message(
         )
         assert len(messages) == 1
         assert messages[0].status == "streaming"
+
+
+def test_simultaneous_submissions_start_one_response_without_an_orphan_user_message(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "coach-concurrency.db"
+    engine = create_engine(
+        f"sqlite:///{database_path.as_posix()}",
+        connect_args={"check_same_thread": False, "timeout": 5},
+    )
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    with factory() as session:
+        user = User(display_name="Concurrent athlete")
+        conversation = CoachConversation(user=user, title="Neuer Chat")
+        session.add_all((user, conversation))
+        session.commit()
+        user_id = user.id
+        conversation_id = conversation.id
+
+    agent = RecordingCoachAgent()
+    both_observed_no_active_response = Barrier(2)
+
+    async def execute_provider(execution) -> None:
+        async for _event in agent.stream(execution.history, execution.runtime):
+            pass
+
+    def submit(question: str) -> str:
+        with factory() as session:
+            conversation = find_conversation(session, user_id, conversation_id)
+            assert conversation is not None
+            prior_messages = conversation_messages(session, user_id, conversation_id) or []
+            assert prior_messages == []
+            both_observed_no_active_response.wait()
+            try:
+                execution = prepare_execution(
+                    session,
+                    conversation,
+                    prior_messages,
+                    user_id=user_id,
+                    question=question,
+                    model_id="test/model",
+                    request_id=question,
+                    prompt_template_version=COACH_PROMPT_TEMPLATE_VERSION,
+                    operation_contract_version=COACH_TOOL_CONTRACT_VERSION,
+                    as_of=date(2026, 8, 28),
+                )
+                session.commit()
+            except ActiveResponseConflictError:
+                session.rollback()
+                return "conflict"
+        asyncio.run(execute_provider(execution))
+        return "started"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(submit, ("First question", "Second question")))
+
+    assert sorted(results) == ["conflict", "started"]
+    assert len(agent.calls) == 1
+    with factory() as session:
+        messages = list(
+            session.scalars(
+                select(CoachMessage)
+                .where(CoachMessage.conversation_id == conversation_id)
+                .order_by(CoachMessage.id)
+            )
+        )
+        assert [(message.role, message.status) for message in messages] == [
+            ("user", "completed"),
+            ("assistant", "streaming"),
+        ]
+        assert messages[0].content in {"First question", "Second question"}
+    engine.dispose()
+
+
+def test_loading_conversation_repairs_and_displays_a_stale_response(
+    client: TestClient, session_factory: sessionmaker[Session]
+) -> None:
+    conversation_id = _new_chat(client)
+    with session_factory() as session:
+        conversation = session.get(CoachConversation, conversation_id)
+        assert conversation is not None
+        stale = CoachMessage(
+            conversation=conversation,
+            role="assistant",
+            content="partial answer",
+            status="streaming",
+            created_at=utcnow() - timedelta(minutes=11),
+        )
+        session.add(stale)
+        session.commit()
+        stale_id = stale.id
+
+    response = client.get(f"/coach/{conversation_id}")
+
+    assert response.status_code == 200
+    assert "Diese Antwort wurde nicht abgeschlossen" in response.text
+    with session_factory() as session:
+        stale = session.get(CoachMessage, stale_id)
+        assert stale is not None
+        assert stale.status == "interrupted"
+        assert stale.completed_at is not None
 
 
 def test_stale_response_is_interrupted_before_the_next_message(
