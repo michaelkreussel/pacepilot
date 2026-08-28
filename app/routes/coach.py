@@ -46,6 +46,10 @@ from app.services.coach.presentation import (
     WorkoutArtifactPresentation,
     workout_artifact_presentation,
 )
+from app.services.coach.provider import (
+    COACH_PROMPT_TEMPLATE_VERSION,
+    COACH_TOOL_CONTRACT_VERSION,
+)
 from app.services.planning.registry import registered_workout_formats
 from app.services.planning.weekly_planner import (
     WeeklyPlanCandidate,
@@ -69,10 +73,7 @@ logger = logging.getLogger(__name__)
 def _proposal_card(
     session: Session, user_id: int, conversation_id: int, message: CoachMessage
 ) -> WorkoutArtifactPresentation | None:
-    run = message.generated_run
-    if run is None:
-        return None
-    return workout_artifact_presentation(session, user_id, conversation_id, run.id)
+    return workout_artifact_presentation(session, user_id, conversation_id, message.id)
 
 
 def _proposal_cards(
@@ -388,15 +389,18 @@ def new_conversation(session: SessionDep, user: CurrentUser) -> RedirectResponse
     return RedirectResponse(f"/coach/{conversation.id}", status_code=303)
 
 
-@router.get("/{conversation_id}/runs/{run_id}/proposal-card", response_class=HTMLResponse)
+@router.get(
+    "/{conversation_id}/messages/{assistant_message_id}/proposal-card",
+    response_class=HTMLResponse,
+)
 def proposal_card(
     conversation_id: int,
-    run_id: int,
+    assistant_message_id: int,
     request: Request,
     session: SessionDep,
     user: CurrentUser,
 ) -> HTMLResponse:
-    card = workout_artifact_presentation(session, user.id, conversation_id, run_id)
+    card = workout_artifact_presentation(session, user.id, conversation_id, assistant_message_id)
     if card is None:
         raise HTTPException(status_code=404, detail="Vorschlag nicht gefunden")
     return templates.TemplateResponse(
@@ -491,22 +495,23 @@ def _event(event: str, payload: dict[str, object]) -> str:
 
 
 def _proposal_event_payload(runtime: CoachRuntimeContext) -> dict[str, object]:
-    if runtime.conversation_id is None or runtime.assistant_run_id is None:
-        raise RuntimeError("Proposal event has no local assistant run")
+    if runtime.conversation_id is None or runtime.assistant_message_id is None:
+        raise RuntimeError("Proposal event has no assistant message")
     with runtime.session_factory() as session:
         card = workout_artifact_presentation(
             session,
             runtime.user_id,
             runtime.conversation_id,
-            runtime.assistant_run_id,
+            runtime.assistant_message_id,
         )
     if card is None:
         raise RuntimeError("Proposal tool completed without a persisted artifact")
     return {
         "workout_id": card.workout_id,
-        "run_id": card.assistant_run_id,
+        "source_message_id": card.source_assistant_message_id,
         "card_url": (
-            f"/coach/{runtime.conversation_id}/runs/{card.assistant_run_id}/proposal-card"
+            f"/coach/{runtime.conversation_id}/messages/"
+            f"{card.source_assistant_message_id}/proposal-card"
         ),
     }
 
@@ -543,7 +548,6 @@ async def _stream_answer(
             card = _proposal_card(session, runtime.user_id, conversation_id, assistant_message)
             started_payload: dict[str, object] = {
                 "message_id": assistant_message_id,
-                "run_id": runtime.assistant_run_id,
                 "conversation_title": conversation_title,
                 "user_html": _message_html(request, user_message, None),
                 "assistant_html": _message_html(request, assistant_message, card),
@@ -661,6 +665,8 @@ async def ask_coach(
         question=message,
         model_id=get_settings().llm_model,
         request_id=request.state.request_id,
+        prompt_template_version=COACH_PROMPT_TEMPLATE_VERSION,
+        operation_contract_version=COACH_TOOL_CONTRACT_VERSION,
         as_of=date.today(),
     )
     session.commit()

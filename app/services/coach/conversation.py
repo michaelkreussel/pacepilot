@@ -6,7 +6,7 @@ from typing import Literal
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.models import CoachConversation, CoachMessage
-from app.repositories.coach import create_assistant_run, create_message
+from app.repositories.coach import create_message
 
 MAX_HISTORY_MESSAGES = 20
 MAX_HISTORY_CHARACTERS = 12_000
@@ -27,7 +27,6 @@ class CoachRuntimeContext:
     conversation_id: int | None = None
     user_message_id: int | None = None
     assistant_message_id: int | None = None
-    assistant_run_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -69,6 +68,8 @@ def prepare_execution(
     question: str,
     model_id: str,
     request_id: str | None,
+    prompt_template_version: str,
+    operation_contract_version: str,
     as_of: date,
 ) -> CoachExecutionPreparation:
     conversation.title = conversation_title(conversation.title, question)
@@ -79,14 +80,9 @@ def prepare_execution(
         role="assistant",
         status="streaming",
         model_id=model_id,
-    )
-    assistant_run = create_assistant_run(
-        session,
-        conversation,
-        user_message,
-        assistant_message,
-        model_id=model_id,
         request_id=request_id,
+        prompt_template_version=prompt_template_version,
+        operation_contract_version=operation_contract_version,
     )
     factory = sessionmaker(bind=session.get_bind(), autoflush=False, expire_on_commit=False)
     runtime = CoachRuntimeContext(
@@ -97,7 +93,6 @@ def prepare_execution(
         conversation_id=conversation.id,
         user_message_id=user_message.id,
         assistant_message_id=assistant_message.id,
-        assistant_run_id=assistant_run.id,
     )
     history = (*bounded_history(prior_messages), CoachHistoryMessage("user", question))
     return CoachExecutionPreparation(history, runtime, assistant_message.id)

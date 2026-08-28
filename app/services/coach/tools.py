@@ -3,7 +3,7 @@ from dataclasses import asdict
 from datetime import date, datetime, timedelta
 
 from app.models import CoachMessage, User
-from app.repositories.coach import find_assistant_run
+from app.repositories.coach import find_assistant_message
 from app.services.analytics.athlete_data import AthleteDataService
 from app.services.analytics.health_trends import HealthMetric
 from app.services.coach.conversation import CoachRuntimeContext
@@ -154,9 +154,6 @@ def create_running_workout_proposal(
     suggested_for: date,
     available_minutes: int,
     template_id: RunningTemplateId = "easy_run",
-    *,
-    model_provider: str,
-    prompt_template_version: str,
 ) -> str:
     """Create one unaccepted running workout through PacePilot's deterministic planner.
 
@@ -170,53 +167,46 @@ def create_running_workout_proposal(
         context.conversation_id is None
         or context.user_message_id is None
         or context.assistant_message_id is None
-        or context.assistant_run_id is None
     ):
         raise ValueError("Coach proposal runtime is incomplete")
     conversation_id = context.conversation_id
     user_message_id = context.user_message_id
     assistant_message_id = context.assistant_message_id
-    assistant_run_id = context.assistant_run_id
     with context.session_factory() as session:
-        run = find_assistant_run(session, context.user_id, conversation_id, assistant_run_id)
         user_message = session.get(CoachMessage, user_message_id)
-        assistant_message = session.get(CoachMessage, assistant_message_id)
+        assistant_message = find_assistant_message(
+            session, context.user_id, conversation_id, assistant_message_id
+        )
         user = session.get(User, context.user_id)
         if (
-            run is None
-            or user is None
-            or run.user_message_id != user_message_id
-            or run.assistant_message_id != assistant_message_id
+            user is None
             or user_message is None
             or user_message.conversation_id != conversation_id
             or user_message.role != "user"
             or assistant_message is None
-            or assistant_message.conversation_id != conversation_id
-            or assistant_message.role != "assistant"
         ):
             raise ValueError("Coach proposal runtime is invalid")
         request = RunningProposalRequest(
             template_id=template_id,
             suggested_for=suggested_for,
             available_minutes=available_minutes,
-            # SQLite rowids are reused after conversation deletes cascade old runs away,
-            # so the run id alone is not unique. The creation timestamp disambiguates
-            # recycled ids and keeps retries within one run on the same key.
+            # SQLite rowids can be reused after conversation deletion, so the timestamp
+            # keeps retries scoped to this exact durable assistant execution.
             idempotency_key=(
-                f"coach-run:{assistant_run_id}:{run.created_at.isoformat()}:"
+                f"coach-message:{assistant_message_id}:{assistant_message.created_at.isoformat()}:"
                 "create_running_workout_proposal:v2"
             ),
         )
         try:
-            RunningProposalService(session, user, request_id=context.request_id).create(
+            RunningProposalService(session, user, request_id=assistant_message.request_id).create(
                 request,
                 origin=ProposalOrigin(
                     conversation_id=conversation_id,
                     user_message_id=user_message_id,
                     assistant_message_id=assistant_message_id,
-                    assistant_run_id=assistant_run_id,
-                    model_provider=model_provider,
-                    prompt_template_version=prompt_template_version,
+                    model_provider="openrouter",
+                    model_id=assistant_message.model_id,
+                    prompt_template_version=assistant_message.prompt_template_version,
                 ),
             )
         except (WorkoutProposalError, TemplateExpansionError, WorkoutServiceError) as exc:

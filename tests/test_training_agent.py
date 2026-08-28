@@ -22,7 +22,6 @@ from app.logging import FILE_HANDLER, configure_logging
 from app.main import app
 from app.models import (
     Activity,
-    CoachAssistantRun,
     CoachConversation,
     CoachMessage,
     CoachToolCall,
@@ -41,11 +40,7 @@ from app.services.coach.agent import CoachEvent
 from app.services.coach.conversation import CoachHistoryMessage, CoachRuntimeContext
 from app.services.coach.dependencies import get_coach_agent_factory
 from app.services.coach.presentation import workout_artifact_presentation
-from app.services.coach.provider import (
-    COACH_PROMPT_TEMPLATE_VERSION,
-    OpenRouterCoachProvider,
-    coach_tools,
-)
+from app.services.coach.provider import OpenRouterCoachProvider, coach_tools
 from app.services.coach.tools import (
     create_running_workout_proposal,
     get_health_day,
@@ -419,8 +414,6 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
                     runtime=runtime,
                     suggested_for=runtime.as_of - timedelta(days=1),
                     available_minutes=60,
-                    model_provider="openrouter",
-                    prompt_template_version=COACH_PROMPT_TEMPLATE_VERSION,
                 )
             )
             assert rejected == {
@@ -434,15 +427,11 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
                 runtime=runtime,
                 suggested_for=date.today() + timedelta(days=1),
                 available_minutes=60,
-                model_provider="openrouter",
-                prompt_template_version=COACH_PROMPT_TEMPLATE_VERSION,
             )
             second = create_running_workout_proposal(
                 runtime=runtime,
                 suggested_for=date.today() + timedelta(days=1),
                 available_minutes=60,
-                model_provider="openrouter",
-                prompt_template_version=COACH_PROMPT_TEMPLATE_VERSION,
             )
             assert json.loads(first)["artifact"] == json.loads(second)["artifact"]
             yield CoachEvent("artifact_available", artifact_type="workout")
@@ -473,20 +462,24 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
     assert response.text.count("event: proposal.created") == 1
     assert '"card_url":"/coach/' in response.text
     assert fake.runtime is not None
-    assistant_run_id = fake.runtime.assistant_run_id
-    assert assistant_run_id is not None
-    assert f'"run_id":{assistant_run_id}' in response.text
+    assistant_message_id = fake.runtime.assistant_message_id
+    user_message_id = fake.runtime.user_message_id
+    assert assistant_message_id is not None
+    assert user_message_id is not None
+    assert f'"source_message_id":{assistant_message_id}' in response.text
 
     with session_factory() as session:
-        run = session.get(CoachAssistantRun, assistant_run_id)
-        assert run is not None
-        assert run.status == "completed"
-        assert run.workout_id is not None
-        workout = session.get(Workout, run.workout_id)
+        assistant_message = session.get(CoachMessage, assistant_message_id)
+        assert assistant_message is not None
+        assert assistant_message.status == "completed"
+        workout = session.scalar(
+            select(Workout).where(Workout.source_assistant_message_id == assistant_message_id)
+        )
         assert workout is not None
         assert workout.originating_conversation_id == conversation_id
-        assert workout.originating_user_message_id == run.user_message_id
-        assert workout.originating_assistant_message_id == run.assistant_message_id
+        assert workout.originating_user_message_id == user_message_id
+        assert workout.originating_assistant_message_id == assistant_message_id
+        assert workout.source_assistant_message_id == assistant_message_id
         assert workout.approval_status == "proposed"
         assert workout.scheduled_for is None
         assert workout.accepted_revision_id is None
@@ -507,26 +500,36 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
         )
         assert propose_event is not None
         assert propose_event.idempotency_key == (
-            f"coach-run:{assistant_run_id}:{run.created_at.isoformat()}:"
+            f"coach-message:{assistant_message_id}:{assistant_message.created_at.isoformat()}:"
             "create_running_workout_proposal:v2"
         )
         assert len(list(session.scalars(select(Workout)))) == 1
         workout_id = workout.id
         revision = session.get(WorkoutRevision, workout.current_revision_id)
         assert revision is not None
+        assert (
+            revision.model_provider,
+            revision.model_id,
+            revision.prompt_template_version,
+        ) == (
+            "openrouter",
+            assistant_message.model_id,
+            assistant_message.prompt_template_version,
+        )
         artifact = workout_artifact_presentation(
             session,
             user.id,
             conversation_id,
-            assistant_run_id,
+            assistant_message_id,
         )
         assert artifact is not None
         assert (
             artifact.artifact_type,
             artifact.workout_id,
+            artifact.source_assistant_message_id,
             artifact.revision_id,
             artifact.accepted_revision_id,
-        ) == ("workout", workout.id, revision.id, None)
+        ) == ("workout", workout.id, assistant_message.id, revision.id, None)
         assert artifact.lifecycle.key == "draft"
         assert [
             (action.key, action.endpoint, action.revision_id, action.scheduled_for)
@@ -557,7 +560,7 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
                 session,
                 other_user.id,
                 conversation_id,
-                assistant_run_id,
+                assistant_message_id,
             )
             is None
         )
@@ -568,10 +571,12 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
     assert "60 Minuten" in page.text
     assert "Unbestätigt" in page.text
     assert f'href="/workouts/{workout_id}"' in page.text
-    card = client.get(f"/coach/{conversation_id}/runs/{assistant_run_id}/proposal-card")
+    card = client.get(f"/coach/{conversation_id}/messages/{assistant_message_id}/proposal-card")
     assert card.status_code == 200
     assert f'data-workout-id="{workout_id}"' in card.text
-    assert client.get(f"/coach/999/runs/{assistant_run_id}/proposal-card").status_code == 404
+    assert (
+        client.get(f"/coach/999/messages/{assistant_message_id}/proposal-card").status_code == 404
+    )
 
     with session_factory() as session:
         workout = session.get(Workout, workout_id)
@@ -581,7 +586,9 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
         workout.local_schedule_status = "scheduled"
         workout.scheduled_for = date.today() + timedelta(days=1)
         session.commit()
-    updated_card = client.get(f"/coach/{conversation_id}/runs/{assistant_run_id}/proposal-card")
+    updated_card = client.get(
+        f"/coach/{conversation_id}/messages/{assistant_message_id}/proposal-card"
+    )
     assert "Eingeplant" in updated_card.text
     assert "im lokalen Kalender eingeplant" in updated_card.text
     assert "weder angenommen noch eingeplant" not in updated_card.text
@@ -591,8 +598,6 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
             runtime=fake.runtime,
             suggested_for=date.today() + timedelta(days=2),
             available_minutes=60,
-            model_provider="openrouter",
-            prompt_template_version=COACH_PROMPT_TEMPLATE_VERSION,
         )
     )
     assert conflict["status"] == "not_created"
@@ -603,12 +608,13 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
     deleted = client.post(f"/coach/{conversation_id}/delete", follow_redirects=False)
     assert deleted.status_code == 303
     with session_factory() as session:
-        assert session.get(CoachAssistantRun, assistant_run_id) is None
+        assert session.get(CoachMessage, assistant_message_id) is None
         workout = session.get(Workout, workout_id)
         assert workout is not None
         assert workout.originating_conversation_id is None
         assert workout.originating_user_message_id is None
         assert workout.originating_assistant_message_id is None
+        assert workout.source_assistant_message_id is None
 
 
 def test_invalid_proposal_date_returns_completed_stream_without_artifact(
@@ -630,8 +636,6 @@ def test_invalid_proposal_date_returns_completed_stream_without_artifact(
                     runtime=runtime,
                     suggested_for=runtime.as_of - timedelta(days=1),
                     available_minutes=45,
-                    model_provider="openrouter",
-                    prompt_template_version=COACH_PROMPT_TEMPLATE_VERSION,
                 )
             )
             assert result["status"] == "not_created"
@@ -655,13 +659,15 @@ def test_invalid_proposal_date_returns_completed_stream_without_artifact(
     assert "event: proposal.created" not in response.text
     assert "Welches zukünftige Datum meinst du?" in response.text
     with session_factory() as session:
-        assert session.scalar(select(Workout)) is None
-        run = session.scalar(
-            select(CoachAssistantRun).where(CoachAssistantRun.conversation_id == conversation_id)
+        assistant = session.scalar(
+            select(CoachMessage).where(
+                CoachMessage.conversation_id == conversation_id,
+                CoachMessage.role == "assistant",
+            )
         )
-        assert run is not None
-        assert run.status == "completed"
-        assert run.workout_id is None
+        assert assistant is not None
+        assert assistant.status == "completed"
+        assert session.scalar(select(Workout)) is None
 
 
 def test_proposal_tool_schema_exposes_no_runtime_or_workout_definition() -> None:
@@ -730,8 +736,6 @@ def test_proposal_survives_provider_failure_after_commit(
                 runtime=runtime,
                 suggested_for=date.today() + timedelta(days=1),
                 available_minutes=35,
-                model_provider="openrouter",
-                prompt_template_version=COACH_PROMPT_TEMPLATE_VERSION,
             )
             yield CoachEvent("artifact_available", artifact_type="workout")
             yield CoachEvent("failed")

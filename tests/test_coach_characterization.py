@@ -7,11 +7,15 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.main import app
-from app.models import CoachConversation, CoachMessage
+from app.models import CoachAssistantRun, CoachConversation, CoachMessage
 from app.models.user import utcnow
 from app.services.coach.agent import CoachEvent
 from app.services.coach.conversation import CoachHistoryMessage, CoachRuntimeContext
 from app.services.coach.dependencies import get_coach_agent_factory
+from app.services.coach.provider import (
+    COACH_PROMPT_TEMPLATE_VERSION,
+    COACH_TOOL_CONTRACT_VERSION,
+)
 
 
 class RecordingCoachAgent:
@@ -290,6 +294,7 @@ def test_partial_stream_failure_is_not_persisted_or_reused_as_history(
             ("user", "completed", "first-question"),
             ("assistant", "failed", ""),
         ]
+        assert messages[1].failure_category == "failed"
 
     reloaded = client.get(f"/coach/{conversation_id}")
     assert reloaded.status_code == 200
@@ -340,3 +345,32 @@ def test_completed_answer_is_persisted_and_visible_after_reload(
     reloaded = client.get(f"/coach/{conversation_id}")
     assert reloaded.status_code == 200
     assert "Recorded answer" in reloaded.text
+
+
+def test_assistant_message_is_the_only_runtime_execution_record(
+    client: TestClient, session_factory: sessionmaker[Session]
+) -> None:
+    app.dependency_overrides[get_coach_agent_factory] = lambda: lambda: RecordingCoachAgent()
+    conversation_id = _new_chat(client)
+
+    response = client.post(
+        f"/coach/{conversation_id}/messages",
+        data={"message": "completed-question"},
+    )
+
+    assert response.status_code == 200
+    with session_factory() as session:
+        assistant = session.scalar(
+            select(CoachMessage).where(
+                CoachMessage.conversation_id == conversation_id,
+                CoachMessage.role == "assistant",
+            )
+        )
+        assert assistant is not None
+        assert assistant.status == "completed"
+        assert assistant.model_id is not None
+        assert assistant.request_id is not None
+        assert assistant.prompt_template_version == COACH_PROMPT_TEMPLATE_VERSION
+        assert assistant.operation_contract_version == COACH_TOOL_CONTRACT_VERSION
+        assert assistant.completed_at is not None
+        assert session.scalar(select(CoachAssistantRun)) is None

@@ -198,8 +198,6 @@ def create_running_workout_proposal(
         suggested_for,
         available_minutes,
         template_id,
-        model_provider="openrouter",
-        prompt_template_version=COACH_PROMPT_TEMPLATE_VERSION,
     )
 
 

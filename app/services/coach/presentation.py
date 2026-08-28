@@ -5,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import Workout, WorkoutRevision
-from app.repositories.coach import find_assistant_run
+from app.repositories.coach import find_assistant_message
 from app.services.planning.workout_views import (
     WorkoutLifecycleProjection,
     WorkoutRevisionView,
@@ -52,7 +52,7 @@ class ArtifactWarningPresentation:
 class WorkoutArtifactPresentation:
     artifact_type: str
     workout_id: int
-    assistant_run_id: int
+    source_assistant_message_id: int
     revision_id: int
     revision_number: int
     accepted_revision_id: int | None
@@ -217,22 +217,21 @@ def workout_artifact_presentation(
     session: Session,
     user_id: int,
     conversation_id: int,
-    assistant_run_id: int,
+    assistant_message_id: int,
 ) -> WorkoutArtifactPresentation | None:
-    run = find_assistant_run(session, user_id, conversation_id, assistant_run_id)
-    if run is None or run.workout_id is None:
+    message = find_assistant_message(session, user_id, conversation_id, assistant_message_id)
+    if message is None:
         return None
     workout = session.scalar(
-        select(Workout).where(
-            Workout.id == run.workout_id,
+        select(Workout)
+        .where(
             Workout.user_id == user_id,
             Workout.deleted_at.is_(None),
             Workout.source_type == "coach_single",
-            Workout.originating_conversation_id == conversation_id,
-            Workout.originating_user_message_id == run.user_message_id,
-            Workout.originating_assistant_message_id == run.assistant_message_id,
+            Workout.source_assistant_message_id == message.id,
             Workout.current_revision_id.is_not(None),
         )
+        .order_by(Workout.id)
     )
     if workout is None or workout.current_revision_id is None:
         return None
@@ -271,7 +270,7 @@ def workout_artifact_presentation(
     return WorkoutArtifactPresentation(
         artifact_type="workout",
         workout_id=workout.id,
-        assistant_run_id=run.id,
+        source_assistant_message_id=message.id,
         revision_id=current.id,
         revision_number=current.revision_number,
         accepted_revision_id=accepted.id if accepted is not None else None,

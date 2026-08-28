@@ -10,7 +10,6 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models import (
-    CoachAssistantRun,
     GarminAccount,
     User,
     Workout,
@@ -57,9 +56,9 @@ class ProposalOrigin:
     conversation_id: int
     user_message_id: int
     assistant_message_id: int
-    assistant_run_id: int
     model_provider: str
-    prompt_template_version: str
+    model_id: str | None
+    prompt_template_version: str | None
 
 
 class WorkoutServiceError(RuntimeError):
@@ -170,29 +169,16 @@ class WorkoutService:
             originating_conversation_id=origin.conversation_id if origin else None,
             originating_user_message_id=origin.user_message_id if origin else None,
             originating_assistant_message_id=origin.assistant_message_id if origin else None,
+            source_assistant_message_id=origin.assistant_message_id if origin else None,
         )
         self.session.add(workout)
         self.session.flush()
         revision_metadata = metadata
         if origin is not None:
-            run = self.session.get(CoachAssistantRun, origin.assistant_run_id)
-            if (
-                run is None
-                or run.conversation_id != origin.conversation_id
-                or run.user_message_id != origin.user_message_id
-                or run.assistant_message_id != origin.assistant_message_id
-                or run.workout_id not in {None, workout.id}
-            ):
-                self.session.rollback()
-                raise WorkoutConflictError(
-                    "Der Coach-Lauf ist nicht mehr aktuell.",
-                    code="proposal.origin_invalid",
-                )
-            run.workout_id = workout.id
             revision_metadata = replace(
                 metadata,
                 model_provider=origin.model_provider,
-                model_id=run.model_id,
+                model_id=origin.model_id,
                 prompt_template_version=origin.prompt_template_version,
             )
         revision = self._create_revision(
@@ -253,16 +239,14 @@ class WorkoutService:
     def verify_proposal_origin(self, workout: Workout, origin: ProposalOrigin | None) -> None:
         if origin is None:
             return
-        run = self.session.get(CoachAssistantRun, origin.assistant_run_id)
         if (
             workout.originating_conversation_id != origin.conversation_id
             or workout.originating_user_message_id != origin.user_message_id
             or workout.originating_assistant_message_id != origin.assistant_message_id
-            or run is None
-            or run.workout_id != workout.id
+            or workout.source_assistant_message_id != origin.assistant_message_id
         ):
             raise WorkoutConflictError(
-                "Der vorhandene Vorschlag gehört nicht zu diesem Coach-Lauf.",
+                "Der vorhandene Vorschlag gehört nicht zu dieser Coach-Antwort.",
                 code="proposal.origin_mismatch",
             )
 
