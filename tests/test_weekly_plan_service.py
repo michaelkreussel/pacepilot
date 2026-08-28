@@ -8,6 +8,8 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.models import (
+    CoachConversation,
+    CoachMessage,
     TrainingPlan,
     TrainingPlanRevision,
     TrainingPlanWorkout,
@@ -107,6 +109,30 @@ def test_persist_week_creates_plan_revision_and_normal_workout_proposals(
         assert all(workout.scheduled_for is None for workout in workouts)
         assert all(workout.source_type == "coach_weekly_plan" for workout in workouts)
         assert session.scalar(select(func.count()).select_from(WorkoutGarminOperation)) == 0
+
+
+def test_persist_week_records_source_assistant_message(session_factory) -> None:
+    with session_factory() as session:
+        user = _user(session)
+        conversation = CoachConversation(user_id=user.id, title="Training")
+        session.add(conversation)
+        session.flush()
+        message = CoachMessage(
+            conversation_id=conversation.id,
+            role="assistant",
+            content="Wochenplan",
+        )
+        session.add(message)
+        session.flush()
+
+        revision = persist_week_candidate(
+            session,
+            user,
+            _candidate(),
+            source_assistant_message_id=message.id,
+        )
+
+        assert revision.source_assistant_message_id == message.id
 
 
 def test_persist_week_in_transaction_leaves_rollback_to_caller(session_factory) -> None:

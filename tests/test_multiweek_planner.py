@@ -9,6 +9,8 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.models import (
     AthleteGoal,
+    CoachConversation,
+    CoachMessage,
     TrainingCycle,
     TrainingCycleRevision,
     TrainingCycleWeek,
@@ -413,6 +415,39 @@ def test_persist_cycle_is_idempotent_and_keeps_revisions_immutable(session_facto
                 .where(TrainingCycleWeek.id == membership.id)
                 .values(phase="rewritten")
             )
+
+
+def test_persist_cycle_records_source_on_cycle_and_week_revisions(session_factory) -> None:
+    candidate = compose_training_cycle(
+        _weekly_candidates(),
+        start_date=START,
+        target_date=START + timedelta(weeks=7, days=6),
+        event_type="half_marathon",
+    )
+    with session_factory() as session:
+        user = _user(session)
+        conversation = CoachConversation(user_id=user.id, title="Trainingszyklus")
+        session.add(conversation)
+        session.flush()
+        message = CoachMessage(
+            conversation_id=conversation.id,
+            role="assistant",
+            content="Mehrwochenplan",
+        )
+        session.add(message)
+        session.flush()
+
+        revision = persist_training_cycle(
+            session,
+            user,
+            candidate,
+            source_assistant_message_id=message.id,
+        )
+
+        assert revision.source_assistant_message_id == message.id
+        assert set(session.scalars(select(TrainingPlanRevision.source_assistant_message_id))) == {
+            message.id
+        }
 
 
 def test_persist_cycle_rolls_back_all_weeks_when_later_week_fails(session_factory) -> None:

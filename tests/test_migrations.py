@@ -195,7 +195,7 @@ def test_feedback_owner_migration_upgrades_applied_revision_22(tmp_path: Path) -
         ).one() == (1, 1)
         assert connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
-        ).scalar_one() == ("20260828_32")
+        ).scalar_one() == ("20260828_33")
 
 
 def test_application_migration_uses_absolute_project_paths(tmp_path: Path, monkeypatch) -> None:
@@ -255,7 +255,7 @@ def test_workout_revision_migration_resumes_after_added_columns(tmp_path: Path) 
             "SELECT version_num FROM alembic_version"
         ).scalar_one()
         integrity = connection.exec_driver_sql("PRAGMA integrity_check").scalar_one()
-    assert revision == "20260828_32"
+    assert revision == "20260828_33"
     assert integrity == "ok"
     assert "workout_revisions" in inspector.get_table_names()
 
@@ -284,7 +284,7 @@ def test_reverted_athlete_profile_revision_upgrades_to_head(tmp_path: Path) -> N
         revision = connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
         ).scalar_one()
-    assert revision == "20260828_32"
+    assert revision == "20260828_33"
 
 
 def test_principal_fingerprint_migration_upgrades_applied_phase_4_schema(
@@ -732,7 +732,7 @@ def test_athlete_planning_inputs_fresh_and_filled_upgrade(tmp_path: Path) -> Non
         legacy = connection.exec_driver_sql("SELECT name FROM workouts WHERE id = 1").scalar()
     engine.dispose()
 
-    assert version == "20260828_32"
+    assert version == "20260828_33"
     assert {
         "athlete_planning_profiles",
         "athlete_goals",
@@ -1023,7 +1023,7 @@ def test_coach_message_lineage_migration_preserves_runs_and_workouts(tmp_path: P
         )
         assert (
             connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one()
-            == "20260828_32"
+            == "20260828_33"
         )
         assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
     source_key = next(
@@ -1111,4 +1111,217 @@ def test_coach_message_lineage_migration_rejects_conflicts(tmp_path: Path, confl
     assert "source_assistant_message_id" not in {
         column["name"] for column in inspect(engine).get_columns("workouts")
     }
+    engine.dispose()
+
+
+def test_plan_message_lineage_migration_preserves_artifacts_and_enforces_ownership(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "plan-message-lineage.db"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    config = Config("alembic.ini")
+    config.attributes["database_url"] = database_url
+    command.upgrade(config, "20260828_32")
+    engine = create_engine(database_url)
+
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "INSERT INTO users (id, display_name, created_at) VALUES "
+            "(1, 'Runner', '2026-08-28'), (2, 'Other', '2026-08-28')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO coach_conversations (id, user_id, title, created_at, updated_at) VALUES "
+            "(1, 1, 'Plan', '2026-08-28', '2026-08-28'), "
+            "(2, 2, 'Other', '2026-08-28', '2026-08-28')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO coach_messages "
+            "(id, conversation_id, role, content, status, created_at, completed_at) VALUES "
+            "(1, 1, 'assistant', 'Plan', 'completed', '2026-08-28', '2026-08-28'), "
+            "(2, 2, 'assistant', 'Other', 'completed', '2026-08-28', '2026-08-28'), "
+            "(3, 1, 'user', 'Question', 'completed', '2026-08-28', '2026-08-28')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO workouts "
+            "(id, user_id, name, sport, status, definition_version, definition, source_type, "
+            "approval_status, local_schedule_status, lock_version, created_at, updated_at) "
+            "VALUES (1, 1, 'Easy Run', 'running', 'draft', 1, '{\"blocks\": []}', "
+            "'coach_weekly_plan', 'proposed', 'unscheduled', 0, '2026-08-28', '2026-08-28')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO training_plans "
+            "(id, user_id, week_start, status, current_revision_id, created_at, updated_at) "
+            "VALUES (1, 1, '2026-08-31', 'active', NULL, '2026-08-28', '2026-08-28')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO training_plan_revisions "
+            "(id, plan_id, owner_user_id, revision_number, week_start, week_end, "
+            "planner_version, knowledge_base_version, input_fingerprint, "
+            "generation_context_json, validation_report_json, created_at) VALUES "
+            "(1, 1, 1, 1, '2026-08-31', '2026-09-06', 'weekly-v1', 'kb-v1', "
+            "'weekly-1', '{}', '{\"valid\": true}', '2026-08-28')"
+        )
+        connection.exec_driver_sql("UPDATE training_plans SET current_revision_id = 1 WHERE id = 1")
+        connection.exec_driver_sql(
+            "INSERT INTO training_plan_workouts "
+            "(id, plan_revision_id, workout_id, owner_user_id, position, role, scheduled_for) "
+            "VALUES (1, 1, 1, 1, 0, 'easy_run', '2026-08-31')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO training_cycles "
+            "(id, user_id, goal_id, event_type, start_date, target_date, status, "
+            "current_revision_id, accepted_revision_id, created_at, updated_at) VALUES "
+            "(1, 1, NULL, '10k', '2026-08-31', '2026-10-25', 'active', NULL, NULL, "
+            "'2026-08-28', '2026-08-28')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO training_cycle_revisions "
+            "(id, cycle_id, owner_user_id, parent_revision_id, revision_number, event_type, "
+            "start_date, target_date, planner_version, knowledge_base_version, "
+            "input_fingerprint, confidence, phase_plan_json, assumptions_json, impact_json, "
+            "validation_report_json, created_at) VALUES "
+            "(1, 1, 1, NULL, 1, '10k', '2026-08-31', '2026-10-25', 'cycle-v1', "
+            "'kb-v1', 'cycle-1', 'medium', '[]', '{}', '{}', '{\"valid\": true}', "
+            "'2026-08-28')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO training_cycle_weeks "
+            "(id, cycle_revision_id, training_plan_revision_id, owner_user_id, position, "
+            "week_start, phase) VALUES (1, 1, 1, 1, 0, '2026-08-31', 'base')"
+        )
+        connection.exec_driver_sql(
+            "UPDATE training_cycles SET current_revision_id = 1, accepted_revision_id = 1 "
+            "WHERE id = 1"
+        )
+    engine.dispose()
+
+    command.upgrade(config, "head")
+    command.check(config)
+    engine = create_engine(database_url)
+    inspector = inspect(engine)
+    with engine.begin() as connection:
+        assert (
+            connection.exec_driver_sql(
+                "SELECT source_assistant_message_id FROM training_plan_revisions WHERE id = 1"
+            ).scalar_one()
+            is None
+        )
+        assert (
+            connection.exec_driver_sql(
+                "SELECT source_assistant_message_id FROM training_cycle_revisions WHERE id = 1"
+            ).scalar_one()
+            is None
+        )
+        assert (
+            connection.exec_driver_sql(
+                "SELECT current_revision_id FROM training_plans WHERE id = 1"
+            ).scalar_one()
+            == 1
+        )
+        assert connection.exec_driver_sql(
+            "SELECT current_revision_id, accepted_revision_id FROM training_cycles WHERE id = 1"
+        ).one() == (1, 1)
+        assert connection.exec_driver_sql(
+            "SELECT plan_revision_id, workout_id FROM training_plan_workouts"
+        ).one() == (1, 1)
+        assert connection.exec_driver_sql(
+            "SELECT cycle_revision_id, training_plan_revision_id FROM training_cycle_weeks"
+        ).one() == (1, 1)
+        connection.exec_driver_sql(
+            "INSERT INTO training_plan_revisions "
+            "(id, plan_id, owner_user_id, source_assistant_message_id, revision_number, "
+            "week_start, week_end, planner_version, knowledge_base_version, input_fingerprint, "
+            "generation_context_json, validation_report_json, created_at) VALUES "
+            "(4, 1, 1, 1, 2, '2026-08-31', '2026-09-06', 'weekly-v1', 'kb-v1', "
+            "'weekly-2', '{}', '{\"valid\": true}', '2026-08-28')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO training_cycle_revisions "
+            "(id, cycle_id, owner_user_id, source_assistant_message_id, parent_revision_id, "
+            "revision_number, event_type, start_date, target_date, planner_version, "
+            "knowledge_base_version, input_fingerprint, confidence, phase_plan_json, "
+            "assumptions_json, impact_json, validation_report_json, created_at) VALUES "
+            "(4, 1, 1, 1, 1, 2, '10k', '2026-08-31', '2026-10-25', 'cycle-v1', "
+            "'kb-v1', 'cycle-2', 'medium', '[]', '{}', '{}', '{\"valid\": true}', "
+            "'2026-08-28')"
+        )
+
+    for revision_table in ("training_plan_revisions", "training_cycle_revisions"):
+        for source_id in (2, 3):
+            with (
+                pytest.raises(IntegrityError, match="owned by the artifact user"),
+                engine.begin() as connection,
+            ):
+                if revision_table == "training_plan_revisions":
+                    connection.exec_driver_sql(
+                        "INSERT INTO training_plan_revisions "
+                        "(plan_id, owner_user_id, source_assistant_message_id, revision_number, "
+                        "week_start, week_end, planner_version, knowledge_base_version, "
+                        "input_fingerprint, generation_context_json, validation_report_json, "
+                        "created_at) VALUES (1, 1, ?, 3, '2026-08-31', '2026-09-06', "
+                        "'weekly-v1', 'kb-v1', 'weekly-invalid', '{}', '{\"valid\": true}', "
+                        "'2026-08-28')",
+                        (source_id,),
+                    )
+                else:
+                    connection.exec_driver_sql(
+                        "INSERT INTO training_cycle_revisions "
+                        "(cycle_id, owner_user_id, source_assistant_message_id, "
+                        "parent_revision_id, revision_number, event_type, start_date, "
+                        "target_date, planner_version, knowledge_base_version, "
+                        "input_fingerprint, confidence, phase_plan_json, assumptions_json, "
+                        "impact_json, validation_report_json, created_at) VALUES "
+                        "(1, 1, ?, 4, 3, '10k', '2026-08-31', '2026-10-25', 'cycle-v1', "
+                        "'kb-v1', 'cycle-invalid', 'medium', '[]', '{}', '{}', "
+                        "'{\"valid\": true}', '2026-08-28')",
+                        (source_id,),
+                    )
+
+    for revision_table in ("training_plan_revisions", "training_cycle_revisions"):
+        with pytest.raises(IntegrityError, match="immutable"), engine.begin() as connection:
+            connection.exec_driver_sql(
+                f"UPDATE {revision_table} SET source_assistant_message_id = NULL WHERE id = 4"
+            )
+
+    with engine.begin() as connection:
+        connection.exec_driver_sql("DELETE FROM coach_conversations WHERE id = 1")
+        assert (
+            connection.exec_driver_sql(
+                "SELECT source_assistant_message_id FROM training_plan_revisions WHERE id = 4"
+            ).scalar_one()
+            is None
+        )
+        assert (
+            connection.exec_driver_sql(
+                "SELECT source_assistant_message_id FROM training_cycle_revisions WHERE id = 4"
+            ).scalar_one()
+            is None
+        )
+        assert connection.exec_driver_sql("SELECT count(*) FROM training_plans").scalar_one() == 1
+        assert connection.exec_driver_sql("SELECT count(*) FROM training_cycles").scalar_one() == 1
+        assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
+        assert connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one() == ("20260828_33")
+
+    for table in ("training_plan_revisions", "training_cycle_revisions"):
+        source_key = next(
+            key
+            for key in inspector.get_foreign_keys(table)
+            if key["constrained_columns"] == ["source_assistant_message_id"]
+        )
+        assert source_key["referred_table"] == "coach_messages"
+        assert source_key["options"] == {"ondelete": "SET NULL"}
+
+    for revision_table in ("training_plan_revisions", "training_cycle_revisions"):
+        with pytest.raises(IntegrityError, match="immutable"), engine.begin() as connection:
+            connection.exec_driver_sql(
+                f"UPDATE {revision_table} SET planner_version = 'rewritten' WHERE id = 1"
+            )
+
+    with engine.begin() as connection:
+        connection.exec_driver_sql("DELETE FROM users WHERE id = 1")
+        assert connection.exec_driver_sql("SELECT count(*) FROM training_plans").scalar_one() == 0
+        assert connection.exec_driver_sql("SELECT count(*) FROM training_cycles").scalar_one() == 0
+        assert connection.exec_driver_sql("SELECT count(*) FROM workouts").scalar_one() == 0
     engine.dispose()

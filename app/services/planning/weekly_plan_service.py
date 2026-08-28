@@ -38,6 +38,7 @@ def persist_week_candidate(
     user: User,
     candidate: WeeklyPlanCandidate,
     *,
+    source_assistant_message_id: int | None = None,
     commit: bool = True,
 ) -> TrainingPlanRevision:
     last_error: IntegrityError | None = None
@@ -47,6 +48,7 @@ def persist_week_candidate(
                 session,
                 user,
                 candidate,
+                source_assistant_message_id=source_assistant_message_id,
                 commit=commit,
                 rollback_on_error=True,
             )
@@ -77,11 +79,14 @@ def persist_week_candidate_in_transaction(
     session: Session,
     user: User,
     candidate: WeeklyPlanCandidate,
+    *,
+    source_assistant_message_id: int | None = None,
 ) -> TrainingPlanRevision:
     return _persist_week_candidate(
         session,
         user,
         candidate,
+        source_assistant_message_id=source_assistant_message_id,
         commit=False,
         rollback_on_error=False,
     )
@@ -92,6 +97,7 @@ def _persist_week_candidate(
     user: User,
     candidate: WeeklyPlanCandidate,
     *,
+    source_assistant_message_id: int | None,
     commit: bool,
     rollback_on_error: bool,
 ) -> TrainingPlanRevision:
@@ -135,6 +141,7 @@ def _persist_week_candidate(
     plan_revision = TrainingPlanRevision(
         plan_id=plan.id,
         owner_user_id=user.id,
+        source_assistant_message_id=source_assistant_message_id,
         revision_number=revision_number,
         week_start=candidate.week_start,
         week_end=candidate.week_end,

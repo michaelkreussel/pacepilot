@@ -1,5 +1,5 @@
 from datetime import date, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import (
     DDL,
@@ -18,10 +18,13 @@ from sqlalchemy import (
     UniqueConstraint,
     event,
 )
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
 from app.models.user import utcnow
+
+if TYPE_CHECKING:
+    from app.models.coach import CoachMessage
 
 EXPERIENCE_LEVELS = ("novice", "intermediate", "advanced")
 GOAL_EVENT_TYPES = ("general_fitness", "5k", "10k", "half_marathon", "marathon")
@@ -163,6 +166,9 @@ class TrainingPlanRevision(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     plan_id: Mapped[int] = mapped_column(Integer, index=True)
     owner_user_id: Mapped[int] = mapped_column(Integer)
+    source_assistant_message_id: Mapped[int | None] = mapped_column(
+        ForeignKey("coach_messages.id", ondelete="SET NULL"), index=True
+    )
     revision_number: Mapped[int] = mapped_column(Integer)
     week_start: Mapped[date] = mapped_column(Date)
     week_end: Mapped[date] = mapped_column(Date)
@@ -172,6 +178,10 @@ class TrainingPlanRevision(Base):
     generation_context_json: Mapped[dict[str, object]] = mapped_column(JSON)
     validation_report_json: Mapped[dict[str, object]] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+    source_assistant_message: Mapped["CoachMessage | None"] = relationship(
+        foreign_keys=[source_assistant_message_id]
+    )
 
 
 class TrainingPlanWorkout(Base):
@@ -272,6 +282,9 @@ class TrainingCycleRevision(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     cycle_id: Mapped[int] = mapped_column(Integer, index=True)
     owner_user_id: Mapped[int] = mapped_column(Integer)
+    source_assistant_message_id: Mapped[int | None] = mapped_column(
+        ForeignKey("coach_messages.id", ondelete="SET NULL"), index=True
+    )
     parent_revision_id: Mapped[int | None] = mapped_column(Integer, index=True)
     revision_number: Mapped[int] = mapped_column(Integer)
     event_type: Mapped[str] = mapped_column(String(30))
@@ -286,6 +299,10 @@ class TrainingCycleRevision(Base):
     impact_json: Mapped[dict[str, object]] = mapped_column(JSON)
     validation_report_json: Mapped[dict[str, object]] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+    source_assistant_message: Mapped["CoachMessage | None"] = relationship(
+        foreign_keys=[source_assistant_message_id]
+    )
 
 
 class TrainingCycleWeek(Base):
@@ -341,9 +358,38 @@ event.listen(
     "after_create",
     DDL(
         "CREATE TRIGGER prevent_training_plan_revisions_update "
-        "BEFORE UPDATE ON training_plan_revisions "
+        "BEFORE UPDATE OF id, plan_id, owner_user_id, revision_number, week_start, week_end, "
+        "planner_version, knowledge_base_version, input_fingerprint, generation_context_json, "
+        "validation_report_json, created_at ON training_plan_revisions "
         "BEGIN SELECT RAISE(ABORT, "
         "'Training plan revisions and memberships are immutable'); END"
+    ).execute_if(dialect="sqlite"),
+)
+event.listen(
+    TrainingPlanRevision.__table__,
+    "after_create",
+    DDL(
+        "CREATE TRIGGER prevent_training_plan_revision_source_update "
+        "BEFORE UPDATE OF source_assistant_message_id ON training_plan_revisions "
+        "WHEN NOT (OLD.source_assistant_message_id IS NOT NULL "
+        "AND NEW.source_assistant_message_id IS NULL AND NOT EXISTS ("
+        "SELECT 1 FROM coach_messages WHERE id = OLD.source_assistant_message_id)) "
+        "BEGIN SELECT RAISE(ABORT, "
+        "'Training plan revisions and memberships are immutable'); END"
+    ).execute_if(dialect="sqlite"),
+)
+event.listen(
+    TrainingPlanRevision.__table__,
+    "after_create",
+    DDL(
+        "CREATE TRIGGER validate_training_plan_revision_source "
+        "BEFORE INSERT ON training_plan_revisions "
+        "WHEN NEW.source_assistant_message_id IS NOT NULL AND NOT EXISTS ("
+        "SELECT 1 FROM coach_messages m JOIN coach_conversations c "
+        "ON c.id = m.conversation_id WHERE m.id = NEW.source_assistant_message_id "
+        "AND m.role = 'assistant' AND c.user_id = NEW.owner_user_id) "
+        "BEGIN SELECT RAISE(ABORT, "
+        "'Plan source must be an assistant message owned by the artifact user'); END"
     ).execute_if(dialect="sqlite"),
 )
 
@@ -352,9 +398,39 @@ event.listen(
     "after_create",
     DDL(
         "CREATE TRIGGER prevent_training_cycle_revisions_update "
-        "BEFORE UPDATE ON training_cycle_revisions "
+        "BEFORE UPDATE OF id, cycle_id, owner_user_id, parent_revision_id, revision_number, "
+        "event_type, start_date, target_date, planner_version, knowledge_base_version, "
+        "input_fingerprint, confidence, phase_plan_json, assumptions_json, impact_json, "
+        "validation_report_json, created_at ON training_cycle_revisions "
         "BEGIN SELECT RAISE(ABORT, "
         "'Training cycle revisions and memberships are immutable'); END"
+    ).execute_if(dialect="sqlite"),
+)
+event.listen(
+    TrainingCycleRevision.__table__,
+    "after_create",
+    DDL(
+        "CREATE TRIGGER prevent_training_cycle_revision_source_update "
+        "BEFORE UPDATE OF source_assistant_message_id ON training_cycle_revisions "
+        "WHEN NOT (OLD.source_assistant_message_id IS NOT NULL "
+        "AND NEW.source_assistant_message_id IS NULL AND NOT EXISTS ("
+        "SELECT 1 FROM coach_messages WHERE id = OLD.source_assistant_message_id)) "
+        "BEGIN SELECT RAISE(ABORT, "
+        "'Training cycle revisions and memberships are immutable'); END"
+    ).execute_if(dialect="sqlite"),
+)
+event.listen(
+    TrainingCycleRevision.__table__,
+    "after_create",
+    DDL(
+        "CREATE TRIGGER validate_training_cycle_revision_source "
+        "BEFORE INSERT ON training_cycle_revisions "
+        "WHEN NEW.source_assistant_message_id IS NOT NULL AND NOT EXISTS ("
+        "SELECT 1 FROM coach_messages m JOIN coach_conversations c "
+        "ON c.id = m.conversation_id WHERE m.id = NEW.source_assistant_message_id "
+        "AND m.role = 'assistant' AND c.user_id = NEW.owner_user_id) "
+        "BEGIN SELECT RAISE(ABORT, "
+        "'Cycle source must be an assistant message owned by the artifact user'); END"
     ).execute_if(dialect="sqlite"),
 )
 event.listen(

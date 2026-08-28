@@ -778,6 +778,8 @@ def persist_training_cycle(
     session: Session,
     user: User,
     candidate: TrainingCycleCandidate,
+    *,
+    source_assistant_message_id: int | None = None,
 ) -> TrainingCycleRevision:
     if not candidate.validation_report.get("valid"):
         raise TrainingCyclePersistenceError(
@@ -848,6 +850,7 @@ def persist_training_cycle(
     revision = TrainingCycleRevision(
         cycle_id=cycle.id,
         owner_user_id=user.id,
+        source_assistant_message_id=source_assistant_message_id,
         parent_revision_id=cycle.current_revision_id,
         revision_number=revision_number,
         event_type=candidate.event_type,
@@ -879,6 +882,7 @@ def persist_training_cycle(
                 session,
                 user,
                 week.weekly_plan,
+                source_assistant_message_id=source_assistant_message_id,
             )
             session.add(
                 TrainingCycleWeek(
