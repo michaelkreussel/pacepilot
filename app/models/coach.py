@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKey, Index, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -38,6 +38,14 @@ class CoachConversation(Base):
 
 class CoachMessage(Base):
     __tablename__ = "coach_messages"
+    __table_args__ = (
+        Index(
+            "uq_coach_messages_active_assistant_per_conversation",
+            "conversation_id",
+            unique=True,
+            sqlite_where=text("role = 'assistant' AND status = 'streaming'"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     conversation_id: Mapped[int] = mapped_column(

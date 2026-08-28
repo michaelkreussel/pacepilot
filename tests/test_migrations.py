@@ -195,7 +195,7 @@ def test_feedback_owner_migration_upgrades_applied_revision_22(tmp_path: Path) -
         ).one() == (1, 1)
         assert connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
-        ).scalar_one() == ("20260828_34")
+        ).scalar_one() == ("20260828_35")
 
 
 def test_application_migration_uses_absolute_project_paths(tmp_path: Path, monkeypatch) -> None:
@@ -255,7 +255,7 @@ def test_workout_revision_migration_resumes_after_added_columns(tmp_path: Path) 
             "SELECT version_num FROM alembic_version"
         ).scalar_one()
         integrity = connection.exec_driver_sql("PRAGMA integrity_check").scalar_one()
-    assert revision == "20260828_34"
+    assert revision == "20260828_35"
     assert integrity == "ok"
     assert "workout_revisions" in inspector.get_table_names()
 
@@ -284,7 +284,7 @@ def test_reverted_athlete_profile_revision_upgrades_to_head(tmp_path: Path) -> N
         revision = connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
         ).scalar_one()
-    assert revision == "20260828_34"
+    assert revision == "20260828_35"
 
 
 def test_principal_fingerprint_migration_upgrades_applied_phase_4_schema(
@@ -732,7 +732,7 @@ def test_athlete_planning_inputs_fresh_and_filled_upgrade(tmp_path: Path) -> Non
         legacy = connection.exec_driver_sql("SELECT name FROM workouts WHERE id = 1").scalar()
     engine.dispose()
 
-    assert version == "20260828_34"
+    assert version == "20260828_35"
     assert {
         "athlete_planning_profiles",
         "athlete_goals",
@@ -1023,7 +1023,7 @@ def test_coach_message_lineage_migration_preserves_runs_and_workouts(tmp_path: P
         )
         assert (
             connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one()
-            == "20260828_34"
+            == "20260828_35"
         )
         assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
     source_key = next(
@@ -1302,7 +1302,7 @@ def test_plan_message_lineage_migration_preserves_artifacts_and_enforces_ownersh
         assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
         assert connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
-        ).scalar_one() == ("20260828_34")
+        ).scalar_one() == ("20260828_35")
 
     for table in ("training_plan_revisions", "training_cycle_revisions"):
         source_key = next(
@@ -1484,4 +1484,99 @@ def test_weekly_plan_accepted_revision_migration_rejects_invalid_current_pointer
     assert "accepted_revision_id" not in {
         column["name"] for column in inspect(engine).get_columns("training_plans")
     }
+    engine.dispose()
+
+
+def test_single_active_coach_response_migration_repairs_duplicates_and_enforces_invariant(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "single-active-coach-response.db"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    config = Config("alembic.ini")
+    config.attributes["database_url"] = database_url
+    command.upgrade(config, "20260828_34")
+    engine = create_engine(database_url)
+
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "INSERT INTO users (id, display_name, created_at) VALUES "
+            "(1, 'Runner', '2026-08-28'), (2, 'Other', '2026-08-28')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO coach_conversations (id, user_id, title, created_at, updated_at) VALUES "
+            "(1, 1, 'One', '2026-08-28', '2026-08-28'), "
+            "(2, 2, 'Two', '2026-08-28', '2026-08-28')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO coach_messages "
+            "(id, conversation_id, role, content, status, failure_category, created_at, "
+            "completed_at) VALUES "
+            "(1, 1, 'assistant', 'Fertige Antwort', 'completed', NULL, "
+            "'2026-08-28 09:00:00', '2026-08-28 09:01:00'), "
+            "(2, 1, 'assistant', 'Aeltere Teilantwort', 'streaming', NULL, "
+            "'2026-08-28 10:00:00', NULL), "
+            "(3, 1, 'assistant', '', 'streaming', NULL, "
+            "'2026-08-28 10:05:00', NULL), "
+            "(4, 1, 'assistant', '', 'failed', 'failed', "
+            "'2026-08-28 11:00:00', '2026-08-28 11:01:00'), "
+            "(5, 1, 'assistant', '', 'interrupted', 'interrupted', "
+            "'2026-08-28 12:00:00', '2026-08-28 12:01:00'), "
+            "(6, 2, 'assistant', '', 'streaming', NULL, "
+            "'2026-08-28 10:05:00', NULL)"
+        )
+    engine.dispose()
+
+    command.upgrade(config, "head")
+    command.check(config)
+    engine = create_engine(database_url)
+
+    with engine.begin() as connection:
+        assert connection.exec_driver_sql(
+            "SELECT id, content, status, failure_category, completed_at "
+            "FROM coach_messages ORDER BY id"
+        ).all() == [
+            (1, "Fertige Antwort", "completed", None, "2026-08-28 09:01:00"),
+            (
+                2,
+                "Aeltere Teilantwort",
+                "interrupted",
+                "interrupted",
+                "2026-08-28 10:05:00",
+            ),
+            (3, "", "streaming", None, None),
+            (4, "", "failed", "failed", "2026-08-28 11:01:00"),
+            (5, "", "interrupted", "interrupted", "2026-08-28 12:01:00"),
+            (6, "", "streaming", None, None),
+        ]
+        assert connection.exec_driver_sql(
+            "SELECT conversation_id, id FROM coach_messages "
+            "WHERE role = 'assistant' AND status = 'streaming' ORDER BY conversation_id"
+        ).all() == [(1, 3), (2, 6)]
+        assert (
+            connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one()
+            == "20260828_35"
+        )
+        index_sql = connection.exec_driver_sql(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' "
+            "AND name = 'uq_coach_messages_active_assistant_per_conversation'"
+        ).scalar_one()
+        assert "UNIQUE INDEX" in index_sql
+        assert "role = 'assistant' AND status = 'streaming'" in index_sql
+
+        connection.exec_driver_sql(
+            "INSERT INTO coach_messages "
+            "(conversation_id, role, content, status, created_at, completed_at) VALUES "
+            "(1, 'assistant', 'Noch eine fertige Antwort', 'completed', "
+            "'2026-08-28 13:00:00', '2026-08-28 13:01:00'), "
+            "(1, 'assistant', '', 'failed', '2026-08-28 14:00:00', '2026-08-28 14:01:00'), "
+            "(1, 'assistant', '', 'interrupted', "
+            "'2026-08-28 15:00:00', '2026-08-28 15:01:00')"
+        )
+
+    with pytest.raises(IntegrityError), engine.begin() as connection:
+        connection.exec_driver_sql(
+            "INSERT INTO coach_messages "
+            "(conversation_id, role, content, status, created_at) VALUES "
+            "(1, 'assistant', '', 'streaming', '2026-08-28 16:00:00')"
+        )
     engine.dispose()
