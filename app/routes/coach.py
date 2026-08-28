@@ -241,7 +241,7 @@ def planning_shadow(
                 week_start = parsed
     candidate: WeeklyPlanCandidate | None = None
     try:
-        candidate = plan_shadow_week(session, user, week_start=week_start)
+        candidate = plan_shadow_week(session, user, week_start=week_start, as_of=today)
     except WeeklyPlannerError as exc:
         error = str(exc)
 
@@ -427,9 +427,12 @@ async def create_running_proposal(
                 "idempotency_key": str(form.get("idempotency_key", "")),
             }
         )
-        workout = RunningProposalService(session, user, request_id=request.state.request_id).create(
-            proposal
-        )
+        workout = RunningProposalService(
+            session,
+            user,
+            as_of=date.today(),
+            request_id=request.state.request_id,
+        ).create(proposal)
     except ValidationError:
         error = "Bitte gib ein gültiges Datum und mindestens 20 verfügbare Minuten an."
     except WorkoutProposalError as exc:

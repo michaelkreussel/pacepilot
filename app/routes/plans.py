@@ -112,13 +112,14 @@ def generate_week_plan(
 ) -> RedirectResponse:
     if not coach_feature_enabled(get_settings().coach_plan_generation_enabled, user.id):
         raise HTTPException(status_code=404, detail="Seite nicht gefunden")
+    today = date.today()
     try:
         starts_on = date.fromisoformat(week_start)
-        candidate = plan_shadow_week(session, user, week_start=starts_on)
+        candidate = plan_shadow_week(session, user, week_start=starts_on, as_of=today)
         persist_week_candidate(session, user, candidate)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    current_monday = date.today() - timedelta(days=date.today().weekday())
+    current_monday = today - timedelta(days=today.weekday())
     week_offset = (starts_on - current_monday).days // 7
     return RedirectResponse(f"/plans?view=week&week={week_offset}", status_code=303)
 
@@ -134,12 +135,14 @@ def generate_training_cycle(
 ) -> RedirectResponse:
     if not coach_feature_enabled(get_settings().coach_plan_generation_enabled, user.id):
         raise HTTPException(status_code=404, detail="Seite nicht gefunden")
+    today = date.today()
     try:
         candidate = plan_training_cycle(
             session,
             user,
             start_date=date.fromisoformat(start_date),
             target_date=date.fromisoformat(target_date),
+            as_of=today,
             goal_id=goal_id,
             event_type=event_type or None,
         )

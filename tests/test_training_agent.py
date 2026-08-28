@@ -46,6 +46,7 @@ from app.services.coach.tools import (
     get_health_day,
     get_subjective_context,
 )
+from app.services.planning import workout_proposals as workout_proposals_module
 from app.services.planning.registry import WORKOUT_FORMAT_IDS
 from app.services.planning.workout_views import workout_lifecycle_projection
 
@@ -317,9 +318,10 @@ def _new_chat(client: TestClient) -> int:
     return int(response.headers["location"].rsplit("/", 1)[1])
 
 
-def _running_history(session: Session, user_id: int) -> None:
+def _running_history(session: Session, user_id: int, *, as_of: date | None = None) -> None:
+    as_of = as_of or date.today()
     for index, age in enumerate((0, 7, 14, 21, 28, 35)):
-        day = date.today() - timedelta(days=age)
+        day = as_of - timedelta(days=age)
         session.add(
             Activity(
                 user_id=user_id,
@@ -398,6 +400,20 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
+    coaching_date = date(2026, 8, 28)
+
+    class TurnStartDate(date):
+        @classmethod
+        def today(cls) -> date:
+            return coaching_date
+
+    class AfterMidnightDate(date):
+        @classmethod
+        def today(cls) -> date:
+            return coaching_date + timedelta(days=1)
+
+    monkeypatch.setattr(coach_route_module, "date", TurnStartDate)
+    monkeypatch.setattr(workout_proposals_module, "date", AfterMidnightDate)
 
     class ProposalAgent:
         runtime: CoachRuntimeContext | None = None
@@ -425,12 +441,12 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
             }
             first = create_running_workout_proposal(
                 runtime=runtime,
-                suggested_for=date.today() + timedelta(days=1),
+                suggested_for=runtime.as_of + timedelta(days=1),
                 available_minutes=60,
             )
             second = create_running_workout_proposal(
                 runtime=runtime,
-                suggested_for=date.today() + timedelta(days=1),
+                suggested_for=runtime.as_of + timedelta(days=1),
                 available_minutes=60,
             )
             assert json.loads(first)["artifact"] == json.loads(second)["artifact"]
@@ -444,7 +460,7 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
     with session_factory() as session:
         user = session.scalar(select(User))
         assert user is not None
-        _running_history(session, user.id)
+        _running_history(session, user.id, as_of=coaching_date)
         latest_run = session.scalar(
             select(Activity).where(Activity.user_id == user.id).order_by(Activity.started_at.desc())
         )
@@ -462,6 +478,7 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
     assert response.text.count("event: proposal.created") == 1
     assert '"card_url":"/coach/' in response.text
     assert fake.runtime is not None
+    assert fake.runtime.as_of == coaching_date
     assistant_message_id = fake.runtime.assistant_message_id
     user_message_id = fake.runtime.user_message_id
     assert assistant_message_id is not None
@@ -507,6 +524,8 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
         workout_id = workout.id
         revision = session.get(WorkoutRevision, workout.current_revision_id)
         assert revision is not None
+        assert revision.generation_context_json is not None
+        assert revision.generation_context_json["as_of"] == coaching_date.isoformat()
         assert (
             revision.model_provider,
             revision.model_id,
@@ -541,7 +560,7 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
         assert artifact.warning is not None
         assert artifact.warning.outcome == "warn"
         assert artifact.warning.evidence is not None
-        assert artifact.warning.evidence.assessed_on == date.today()
+        assert artifact.warning.evidence.assessed_on == coaching_date
         assert artifact.warning.coverage_percent is not None
         assert artifact.warning.recommendation
         assert artifact.warning_acknowledgement is not None

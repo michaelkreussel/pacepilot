@@ -552,19 +552,20 @@ def _generation_context(
     }
 
 
-def plan_shadow_week(session: Session, user: User, *, week_start: date) -> WeeklyPlanCandidate:
+def plan_shadow_week(
+    session: Session, user: User, *, week_start: date, as_of: date
+) -> WeeklyPlanCandidate:
     if week_start.weekday() != 0:
         raise WeeklyPlannerError(
             "Die Woche muss an einem Montag beginnen.",
             code="planner.week_start_invalid",
         )
-    safety = build_proposal_safety_context(session, user.id)
+    safety = build_proposal_safety_context(session, user.id, now=datetime.combine(as_of, time.max))
     if not safety.report.valid:
         raise WeeklyPlannerError(
             "Ein aktueller Sicherheitshinweis blockiert die Wochenplanung.",
             code="planner.safety_blocked",
         )
-    as_of = date.today()
     planning_inputs = get_planning_inputs(session, user.id, as_of=as_of)
     profile = planning_inputs.profile
     shadow = AthleteDataService(session, user.id, as_of=as_of).get_running_shadow_analysis(

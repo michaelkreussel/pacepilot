@@ -20,6 +20,7 @@ from app.models import (
     Workout,
     WorkoutRevision,
 )
+from app.services.planning import multiweek_planner as multiweek_planner_module
 from app.services.planning.multiweek_planner import (
     MultiweekPlannerError,
     TrainingCyclePersistenceError,
@@ -340,6 +341,37 @@ def test_cycle_target_boundary_does_not_place_after_goal() -> None:
     )
 
 
+def test_training_cycle_propagates_one_date_to_every_week(
+    session_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    as_of = date(2026, 8, 26)
+    weekly_candidates = iter(_weekly_candidates())
+    observed_dates: list[date] = []
+
+    def plan_week(_session, _user, *, week_start: date, as_of: date) -> WeeklyPlanCandidate:
+        candidate = next(weekly_candidates)
+        assert candidate.week_start == week_start
+        observed_dates.append(as_of)
+        return candidate
+
+    monkeypatch.setattr(multiweek_planner_module, "plan_shadow_week", plan_week)
+    with session_factory() as session:
+        user = _user(session)
+        cycle = plan_training_cycle(
+            session,
+            user,
+            start_date=START,
+            target_date=START + timedelta(weeks=7, days=6),
+            event_type="half_marathon",
+            as_of=as_of,
+        )
+
+    assert observed_dates == [as_of] * 8
+    assert {week.weekly_plan.generation_context["as_of"] for week in cycle.weeks} == {
+        as_of.isoformat()
+    }
+
+
 def test_cycle_requires_exact_active_goal_when_selected(session_factory) -> None:
     with session_factory() as session:
         user = _user(session)
@@ -360,6 +392,7 @@ def test_cycle_requires_exact_active_goal_when_selected(session_factory) -> None
                 user,
                 start_date=START,
                 target_date=target_date,
+                as_of=date(2026, 8, 26),
                 goal_id=archived.id,
             )
         assert archived_error.value.code == "cycle.goal_not_found"
@@ -370,6 +403,7 @@ def test_cycle_requires_exact_active_goal_when_selected(session_factory) -> None
                 user,
                 start_date=START,
                 target_date=START + timedelta(weeks=7),
+                as_of=date(2026, 8, 26),
                 goal_id=999_999,
             )
         assert missing_error.value.code == "cycle.goal_not_found"

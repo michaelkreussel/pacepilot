@@ -2,7 +2,7 @@ import hashlib
 import json
 from copy import deepcopy
 from dataclasses import dataclass, replace
-from datetime import date
+from datetime import date, datetime, time
 from math import ceil
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -167,21 +167,27 @@ def _candidate_inputs(
     session: Session,
     user: User,
     *,
+    as_of: date,
     suggested_for: date,
 ) -> tuple[RunningShadowAnalysis, SafetyContext]:
-    if suggested_for < date.today():
+    if suggested_for < as_of:
         raise WorkoutProposalError(
             "Das vorgeschlagene Datum darf nicht in der Vergangenheit liegen.",
             code="proposal.date_in_past",
         )
-    shadow = AthleteDataService(session, user.id, as_of=date.today()).get_running_shadow_analysis()
+    shadow = AthleteDataService(session, user.id, as_of=as_of).get_running_shadow_analysis()
     recent = shadow.baseline.window(56)
     if recent.runs == 0 or recent.quality.latest_run_age_days is None:
         raise WorkoutProposalError(
             "Für einen sicheren Vorschlag fehlt ein beobachteter Lauf aus den letzten 56 Tagen.",
             code="proposal.running_history_required",
         )
-    safety = build_proposal_safety_context(session, user.id, suggested_for=suggested_for)
+    safety = build_proposal_safety_context(
+        session,
+        user.id,
+        suggested_for=suggested_for,
+        now=datetime.combine(as_of, time.max),
+    )
     if not safety.report.valid:
         message = (
             "Ein aktueller Sicherheitshinweis blockiert einen Laufvorschlag."
@@ -226,6 +232,7 @@ def _eligibility(
     safety: SafetyContext,
     available_minutes: int,
     template_id: RunningTemplateId,
+    as_of: date,
 ) -> TemplateEligibilityContext:
     recent = shadow.baseline.window(28)
     contraindications: set[str] = set()
@@ -235,7 +242,7 @@ def _eligibility(
     if "safety.fever_or_systemic_illness" in issue_codes:
         contraindications.add("fever_or_systemic_illness")
     settings = get_settings()
-    consistent_weeks = _count_consistent_weeks(session, user_id, date.today())
+    consistent_weeks = _count_consistent_weeks(session, user_id, as_of)
     runs_per_week = max(round(recent.frequency_per_week), 1)
     if not settings.coach_planner_history_gates_enabled:
         required_weeks = 8 if template_id in DEFERRED_QUALITY_TEMPLATE_IDS else 4
@@ -292,10 +299,11 @@ def _generation_context(
     available_minutes: int,
     selected_minutes: int,
     template_id: str,
+    as_of: date,
 ) -> dict[str, object]:
     return {
         "schema_version": "running_workout_proposal_context.v2",
-        "as_of": date.today().isoformat(),
+        "as_of": as_of.isoformat(),
         "request": {
             "suggested_for": suggested_for.isoformat(),
             "available_minutes": available_minutes,
@@ -329,6 +337,7 @@ def _metadata(
     available_minutes: int,
     selected_minutes: int,
     edit_source: str,
+    as_of: date,
 ) -> RevisionMetadata:
     device_target = expanded.guidance.get("device_target")
     rationales = {
@@ -356,6 +365,7 @@ def _metadata(
         available_minutes=available_minutes,
         selected_minutes=selected_minutes,
         template_id=expanded.template_id,
+        as_of=as_of,
     )
     if isinstance(device_target := guidance.get("device_target"), dict):
         generation_context["device_target"] = device_target
@@ -381,10 +391,12 @@ class RunningProposalService:
         session: Session,
         user: User,
         *,
+        as_of: date,
         request_id: str | None = None,
     ) -> None:
         self.session = session
         self.user = user
+        self.as_of = as_of
         self.request_id = request_id
 
     def create_easy_run(
@@ -418,7 +430,10 @@ class RunningProposalService:
                 code="proposal.feature_disabled",
             )
         shadow, safety = _candidate_inputs(
-            self.session, self.user, suggested_for=request.suggested_for
+            self.session,
+            self.user,
+            as_of=self.as_of,
+            suggested_for=request.suggested_for,
         )
         if request.template_id in QUALITY_TEMPLATE_IDS:
             conflicts = quality_density_conflicts(self.session, self.user.id, request.suggested_for)
@@ -491,6 +506,7 @@ class RunningProposalService:
                 safety,
                 request.available_minutes,
                 request.template_id,
+                self.as_of,
             ),
             allow_deferred_quality=request.template_id in DEFERRED_QUALITY_TEMPLATE_IDS,
         )
@@ -533,6 +549,7 @@ class RunningProposalService:
             available_minutes=request.available_minutes,
             selected_minutes=selected_minutes,
             edit_source="generator",
+            as_of=self.as_of,
         )
         return workout_service.create_proposal(
             data,
@@ -549,6 +566,7 @@ def edited_easy_run_metadata(
     current: WorkoutRevision,
     data: WorkoutInput,
 ) -> RevisionMetadata:
+    as_of = date.today()
     ensure_easy_run_device_target_current(session, user.id, current)
     if current.template_id != "easy_run" or current.generation_context_json is None:
         raise WorkoutTransitionError(
@@ -610,7 +628,7 @@ def edited_easy_run_metadata(
             "Der Easy Run muss zwischen 20 Minuten und deinem Zeitbudget liegen.",
             code="proposal.easy_run_duration_invalid",
         )
-    shadow, safety = _candidate_inputs(session, user, suggested_for=data.scheduled_for)
+    shadow, safety = _candidate_inputs(session, user, as_of=as_of, suggested_for=data.scheduled_for)
     estimate = LoadEstimate(
         duration_seconds=selected_minutes * 60,
         distance_meters=None,
@@ -628,7 +646,9 @@ def edited_easy_run_metadata(
     expanded = expand_workout_template(
         "easy_run",
         TemplateParameters(duration_minutes=selected_minutes),
-        eligibility=_eligibility(session, user.id, shadow, safety, available_minutes, "easy_run"),
+        eligibility=_eligibility(
+            session, user.id, shadow, safety, available_minutes, "easy_run", as_of
+        ),
     )
     current_device_target = (
         current.guidance_json.get("device_target") if current.guidance_json else None
@@ -646,6 +666,7 @@ def edited_easy_run_metadata(
         available_minutes=available_minutes,
         selected_minutes=selected_minutes,
         edit_source="user",
+        as_of=as_of,
     )
     generation_context = deepcopy(metadata.generation_context_json)
     assert generation_context is not None

@@ -714,6 +714,7 @@ def plan_training_cycle(
     *,
     start_date: date,
     target_date: date,
+    as_of: date,
     goal_id: int | None = None,
     event_type: str | None = None,
     interrupted_weeks: frozenset[int] = frozenset(),
@@ -740,7 +741,12 @@ def plan_training_cycle(
         )
     profile = get_planning_profile(session, user.id)
     weekly_candidates = tuple(
-        plan_shadow_week(session, user, week_start=start_date + timedelta(weeks=offset))
+        plan_shadow_week(
+            session,
+            user,
+            week_start=start_date + timedelta(weeks=offset),
+            as_of=as_of,
+        )
         for offset in range(_week_count(start_date, target_date))
     )
     effective_reentry = bool(profile is not None and profile.self_declared_reentry)

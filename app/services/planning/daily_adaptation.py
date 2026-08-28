@@ -201,12 +201,12 @@ class DailyAdaptationService:
         session: Session,
         user: User,
         *,
-        as_of: date | None = None,
+        as_of: date,
         request_id: str | None = None,
     ) -> None:
         self.session = session
         self.user = user
-        self.as_of = as_of or date.today()
+        self.as_of = as_of
         self.request_id = request_id
 
     def assess_today(

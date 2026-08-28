@@ -198,7 +198,12 @@ def create_running_workout_proposal(
             ),
         )
         try:
-            RunningProposalService(session, user, request_id=assistant_message.request_id).create(
+            RunningProposalService(
+                session,
+                user,
+                as_of=context.as_of,
+                request_id=assistant_message.request_id,
+            ).create(
                 request,
                 origin=ProposalOrigin(
                     conversation_id=conversation_id,

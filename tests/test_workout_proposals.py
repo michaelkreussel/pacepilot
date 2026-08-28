@@ -110,7 +110,7 @@ def test_easy_run_proposal_is_deterministic_revisioned_and_unscheduled(
         user = _user(session)
         _history(session, user.id, date.today())
 
-        service = RunningProposalService(session, user)
+        service = RunningProposalService(session, user, as_of=date.today())
         workout = service.create_easy_run(_request())
         repeated = service.create_easy_run(_request())
         revision = session.get(WorkoutRevision, workout.current_revision_id)
@@ -206,7 +206,7 @@ def test_one_assistant_message_can_source_multiple_proposals(
             model_id=assistant_message.model_id,
             prompt_template_version=assistant_message.prompt_template_version,
         )
-        service = RunningProposalService(session, user)
+        service = RunningProposalService(session, user, as_of=date.today())
 
         first = service.create(
             RunningProposalRequest(
@@ -240,7 +240,7 @@ def test_easy_run_proposal_uses_requested_60_minutes(
         user = _user(session)
         _history(session, user.id, date.today())
 
-        workout = RunningProposalService(session, user).create_easy_run(
+        workout = RunningProposalService(session, user, as_of=date.today()).create_easy_run(
             _request(minutes=60, key="phase8-request-60")
         )
         revision = session.get(WorkoutRevision, workout.current_revision_id)
@@ -291,7 +291,7 @@ def test_running_proposal_service_supports_all_templates_in_development(
         activities[0].workout_rpe = 8
         session.flush()
 
-        workout = RunningProposalService(session, user).create(
+        workout = RunningProposalService(session, user, as_of=date.today()).create(
             RunningProposalRequest(
                 template_id=template_id,
                 suggested_for=date.today() + timedelta(days=1),
@@ -317,7 +317,7 @@ def test_stale_idempotency_precheck_rolls_back_duplicate_proposal(
     with session_factory() as session:
         user = _user(session)
         _history(session, user.id, date.today())
-        service = RunningProposalService(session, user)
+        service = RunningProposalService(session, user, as_of=date.today())
         request = _request(key="phase8-race-regression")
         winner = service.create_easy_run(request)
 
@@ -361,7 +361,7 @@ def test_proposal_requires_recent_history_and_respects_safety_stop(
     monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
     with session_factory() as session:
         user = _user(session)
-        service = RunningProposalService(session, user)
+        service = RunningProposalService(session, user, as_of=date.today())
 
         with pytest.raises(WorkoutProposalError) as missing_history:
             service.create_easy_run(_request(key="phase8-no-history"))
@@ -418,7 +418,7 @@ def test_easy_run_uses_personal_garmin_hr_range_as_device_target(
         session.add(account)
         session.flush()
 
-        workout = RunningProposalService(session, user).create_easy_run(
+        workout = RunningProposalService(session, user, as_of=date.today()).create_easy_run(
             _request(key="phase8-personal-hr")
         )
         revision = session.get(WorkoutRevision, workout.current_revision_id)
@@ -558,7 +558,9 @@ def test_proposal_edit_accept_schedule_and_reject_lifecycle(
     with session_factory() as session:
         user = _user(session)
         _history(session, user.id, date.today())
-        workout = RunningProposalService(session, user).create_easy_run(_request())
+        workout = RunningProposalService(session, user, as_of=date.today()).create_easy_run(
+            _request()
+        )
         service = WorkoutService(session, user)
         revision = session.get(WorkoutRevision, workout.current_revision_id)
         assert revision is not None
@@ -643,7 +645,7 @@ def test_proposal_edit_accept_schedule_and_reject_lifecycle(
             == 1
         )
 
-        second = RunningProposalService(session, user).create_easy_run(
+        second = RunningProposalService(session, user, as_of=date.today()).create_easy_run(
             _request(key="phase8-request-2")
         )
         second_revision = session.get(WorkoutRevision, second.current_revision_id)
@@ -673,7 +675,7 @@ def test_generated_edit_and_schedule_enforce_proposal_contract(
     with session_factory() as session:
         user = _user(session)
         _history(session, user.id, date.today())
-        workout = RunningProposalService(session, user).create_easy_run(
+        workout = RunningProposalService(session, user, as_of=date.today()).create_easy_run(
             _request(key="phase8-contract")
         )
         service = WorkoutService(session, user)
@@ -890,7 +892,7 @@ def test_quality_proposal_requires_spacing_from_accepted_quality(
     with session_factory() as session:
         user = _user(session)
         _history(session, user.id, date.today())
-        service = RunningProposalService(session, user)
+        service = RunningProposalService(session, user, as_of=date.today())
         first = service.create(
             RunningProposalRequest(
                 template_id="threshold_cruise",
@@ -944,7 +946,7 @@ def test_generated_proposal_uses_shared_idempotent_garmin_service(
         user = _user(session)
         _history(session, user.id, date.today())
         garmin = FakeGarmin()
-        proposal = RunningProposalService(session, user).create_easy_run(
+        proposal = RunningProposalService(session, user, as_of=date.today()).create_easy_run(
             _request(key="phase8-garmin")
         )
         service = WorkoutService(session, user, connect_garmin=lambda *_args: garmin)

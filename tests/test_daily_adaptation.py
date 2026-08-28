@@ -579,7 +579,7 @@ def test_assessment_is_blocked_while_feature_flag_is_off(
         session.flush()
 
         with pytest.raises(DailyAdaptationError) as disabled:
-            DailyAdaptationService(session, user).assess_today(1)
+            DailyAdaptationService(session, user, as_of=date.today()).assess_today(1)
 
         assert disabled.value.code == "adaptation.feature_disabled"
 

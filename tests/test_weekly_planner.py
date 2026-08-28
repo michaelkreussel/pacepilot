@@ -315,11 +315,11 @@ def test_safety_stop_blocks_the_whole_shadow_week(session_factory) -> None:
         session.commit()
 
         with pytest.raises(WeeklyPlannerError) as blocked:
-            plan_shadow_week(session, user, week_start=MONDAY)
+            plan_shadow_week(session, user, week_start=MONDAY, as_of=today)
         assert blocked.value.code == "planner.safety_blocked"
 
         with pytest.raises(WeeklyPlannerError) as invalid_week:
-            plan_shadow_week(session, user, week_start=date(2026, 9, 1))
+            plan_shadow_week(session, user, week_start=date(2026, 9, 1), as_of=today)
         assert invalid_week.value.code == "planner.week_start_invalid"
 
 
@@ -379,13 +379,14 @@ def test_planning_writes_no_rows(session_factory) -> None:
 
         before = counts()
         monday = today - timedelta(days=today.weekday())
-        candidate = plan_shadow_week(session, user, week_start=monday)
+        candidate = plan_shadow_week(session, user, week_start=monday, as_of=today)
         session.commit()
         after = counts()
 
         assert before == after
         assert isinstance(candidate, WeeklyPlanCandidate)
         assert candidate.validation_report["valid"] is True
+        assert candidate.generation_context["as_of"] == today.isoformat()
 
 
 @given(
