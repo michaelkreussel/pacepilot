@@ -26,6 +26,7 @@ from app.models.user import utcnow
 
 if TYPE_CHECKING:
     from app.models.activity import Activity
+    from app.models.coach import CoachMessage
     from app.models.user import User
 
 
@@ -101,6 +102,9 @@ class Workout(Base):
     originating_assistant_message_id: Mapped[int | None] = mapped_column(
         ForeignKey("coach_messages.id", ondelete="SET NULL")
     )
+    source_assistant_message_id: Mapped[int | None] = mapped_column(
+        ForeignKey("coach_messages.id", ondelete="SET NULL"), index=True
+    )
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
@@ -118,6 +122,9 @@ class Workout(Base):
     )
     garmin_binding: Mapped["WorkoutGarminBinding | None"] = relationship(
         back_populates="workout", cascade="all, delete-orphan", uselist=False
+    )
+    source_assistant_message: Mapped["CoachMessage | None"] = relationship(
+        foreign_keys=[source_assistant_message_id]
     )
 
     @property

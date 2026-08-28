@@ -47,6 +47,10 @@ class CoachMessage(Base):
     content: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(String(20), default="completed")
     model_id: Mapped[str | None] = mapped_column(String(200))
+    request_id: Mapped[str | None] = mapped_column(String(100))
+    prompt_template_version: Mapped[str | None] = mapped_column(String(100))
+    operation_contract_version: Mapped[str | None] = mapped_column(String(100))
+    failure_category: Mapped[str | None] = mapped_column(String(100))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime)
 
