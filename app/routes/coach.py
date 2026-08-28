@@ -10,7 +10,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response, StreamingResponse
 from pydantic import ValidationError
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session
 
 from app.auth import CurrentUser
 from app.config import (
@@ -29,13 +29,9 @@ from app.repositories.coach import (
     create_conversation,
     fail_message,
     find_conversation,
-    finish_tool_call,
     list_conversations,
-    start_tool_call,
 )
-from app.services.coach.agent import (
-    CoachEvent,
-)
+from app.services.coach.agent import CoachProviderError
 from app.services.coach.conversation import (
     CoachHistoryMessage,
     CoachRuntimeContext,
@@ -475,33 +471,6 @@ def _event(event: str, payload: dict[str, object]) -> str:
     return f"event: {event}\ndata: {data}\n\n"
 
 
-def _persist_tool_event(
-    factory: sessionmaker[Session], assistant_message_id: int, event: CoachEvent
-) -> None:
-    if event.tool_call_id is None:
-        return
-    with factory() as session:
-        if event.type == "tool_started":
-            start_tool_call(
-                session,
-                assistant_message_id,
-                call_id=event.tool_call_id,
-                tool_name=event.tool_name or "unknown",
-                label=event.label or "Trainingsdaten prüfen",
-                input_summary=event.summary,
-            )
-        elif event.type in {"tool_completed", "tool_failed"}:
-            finish_tool_call(
-                session,
-                assistant_message_id,
-                event.tool_call_id,
-                error_message=(
-                    "Daten konnten nicht geladen werden" if event.type == "tool_failed" else None
-                ),
-            )
-        session.commit()
-
-
 def _proposal_event_payload(runtime: CoachRuntimeContext) -> dict[str, object]:
     if runtime.conversation_id is None or runtime.assistant_run_id is None:
         raise RuntimeError("Proposal event has no local assistant run")
@@ -551,41 +520,34 @@ async def _stream_answer(
         async for event in agent.stream(history, runtime):
             if await request.is_disconnected():
                 raise asyncio.CancelledError
-            if event.type == "answer_delta" and event.text:
+            if event.type == "answer_text" and event.text:
                 answer.append(event.text)
                 yield _event("answer.delta", {"text": event.text})
-            elif event.type == "status" and event.text:
-                yield _event("status", {"label": event.text})
-            elif event.type in {"tool_started", "tool_completed", "tool_failed"}:
-                _persist_tool_event(runtime.session_factory, assistant_message_id, event)
-                yield _event(
-                    event.type.replace("_", "."),
-                    {
-                        "id": event.tool_call_id or "",
-                        "name": event.tool_name or "",
-                        "label": event.label or "Trainingsdaten prüfen",
-                        "summary": event.summary,
-                    },
-                )
-            elif event.type == "proposal_created":
+            elif event.type == "artifact_available" and event.artifact_type == "workout":
                 if not proposal_emitted:
                     yield _event("proposal.created", _proposal_event_payload(runtime))
                     proposal_emitted = True
-
-        content = "".join(answer).strip()
-        with runtime.session_factory() as session:
-            complete_message(session, assistant_message_id, content)
-            session.commit()
-        logger.info(
-            "AI coach stream completed request_id=%s user_id=%s assistant_message_id=%s "
-            "duration_ms=%s answer_characters=%s",
-            runtime.request_id,
-            runtime.user_id,
-            assistant_message_id,
-            round((monotonic() - started_at) * 1000),
-            len(content),
-        )
-        yield _event("answer.completed", {"message_id": assistant_message_id})
+            elif event.type == "completed":
+                content = "".join(answer).strip()
+                if not content:
+                    raise CoachProviderError("Coach provider completed without answer text")
+                with runtime.session_factory() as session:
+                    complete_message(session, assistant_message_id, content)
+                    session.commit()
+                logger.info(
+                    "AI coach stream completed request_id=%s user_id=%s assistant_message_id=%s "
+                    "duration_ms=%s answer_characters=%s",
+                    runtime.request_id,
+                    runtime.user_id,
+                    assistant_message_id,
+                    round((monotonic() - started_at) * 1000),
+                    len(content),
+                )
+                yield _event("answer.completed", {"message_id": assistant_message_id})
+                return
+            elif event.type == "failed":
+                raise CoachProviderError("Coach provider execution failed")
+        raise CoachProviderError("Coach provider stream ended without completion")
     except asyncio.CancelledError:
         with runtime.session_factory() as session:
             fail_message(session, assistant_message_id, interrupted=True)

@@ -25,7 +25,8 @@ class RecordingCoachAgent:
     ) -> AsyncIterator[CoachEvent]:
         del runtime
         self.calls.append(list(messages))
-        yield CoachEvent("answer_delta", text="Recorded answer")
+        yield CoachEvent("answer_text", text="Recorded answer")
+        yield CoachEvent("completed")
 
 
 def _new_chat(client: TestClient) -> int:
@@ -262,14 +263,14 @@ def test_partial_stream_failure_is_not_persisted_or_reused_as_history(
                     user_message.status,
                     user_message.content,
                 )
-            yield CoachEvent("answer_delta", text="Unfinished private answer")
-            raise RuntimeError("provider failed after partial answer")
+            yield CoachEvent("answer_text", text="Unfinished private answer")
+            yield CoachEvent("failed")
 
     failing = FailingAfterAnswerAgent()
     app.dependency_overrides[get_coach_agent_factory] = lambda: lambda: failing
     conversation_id = _new_chat(client)
 
-    with pytest.raises(RuntimeError, match="provider failed after partial answer"):
+    with pytest.raises(RuntimeError, match="Coach provider execution failed"):
         client.post(
             f"/coach/{conversation_id}/messages",
             data={"message": "first-question"},

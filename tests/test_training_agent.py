@@ -34,20 +34,20 @@ from app.models import (
 )
 from app.models.user import utcnow
 from app.services.analytics.health_trends import HEALTH_METRICS
-from app.services.coach import agent as coach_agent_module
 from app.services.coach import dependencies as coach_dependencies_module
-from app.services.coach.agent import (
-    CoachEvent,
-    LangChainCoachAgent,
-)
+from app.services.coach import provider as coach_provider_module
+from app.services.coach.agent import CoachEvent, CoachProviderError
 from app.services.coach.conversation import CoachHistoryMessage, CoachRuntimeContext
 from app.services.coach.dependencies import get_coach_agent_factory
 from app.services.coach.presentation import workout_artifact_presentation
-from app.services.coach.tools import (
+from app.services.coach.provider import (
+    COACH_PROMPT_TEMPLATE_VERSION,
+    OpenRouterCoachProvider,
     coach_tools,
+)
+from app.services.coach.tools import (
     create_running_workout_proposal,
     get_health_day,
-    get_health_trends,
     get_subjective_context,
 )
 from app.services.planning.registry import WORKOUT_FORMAT_IDS
@@ -65,21 +65,9 @@ class FakeCoachAgent:
     ) -> AsyncIterator[CoachEvent]:
         del runtime
         self.calls.append(list(messages))
-        yield CoachEvent("status", text="Aktuelle Erholung wird geprüft")
-        yield CoachEvent(
-            "tool_started",
-            tool_call_id="call-health",
-            tool_name="get_current_recovery_state",
-            label="Aktuelle Erholung prüfen",
-        )
-        yield CoachEvent(
-            "tool_completed",
-            tool_call_id="call-health",
-            tool_name="get_current_recovery_state",
-            label="Aktuelle Erholung prüfen",
-        )
-        yield CoachEvent("answer_delta", text="Du wirkst heute etwas weniger erholt. ")
-        yield CoachEvent("answer_delta", text="Dein Ruhepuls liegt leicht über deinem Basiswert.")
+        yield CoachEvent("answer_text", text="Du wirkst heute etwas weniger erholt. ")
+        yield CoachEvent("answer_text", text="Dein Ruhepuls liegt leicht über deinem Basiswert.")
+        yield CoachEvent("completed")
 
 
 @pytest.mark.parametrize(
@@ -132,17 +120,37 @@ def test_global_logging_writes_module_records_to_rotating_file(tmp_path: Path) -
 
 
 def test_openrouter_timeout_is_converted_to_sdk_milliseconds(
+    session_factory: sessionmaker[Session],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, Any] = {}
 
-    def fake_create_agent(model: object, *_: Any, **__: Any) -> object:
+    class EmptyAgent:
+        async def astream(self, *_: Any, **__: Any) -> AsyncIterator[object]:
+            if False:
+                yield object()
+
+    def fake_create_agent(model: object, *_: Any, **__: Any) -> EmptyAgent:
         captured["model"] = model
-        return object()
+        return EmptyAgent()
 
-    monkeypatch.setattr(coach_agent_module, "create_agent", fake_create_agent)
+    monkeypatch.setattr(coach_provider_module, "create_agent", fake_create_agent)
 
-    LangChainCoachAgent(api_key="test-key", model_id="test/model", timeout_seconds=60)
+    provider = OpenRouterCoachProvider(
+        api_key="test-key", model_id="test/model", timeout_seconds=60
+    )
+    assert captured == {}
+
+    async def collect() -> list[CoachEvent]:
+        return [
+            event
+            async for event in provider.stream(
+                [CoachHistoryMessage("user", "Test")],
+                CoachRuntimeContext(1, date(2026, 8, 11), session_factory),
+            )
+        ]
+
+    assert asyncio.run(collect()) == [CoachEvent("failed")]
 
     model: Any = captured["model"]
     assert model.request_timeout == 60_000
@@ -265,8 +273,10 @@ def test_agent_stream_never_leaks_reasoning_into_answer(
     session_factory: sessionmaker[Session],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(coach_agent_module, "ChatOpenRouter", lambda **_: _ReasoningFakeChatModel())
-    agent = LangChainCoachAgent(api_key="test-key", model_id="fake/model", timeout_seconds=5)
+    monkeypatch.setattr(
+        coach_provider_module, "ChatOpenRouter", lambda **_: _ReasoningFakeChatModel()
+    )
+    agent = OpenRouterCoachProvider(api_key="test-key", model_id="fake/model", timeout_seconds=5)
 
     with session_factory() as session:
         user = User(display_name="Reasoning Runner")
@@ -289,9 +299,10 @@ def test_agent_stream_never_leaks_reasoning_into_answer(
 
     events = asyncio.run(collect())
 
-    answer = "".join(event.text for event in events if event.type == "answer_delta" and event.text)
+    answer = "".join(event.text for event in events if event.type == "answer_text" and event.text)
     assert answer == "Antwort."
     assert "Denke" not in answer
+    assert events[-1] == CoachEvent("completed")
 
 
 def _new_chat(client: TestClient) -> int:
@@ -337,10 +348,8 @@ def test_coach_streams_and_persists_conversation(
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/event-stream")
-    assert "event: status" in response.text
-    assert "event: tool.started" in response.text
-    assert "event: tool.completed" in response.text
     assert "event: answer.delta" in response.text
+    assert "event: answer.completed" in response.text
     assert "Du wirkst heute etwas weniger erholt" in response.text
     assert fake.calls[0] == [CoachHistoryMessage("user", "Wie erholt bin ich heute?")]
 
@@ -360,12 +369,6 @@ def test_coach_streams_and_persists_conversation(
             ("assistant", "completed"),
         ]
         assert messages[1].content.endswith("leicht über deinem Basiswert.")
-        tool_call = session.scalar(
-            select(CoachToolCall).where(CoachToolCall.message_id == messages[1].id)
-        )
-        assert tool_call is not None
-        assert tool_call.tool_name == "get_current_recovery_state"
-        assert tool_call.status == "completed"
         assert session.scalar(select(Workout)) is None
 
     page = client.get(f"/coach/{conversation_id}").text
@@ -374,9 +377,6 @@ def test_coach_streams_and_persists_conversation(
     assert "data-coach-message-list" in page
     assert "Nur lesend" in page
     assert "data-coach-activity" in page
-    assert page.index("Aktuelle Erholung prüfen") < page.index(
-        "Du wirkst heute etwas weniger erholt"
-    )
 
 
 def test_coach_tool_creates_one_durable_server_rendered_proposal(
@@ -396,12 +396,13 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
         ) -> AsyncIterator[CoachEvent]:
             del messages
             self.runtime = runtime
-            function: Any = cast(Any, create_running_workout_proposal).func
             rejected = json.loads(
-                function(
-                    runtime=SimpleNamespace(context=runtime),
+                create_running_workout_proposal(
+                    runtime=runtime,
                     suggested_for=runtime.as_of - timedelta(days=1),
                     available_minutes=60,
+                    model_provider="openrouter",
+                    prompt_template_version=COACH_PROMPT_TEMPLATE_VERSION,
                 )
             )
             assert rejected == {
@@ -411,32 +412,25 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
                     "message": "Das vorgeschlagene Datum darf nicht in der Vergangenheit liegen.",
                 },
             }
-            first = function(
-                runtime=SimpleNamespace(context=runtime),
+            first = create_running_workout_proposal(
+                runtime=runtime,
                 suggested_for=date.today() + timedelta(days=1),
                 available_minutes=60,
+                model_provider="openrouter",
+                prompt_template_version=COACH_PROMPT_TEMPLATE_VERSION,
             )
-            second = function(
-                runtime=SimpleNamespace(context=runtime),
+            second = create_running_workout_proposal(
+                runtime=runtime,
                 suggested_for=date.today() + timedelta(days=1),
                 available_minutes=60,
+                model_provider="openrouter",
+                prompt_template_version=COACH_PROMPT_TEMPLATE_VERSION,
             )
             assert json.loads(first)["artifact"] == json.loads(second)["artifact"]
-            yield CoachEvent(
-                "tool_started",
-                tool_call_id="provider-call-a",
-                tool_name="create_running_workout_proposal",
-                label="Easy-Run-Vorschlag erstellen",
-            )
-            yield CoachEvent(
-                "tool_completed",
-                tool_call_id="provider-call-a",
-                tool_name="create_running_workout_proposal",
-                label="Easy-Run-Vorschlag erstellen",
-            )
-            yield CoachEvent("proposal_created")
-            yield CoachEvent("proposal_created")
-            yield CoachEvent("answer_delta", text="Ich habe einen Vorschlag vorbereitet.")
+            yield CoachEvent("artifact_available", artifact_type="workout")
+            yield CoachEvent("artifact_available", artifact_type="workout")
+            yield CoachEvent("answer_text", text="Ich habe einen Vorschlag vorbereitet.")
+            yield CoachEvent("completed")
 
     fake = ProposalAgent()
     app.dependency_overrides[get_coach_agent_factory] = lambda: lambda: fake
@@ -465,7 +459,6 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
     assert assistant_run_id is not None
     assert f'"run_id":{assistant_run_id}' in response.text
 
-    function = cast(Any, create_running_workout_proposal).func
     with session_factory() as session:
         run = session.get(CoachAssistantRun, assistant_run_id)
         assert run is not None
@@ -576,10 +569,12 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
     assert "weder angenommen noch eingeplant" not in updated_card.text
 
     conflict = json.loads(
-        function(
-            runtime=SimpleNamespace(context=fake.runtime),
+        create_running_workout_proposal(
+            runtime=fake.runtime,
             suggested_for=date.today() + timedelta(days=2),
             available_minutes=60,
+            model_provider="openrouter",
+            prompt_template_version=COACH_PROMPT_TEMPLATE_VERSION,
         )
     )
     assert conflict["status"] == "not_created"
@@ -612,32 +607,22 @@ def test_invalid_proposal_date_returns_completed_stream_without_artifact(
             runtime: CoachRuntimeContext,
         ) -> AsyncIterator[CoachEvent]:
             del messages
-            function: Any = cast(Any, create_running_workout_proposal).func
             result = json.loads(
-                function(
-                    runtime=SimpleNamespace(context=runtime),
+                create_running_workout_proposal(
+                    runtime=runtime,
                     suggested_for=runtime.as_of - timedelta(days=1),
                     available_minutes=45,
+                    model_provider="openrouter",
+                    prompt_template_version=COACH_PROMPT_TEMPLATE_VERSION,
                 )
             )
             assert result["status"] == "not_created"
             assert result["error"]["code"] == "proposal.date_in_past"
             yield CoachEvent(
-                "tool_started",
-                tool_call_id="invalid-date-call",
-                tool_name="create_running_workout_proposal",
-                label="Easy-Run-Vorschlag erstellen",
-            )
-            yield CoachEvent(
-                "tool_completed",
-                tool_call_id="invalid-date-call",
-                tool_name="create_running_workout_proposal",
-                label="Easy-Run-Vorschlag erstellen",
-            )
-            yield CoachEvent(
-                "answer_delta",
+                "answer_text",
                 text="Das Datum liegt in der Vergangenheit. Welches zukünftige Datum meinst du?",
             )
+            yield CoachEvent("completed")
 
     app.dependency_overrides[get_coach_agent_factory] = lambda: lambda: InvalidDateAgent()
     conversation_id = _new_chat(client)
@@ -662,7 +647,12 @@ def test_invalid_proposal_date_returns_completed_stream_without_artifact(
 
 
 def test_proposal_tool_schema_exposes_no_runtime_or_workout_definition() -> None:
-    schema_model: Any = create_running_workout_proposal.tool_call_schema
+    proposal_tool = next(
+        tool
+        for tool in coach_tools(workout_proposals_enabled=True)
+        if tool.name == "create_running_workout_proposal"
+    )
+    schema_model: Any = proposal_tool.tool_call_schema
     schema = schema_model.model_json_schema()
     assert set(schema["properties"]) == {
         "suggested_for",
@@ -678,7 +668,12 @@ def test_proposal_tool_schema_exposes_no_runtime_or_workout_definition() -> None
 
 
 def test_health_trend_tool_schema_uses_analytics_metric_choices() -> None:
-    schema_model: Any = get_health_trends.tool_call_schema
+    health_trends_tool = next(
+        tool
+        for tool in coach_tools(workout_proposals_enabled=False)
+        if tool.name == "get_health_trends"
+    )
+    schema_model: Any = health_trends_tool.tool_call_schema
     schema = schema_model.model_json_schema()
 
     assert schema["properties"]["metrics"]["items"]["enum"] == list(HEALTH_METRICS)
@@ -713,14 +708,15 @@ def test_proposal_survives_provider_failure_after_commit(
             runtime: CoachRuntimeContext,
         ) -> AsyncIterator[CoachEvent]:
             del messages
-            function: Any = cast(Any, create_running_workout_proposal).func
-            function(
-                runtime=SimpleNamespace(context=runtime),
+            create_running_workout_proposal(
+                runtime=runtime,
                 suggested_for=date.today() + timedelta(days=1),
                 available_minutes=35,
+                model_provider="openrouter",
+                prompt_template_version=COACH_PROMPT_TEMPLATE_VERSION,
             )
-            yield CoachEvent("proposal_created")
-            raise RuntimeError("provider failed after proposal")
+            yield CoachEvent("artifact_available", artifact_type="workout")
+            yield CoachEvent("failed")
 
     with session_factory() as session:
         user = session.scalar(select(User))
@@ -730,7 +726,7 @@ def test_proposal_survives_provider_failure_after_commit(
 
     app.dependency_overrides[get_coach_agent_factory] = lambda: lambda: FailingAfterProposalAgent()
     conversation_id = _new_chat(client)
-    with pytest.raises(RuntimeError, match="provider failed after proposal"):
+    with pytest.raises(CoachProviderError, match="Coach provider execution failed"):
         client.post(
             f"/coach/{conversation_id}/messages",
             data={"message": "Plane einen Lauf."},
@@ -814,7 +810,7 @@ def test_provider_is_constructed_only_for_an_accepted_answer(
         constructed_agents.append(agent)
         return agent
 
-    monkeypatch.setattr(coach_dependencies_module, "LangChainCoachAgent", build_agent)
+    monkeypatch.setattr(coach_dependencies_module, "OpenRouterCoachProvider", build_agent)
     assert client.get("/coach").status_code == 200
     conversation_id = _new_chat(client)
     assert client.get(f"/coach/{conversation_id}").status_code == 200
@@ -845,12 +841,12 @@ def test_provider_construction_failure_marks_claimed_answer_failed(
     monkeypatch.setattr(settings, "llm_model", "test-model")
 
     def fail_construction(**_: object) -> None:
-        raise RuntimeError("provider construction failed")
+        raise RuntimeError("secret provider construction detail")
 
-    monkeypatch.setattr(coach_dependencies_module, "LangChainCoachAgent", fail_construction)
+    monkeypatch.setattr(coach_provider_module, "ChatOpenRouter", fail_construction)
     conversation_id = _new_chat(client)
 
-    with pytest.raises(RuntimeError, match="provider construction failed"):
+    with pytest.raises(CoachProviderError, match="Coach provider execution failed"):
         client.post(
             f"/coach/{conversation_id}/messages",
             data={"message": "Wie erholt bin ich?"},
@@ -868,6 +864,39 @@ def test_provider_construction_failure_marks_claimed_answer_failed(
             ("user", "completed"),
             ("assistant", "failed"),
         ]
+
+
+def test_completed_local_event_without_answer_marks_message_failed(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+) -> None:
+    class EmptyAnswerAgent:
+        async def stream(
+            self,
+            messages: Sequence[CoachHistoryMessage],
+            runtime: CoachRuntimeContext,
+        ) -> AsyncIterator[CoachEvent]:
+            del messages, runtime
+            yield CoachEvent("completed")
+
+    app.dependency_overrides[get_coach_agent_factory] = lambda: lambda: EmptyAnswerAgent()
+    conversation_id = _new_chat(client)
+
+    with pytest.raises(CoachProviderError, match="completed without answer text"):
+        client.post(
+            f"/coach/{conversation_id}/messages",
+            data={"message": "Wie erholt bin ich?"},
+        )
+
+    with session_factory() as session:
+        assistant = session.scalar(
+            select(CoachMessage).where(
+                CoachMessage.conversation_id == conversation_id,
+                CoachMessage.role == "assistant",
+            )
+        )
+        assert assistant is not None
+        assert (assistant.status, assistant.content) == ("failed", "")
 
 
 def test_conversations_are_user_scoped(
@@ -993,11 +1022,9 @@ def test_health_day_tool_uses_runtime_user_scope(
         session.commit()
         first_id = first.id
 
-    context = CoachRuntimeContext(first_id, day, session_factory)
-    runtime: Any = SimpleNamespace(context=context)
-    tool_function: Any = cast(Any, get_health_day).func
+    runtime = CoachRuntimeContext(first_id, day, session_factory)
 
-    payload = json.loads(tool_function(day=day, runtime=runtime))
+    payload = json.loads(get_health_day(day=day, runtime=runtime))
 
     assert payload["resting_hr"] == 48
     assert payload["hrv_average"] == 55
@@ -1038,10 +1065,9 @@ def test_subjective_context_tool_uses_runtime_user_scope(
         session.commit()
         first_id = first.id
 
-    runtime: Any = SimpleNamespace(context=CoachRuntimeContext(first_id, day, session_factory))
-    tool_function: Any = cast(Any, get_subjective_context).func
+    runtime = CoachRuntimeContext(first_id, day, session_factory)
 
-    payload = json.loads(tool_function(runtime=runtime))
+    payload = json.loads(get_subjective_context(runtime=runtime))
 
     assert "daily_checkins" not in payload
     assert [item["name"] for item in payload["recent_activity_feedback"]] == ["Lauf"]
@@ -1064,8 +1090,8 @@ def test_agent_stream_uses_trusted_runtime_context(
         tool_args={},
         answer="Deine Erholungsdaten wurden geprüft.",
     )
-    monkeypatch.setattr(coach_agent_module, "ChatOpenRouter", lambda **_: model)
-    agent = LangChainCoachAgent(api_key="test-key", model_id="fake/model", timeout_seconds=5)
+    monkeypatch.setattr(coach_provider_module, "ChatOpenRouter", lambda **_: model)
+    agent = OpenRouterCoachProvider(api_key="test-key", model_id="fake/model", timeout_seconds=5)
 
     async def collect() -> list[CoachEvent]:
         return [
@@ -1080,9 +1106,10 @@ def test_agent_stream_uses_trusted_runtime_context(
 
     assert model.observed_tool_result is not None
     assert '"as_of":"2026-08-11"' in model.observed_tool_result
-    assert "".join(event.text or "" for event in events if event.type == "answer_delta") == (
+    assert "".join(event.text or "" for event in events if event.type == "answer_text") == (
         "Deine Erholungsdaten wurden geprüft."
     )
+    assert events[-1] == CoachEvent("completed")
 
 
 @pytest.mark.asyncio
@@ -1100,9 +1127,9 @@ async def test_langchain_backend_maps_only_valid_proposal_artifact(
         tool_args={},
         answer="Der Vorschlag ist bereit.",
     )
-    monkeypatch.setattr(coach_agent_module, "ChatOpenRouter", lambda **_: model)
-    monkeypatch.setattr(coach_agent_module, "coach_tools", lambda **_: [fake_proposal_tool])
-    agent = LangChainCoachAgent(
+    monkeypatch.setattr(coach_provider_module, "ChatOpenRouter", lambda **_: model)
+    monkeypatch.setattr(coach_provider_module, "coach_tools", lambda **_: [fake_proposal_tool])
+    agent = OpenRouterCoachProvider(
         api_key="test-key",
         model_id="fake/model",
         timeout_seconds=5,
@@ -1116,32 +1143,60 @@ async def test_langchain_backend_maps_only_valid_proposal_artifact(
         )
     ]
 
-    assert [event.type for event in events].count("proposal_created") == 1
-    assert events[-1] == CoachEvent("answer_delta", text="Der Vorschlag ist bereit.")
+    assert [event.type for event in events].count("artifact_available") == 1
+    assert events[-2:] == [
+        CoachEvent("answer_text", text="Der Vorschlag ist bereit."),
+        CoachEvent("completed"),
+    ]
 
 
 @pytest.mark.asyncio
-async def test_langchain_backend_logs_and_propagates_provider_errors(
+async def test_provider_adapter_logs_and_maps_provider_errors(
     session_factory: sessionmaker[Session],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        coach_agent_module,
+        coach_provider_module,
         "ChatOpenRouter",
         lambda **_: _FailingFakeChatModel(),
     )
-    agent = LangChainCoachAgent(api_key="test-key", model_id="fake/model", timeout_seconds=5)
+    agent = OpenRouterCoachProvider(api_key="test-key", model_id="fake/model", timeout_seconds=5)
     runtime = CoachRuntimeContext(1, date(2026, 8, 11), session_factory)
     logger = Mock()
-    monkeypatch.setattr(coach_agent_module, "logger", logger)
+    monkeypatch.setattr(coach_provider_module, "logger", logger)
 
     private_question = "Mein privater Gesundheitswert ist 123."
-    with pytest.raises(RuntimeError, match="secret provider detail"):
-        async for _ in agent.stream([CoachHistoryMessage("user", private_question)], runtime):
-            pass
+    events = [
+        event
+        async for event in agent.stream([CoachHistoryMessage("user", private_question)], runtime)
+    ]
 
+    assert events == [CoachEvent("failed")]
     logger.exception.assert_called_once()
     log_call = logger.exception.call_args
     assert "AI coach agent failed" in log_call.args[0]
     assert "RuntimeError" in log_call.args
     assert private_question not in repr(log_call)
+
+
+@pytest.mark.asyncio
+async def test_provider_adapter_maps_missing_answer_to_failed(
+    session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        coach_provider_module,
+        "ChatOpenRouter",
+        lambda **_: _ReasoningFakeChatModel(answer=""),
+    )
+    provider = OpenRouterCoachProvider(api_key="test-key", model_id="fake/model", timeout_seconds=5)
+
+    events = [
+        event
+        async for event in provider.stream(
+            [CoachHistoryMessage("user", "Wie ist meine Erholung?")],
+            CoachRuntimeContext(1, date(2026, 8, 11), session_factory),
+        )
+    ]
+
+    assert events == [CoachEvent("failed")]

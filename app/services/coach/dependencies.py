@@ -5,7 +5,8 @@ from fastapi import Depends
 
 from app.auth import CurrentUser
 from app.config import coach_feature_enabled, coach_provider_configured, get_settings
-from app.services.coach.agent import CoachAgent, LangChainCoachAgent
+from app.services.coach.agent import CoachAgent
+from app.services.coach.provider import OpenRouterCoachProvider
 
 CoachProviderConfiguredDep = Annotated[bool, Depends(coach_provider_configured)]
 CoachAgentFactory = Callable[[], CoachAgent]
@@ -25,7 +26,7 @@ def get_coach_agent_factory(
     )
 
     def create_agent() -> CoachAgent:
-        return LangChainCoachAgent(
+        return OpenRouterCoachProvider(
             api_key=api_key,
             model_id=model_id,
             timeout_seconds=timeout_seconds,

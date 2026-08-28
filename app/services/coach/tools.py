@@ -1,18 +1,12 @@
 import json
 from dataclasses import asdict
 from datetime import date, datetime, timedelta
-from typing import Annotated
-
-from langchain.tools import ToolRuntime, tool
-from langchain_core.tools import BaseTool
-from pydantic import Field
 
 from app.models import CoachMessage, User
 from app.repositories.coach import find_assistant_run
 from app.services.analytics.athlete_data import AthleteDataService
 from app.services.analytics.health_trends import HealthMetric
 from app.services.coach.conversation import CoachRuntimeContext
-from app.services.planning.registry import get_knowledge_registry
 from app.services.planning.workout_proposals import (
     RunningProposalRequest,
     RunningProposalService,
@@ -21,8 +15,6 @@ from app.services.planning.workout_proposals import (
 )
 from app.services.planning.workout_service import ProposalOrigin, WorkoutServiceError
 from app.services.planning.workout_templates import TemplateExpansionError
-
-COACH_TOOL_CONTRACT_VERSION = "coach-tools-v2"
 
 
 def _json_default(value: object) -> str:
@@ -35,39 +27,36 @@ def _json(value: object) -> str:
     return json.dumps(value, default=_json_default, ensure_ascii=False, separators=(",", ":"))
 
 
-@tool
-def get_current_recovery_state(runtime: ToolRuntime[CoachRuntimeContext]) -> str:
+def get_current_recovery_state(runtime: CoachRuntimeContext) -> str:
     """Get the athlete's current recovery state and readiness components.
 
     Use this first for questions about today's recovery, fatigue, readiness, or whether the
     athlete should train hard. The result includes source dates and confidence.
     """
-    with runtime.context.session_factory() as session:
+    with runtime.session_factory() as session:
         state = AthleteDataService(
-            session, runtime.context.user_id, as_of=runtime.context.as_of
+            session, runtime.user_id, as_of=runtime.as_of
         ).get_current_recovery_state()
     return _json(asdict(state))
 
 
-@tool
-def get_subjective_context(runtime: ToolRuntime[CoachRuntimeContext]) -> str:
+def get_subjective_context(runtime: CoachRuntimeContext) -> str:
     """Get recent effective Garmin/manual activity feedback.
 
     Use this with recovery data when recent perceived effort should affect today's training. The
     athlete's current subjective condition comes directly from the current chat message.
     """
-    with runtime.context.session_factory() as session:
+    with runtime.session_factory() as session:
         subjective = AthleteDataService(
-            session, runtime.context.user_id, as_of=runtime.context.as_of
+            session, runtime.user_id, as_of=runtime.as_of
         ).get_subjective_context()
     return _json(asdict(subjective))
 
 
-@tool
 def get_health_trends(
-    runtime: ToolRuntime[CoachRuntimeContext],
-    days: Annotated[int, Field(ge=7, le=365)] = 28,
-    metrics: Annotated[tuple[HealthMetric, ...], Field(min_length=1, max_length=6)] = (
+    runtime: CoachRuntimeContext,
+    days: int = 28,
+    metrics: tuple[HealthMetric, ...] = (
         "hrv",
         "resting_hr",
         "sleep_duration",
@@ -79,98 +68,95 @@ def get_health_trends(
     Use this for changes and relationships involving HRV, resting heart rate, sleep, stress,
     Body Battery, readiness, recovery time, VO2max, or training load.
     """
-    with runtime.context.session_factory() as session:
+    with runtime.session_factory() as session:
         payload = AthleteDataService(
-            session, runtime.context.user_id, as_of=runtime.context.as_of
+            session, runtime.user_id, as_of=runtime.as_of
         ).get_health_trends_payload(days, metrics)
     return _json(payload)
 
 
-@tool
 def get_training_summary(
-    runtime: ToolRuntime[CoachRuntimeContext],
-    days: Annotated[int, Field(ge=7, le=365)] = 28,
+    runtime: CoachRuntimeContext,
+    days: int = 28,
 ) -> str:
     """Get a bounded summary of recent training volume, frequency, intensity, and coverage.
 
     Use this when interpreting recovery in light of recent training or comparing training periods.
     """
-    with runtime.context.session_factory() as session:
+    with runtime.session_factory() as session:
         summary = AthleteDataService(
-            session, runtime.context.user_id, as_of=runtime.context.as_of
+            session, runtime.user_id, as_of=runtime.as_of
         ).get_training_summary(days)
     return _json(asdict(summary))
 
 
-@tool
 def get_recent_activities(
-    runtime: ToolRuntime[CoachRuntimeContext],
-    limit: Annotated[int, Field(ge=1, le=10)] = 5,
+    runtime: CoachRuntimeContext,
+    limit: int = 5,
 ) -> str:
     """List recent activities with compact load, heart-rate, distance, and RPE information.
 
     Use this to identify which recent sessions may explain fatigue or recovery changes.
     """
-    with runtime.context.session_factory() as session:
+    with runtime.session_factory() as session:
         workouts = AthleteDataService(
-            session, runtime.context.user_id, as_of=runtime.context.as_of
+            session, runtime.user_id, as_of=runtime.as_of
         ).get_recent_workouts(limit)
     return _json(tuple(asdict(workout) for workout in workouts))
 
 
-@tool
 def get_activity_details(
-    runtime: ToolRuntime[CoachRuntimeContext],
-    activity_id: Annotated[int, Field(gt=0)],
+    runtime: CoachRuntimeContext,
+    activity_id: int,
 ) -> str:
     """Get user-scoped details for one activity returned by the recent-activities tool.
 
     Use this only when a specific session needs closer analysis.
     """
-    with runtime.context.session_factory() as session:
+    with runtime.session_factory() as session:
         details = AthleteDataService(
-            session, runtime.context.user_id, as_of=runtime.context.as_of
+            session, runtime.user_id, as_of=runtime.as_of
         ).get_activity_details(activity_id)
     return _json(asdict(details) if details is not None else {"status": "not_found"})
 
 
-@tool
-def get_health_day(runtime: ToolRuntime[CoachRuntimeContext], day: date) -> str:
+def get_health_day(runtime: CoachRuntimeContext, day: date) -> str:
     """Get available sleep, heart, HRV, stress, Body Battery, and movement data for a date.
 
     Use this for questions about one exact day rather than a trend.
     """
-    if day > runtime.context.as_of or day < runtime.context.as_of - timedelta(days=365):
+    if day > runtime.as_of or day < runtime.as_of - timedelta(days=365):
         return _json({"status": "outside_supported_range"})
-    with runtime.context.session_factory() as session:
-        health = AthleteDataService(
-            session, runtime.context.user_id, as_of=runtime.context.as_of
-        ).get_health_day(day)
+    with runtime.session_factory() as session:
+        health = AthleteDataService(session, runtime.user_id, as_of=runtime.as_of).get_health_day(
+            day
+        )
     return _json(asdict(health) if health is not None else {"status": "not_found", "day": day})
 
 
-@tool
 def get_upcoming_workouts(
-    runtime: ToolRuntime[CoachRuntimeContext],
-    days: Annotated[int, Field(ge=1, le=42)] = 14,
+    runtime: CoachRuntimeContext,
+    days: int = 14,
 ) -> str:
     """Get scheduled workouts in the next bounded number of days.
 
     Use this only when upcoming training changes the health or recovery interpretation.
     """
-    with runtime.context.session_factory() as session:
+    with runtime.session_factory() as session:
         workouts = AthleteDataService(
-            session, runtime.context.user_id, as_of=runtime.context.as_of
+            session, runtime.user_id, as_of=runtime.as_of
         ).get_upcoming_workouts(days)
     return _json(tuple(asdict(workout) for workout in workouts))
 
 
-@tool
 def create_running_workout_proposal(
-    runtime: ToolRuntime[CoachRuntimeContext],
+    runtime: CoachRuntimeContext,
     suggested_for: date,
-    available_minutes: Annotated[int, Field(ge=20, le=1440)],
+    available_minutes: int,
     template_id: RunningTemplateId = "easy_run",
+    *,
+    model_provider: str,
+    prompt_template_version: str,
 ) -> str:
     """Create one unaccepted running workout through PacePilot's deterministic planner.
 
@@ -179,7 +165,7 @@ def create_running_workout_proposal(
     if the athlete did not request a type, use easy_run. The result remains unscheduled and
     unaccepted. This tool cannot accept, schedule, upload, push, or synchronize a workout.
     """
-    context = runtime.context
+    context = runtime
     if (
         context.conversation_id is None
         or context.user_message_id is None
@@ -229,6 +215,8 @@ def create_running_workout_proposal(
                     user_message_id=user_message_id,
                     assistant_message_id=assistant_message_id,
                     assistant_run_id=assistant_run_id,
+                    model_provider=model_provider,
+                    prompt_template_version=prompt_template_version,
                 ),
             )
         except (WorkoutProposalError, TemplateExpansionError, WorkoutServiceError) as exc:
@@ -244,52 +232,3 @@ def create_running_workout_proposal(
                 "artifact": {"type": "workout_proposal"},
             }
         )
-
-
-COACH_TOOLS = (
-    get_current_recovery_state,
-    get_subjective_context,
-    get_health_trends,
-    get_training_summary,
-    get_recent_activities,
-    get_activity_details,
-    get_health_day,
-    get_upcoming_workouts,
-)
-
-
-def coach_tools(*, workout_proposals_enabled: bool) -> tuple[BaseTool, ...]:
-    if workout_proposals_enabled:
-        return (*COACH_TOOLS, create_running_workout_proposal)
-    return COACH_TOOLS
-
-
-TOOL_LABELS = {
-    "get_current_recovery_state": "Aktuelle Erholung prüfen",
-    "get_subjective_context": "Subjektives Aktivitätsfeedback laden",
-    "get_health_trends": "Gesundheitstrends vergleichen",
-    "get_training_summary": "Trainingsbelastung auswerten",
-    "get_recent_activities": "Letzte Trainingseinheiten ansehen",
-    "get_activity_details": "Trainingseinheit genauer analysieren",
-    "get_health_day": "Gesundheitsdaten des Tages laden",
-    "get_upcoming_workouts": "Geplante Einheiten prüfen",
-    "create_running_workout_proposal": "Workout-Vorschlag erstellen",
-}
-
-
-def describe_tool_call(tool_name: str, arguments: dict[str, object]) -> tuple[str, str | None]:
-    label = TOOL_LABELS.get(tool_name, "Trainingsdaten prüfen")
-    if "days" in arguments:
-        return label, f"Zeitraum: {arguments['days']} Tage"
-    if tool_name == "get_health_day" and "day" in arguments:
-        return label, f"Datum: {arguments['day']}"
-    if tool_name == "get_recent_activities" and "limit" in arguments:
-        return label, f"Letzte {arguments['limit']} Einheiten"
-    if tool_name == "create_running_workout_proposal":
-        day = arguments.get("suggested_for")
-        minutes = arguments.get("available_minutes")
-        template_id = arguments.get("template_id", "easy_run")
-        template = get_knowledge_registry().workouts.get(str(template_id))
-        template_label = template.name if template is not None else str(template_id)
-        return label, f"{template_label} · {day} · {minutes} Minuten"
-    return label, None

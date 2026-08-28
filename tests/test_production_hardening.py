@@ -16,8 +16,11 @@ from app.models import (
     WorkoutRevision,
     WorkoutValidationRun,
 )
-from app.services.coach.agent import COACH_PROMPT_TEMPLATE_VERSION
-from app.services.coach.tools import COACH_TOOL_CONTRACT_VERSION, coach_tools
+from app.services.coach.provider import (
+    COACH_PROMPT_TEMPLATE_VERSION,
+    COACH_TOOL_CONTRACT_VERSION,
+    coach_tools,
+)
 from app.services.garmin.workout_export import scheduled_workout_ids
 from app.services.observability import decision_trace, operational_metrics
 from app.services.planning.validator import WorkoutValidationError

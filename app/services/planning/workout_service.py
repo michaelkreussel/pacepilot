@@ -58,6 +58,8 @@ class ProposalOrigin:
     user_message_id: int
     assistant_message_id: int
     assistant_run_id: int
+    model_provider: str
+    prompt_template_version: str
 
 
 class WorkoutServiceError(RuntimeError):
@@ -187,13 +189,11 @@ class WorkoutService:
                     code="proposal.origin_invalid",
                 )
             run.workout_id = workout.id
-            from app.services.coach.agent import COACH_PROMPT_TEMPLATE_VERSION
-
             revision_metadata = replace(
                 metadata,
-                model_provider="openrouter",
+                model_provider=origin.model_provider,
                 model_id=run.model_id,
-                prompt_template_version=COACH_PROMPT_TEMPLATE_VERSION,
+                prompt_template_version=origin.prompt_template_version,
             )
         revision = self._create_revision(
             workout,
