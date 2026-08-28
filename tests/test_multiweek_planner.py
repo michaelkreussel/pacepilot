@@ -415,6 +415,45 @@ def test_persist_cycle_is_idempotent_and_keeps_revisions_immutable(session_facto
             )
 
 
+def test_persist_cycle_rolls_back_all_weeks_when_later_week_fails(session_factory) -> None:
+    candidate = compose_training_cycle(
+        _weekly_candidates(),
+        start_date=START,
+        target_date=START + timedelta(weeks=7, days=6),
+        event_type="half_marathon",
+    )
+    failed_week = candidate.weeks[1]
+    failed_session = replace(failed_week.weekly_plan.sessions[0], template_id="missing-template")
+    invalid_weekly_plan = replace(
+        failed_week.weekly_plan,
+        sessions=(failed_session, *failed_week.weekly_plan.sessions[1:]),
+        input_fingerprint="f" * 64,
+    )
+    invalid_candidate = replace(
+        candidate,
+        weeks=(
+            candidate.weeks[0],
+            replace(failed_week, weekly_plan=invalid_weekly_plan),
+            *candidate.weeks[2:],
+        ),
+        input_fingerprint="e" * 64,
+    )
+
+    with session_factory() as session:
+        user = _user(session)
+        session.commit()
+
+        with pytest.raises(ValueError):
+            persist_training_cycle(session, user, invalid_candidate)
+
+        assert session.scalar(select(func.count()).select_from(TrainingCycle)) == 0
+        assert session.scalar(select(func.count()).select_from(TrainingCycleRevision)) == 0
+        assert session.scalar(select(func.count()).select_from(TrainingCycleWeek)) == 0
+        assert session.scalar(select(func.count()).select_from(TrainingPlan)) == 0
+        assert session.scalar(select(func.count()).select_from(TrainingPlanRevision)) == 0
+        assert session.scalar(select(func.count()).select_from(Workout)) == 0
+
+
 def test_persist_cycle_replays_deferred_quality_templates(
     session_factory,
     monkeypatch: pytest.MonkeyPatch,

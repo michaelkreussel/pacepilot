@@ -20,7 +20,7 @@ from app.services.planning.planning_queries import get_active_goal, get_planning
 from app.services.planning.registry import get_knowledge_registry
 from app.services.planning.registry_models import ContinuousStructure
 from app.services.planning.weekly_plan_service import (
-    _persist_week_candidate,
+    persist_week_candidate_in_transaction,
 )
 from app.services.planning.weekly_planner import (
     WeeklyPlanCandidate,
@@ -875,11 +875,10 @@ def persist_training_cycle(
     session.flush()
     try:
         for week in candidate.weeks:
-            weekly_revision = _persist_week_candidate(
+            weekly_revision = persist_week_candidate_in_transaction(
                 session,
                 user,
                 week.weekly_plan,
-                commit=False,
             )
             session.add(
                 TrainingCycleWeek(

@@ -20,6 +20,7 @@ from app.services.planning.registry import get_knowledge_registry
 from app.services.planning.validator import WorkoutInput
 from app.services.planning.weekly_plan_service import (
     persist_week_candidate,
+    persist_week_candidate_in_transaction,
     plan_proposals_between,
 )
 from app.services.planning.weekly_planner import (
@@ -108,6 +109,29 @@ def test_persist_week_creates_plan_revision_and_normal_workout_proposals(
         assert session.scalar(select(func.count()).select_from(WorkoutGarminOperation)) == 0
 
 
+def test_persist_week_in_transaction_leaves_rollback_to_caller(session_factory) -> None:
+    candidate = _candidate()
+    with session_factory() as session:
+        user = _user(session)
+        session.commit()
+
+        persist_week_candidate_in_transaction(session, user, candidate)
+
+        assert session.scalar(select(func.count()).select_from(TrainingPlan)) == 1
+        assert session.scalar(select(func.count()).select_from(TrainingPlanRevision)) == 1
+        assert session.scalar(select(func.count()).select_from(TrainingPlanWorkout)) == len(
+            candidate.sessions
+        )
+        assert session.scalar(select(func.count()).select_from(Workout)) == len(candidate.sessions)
+
+        session.rollback()
+
+        assert session.scalar(select(func.count()).select_from(TrainingPlan)) == 0
+        assert session.scalar(select(func.count()).select_from(TrainingPlanRevision)) == 0
+        assert session.scalar(select(func.count()).select_from(TrainingPlanWorkout)) == 0
+        assert session.scalar(select(func.count()).select_from(Workout)) == 0
+
+
 def test_persist_week_accepts_candidate_with_bypassed_history_gates(session_factory) -> None:
     candidate = _candidate(enforce_history_gates=False, sparse_history=True)
     with session_factory() as session:
@@ -138,6 +162,19 @@ def test_persist_week_is_idempotent_and_calendar_is_user_scoped(session_factory)
             plan_proposals_between(session, user.id, MONDAY, MONDAY + timedelta(days=6))
         ) == len(candidate.sessions)
         assert plan_proposals_between(session, other.id, MONDAY, MONDAY + timedelta(days=6)) == []
+
+
+def test_idempotent_week_persistence_does_not_commit_unrelated_changes(session_factory) -> None:
+    candidate = _candidate()
+    with session_factory() as session:
+        user = _user(session)
+        persist_week_candidate(session, user, candidate)
+        session.add(User(display_name="Pending Runner"))
+
+        persist_week_candidate(session, user, candidate)
+        session.rollback()
+
+        assert session.scalar(select(func.count()).select_from(User)) == 1
 
 
 def test_new_revision_is_current_without_mutating_previous_revision(session_factory) -> None:

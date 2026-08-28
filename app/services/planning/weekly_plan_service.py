@@ -43,7 +43,13 @@ def persist_week_candidate(
     last_error: IntegrityError | None = None
     for _attempt in range(2):
         try:
-            return _persist_week_candidate(session, user, candidate, commit=commit)
+            return _persist_week_candidate(
+                session,
+                user,
+                candidate,
+                commit=commit,
+                rollback_on_error=True,
+            )
         except IntegrityError as exc:
             session.rollback()
             winner = session.scalar(
@@ -67,12 +73,27 @@ def persist_week_candidate(
     raise last_error
 
 
+def persist_week_candidate_in_transaction(
+    session: Session,
+    user: User,
+    candidate: WeeklyPlanCandidate,
+) -> TrainingPlanRevision:
+    return _persist_week_candidate(
+        session,
+        user,
+        candidate,
+        commit=False,
+        rollback_on_error=False,
+    )
+
+
 def _persist_week_candidate(
     session: Session,
     user: User,
     candidate: WeeklyPlanCandidate,
     *,
-    commit: bool = True,
+    commit: bool,
+    rollback_on_error: bool,
 ) -> TrainingPlanRevision:
     if not candidate.validation_report.get("valid"):
         raise WeeklyPlanPersistenceError(
@@ -238,7 +259,8 @@ def _persist_week_candidate(
         if commit:
             session.commit()
     except Exception:
-        session.rollback()
+        if rollback_on_error:
+            session.rollback()
         raise
     return plan_revision
 
