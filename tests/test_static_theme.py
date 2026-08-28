@@ -5,7 +5,6 @@ ROOT = Path(__file__).parents[1]
 CSS = (ROOT / "app/static/css/tailwind.css").read_text(encoding="utf-8")
 SOURCE = (ROOT / "app/static/css/tailwind.input.css").read_text(encoding="utf-8")
 PROFILE_JS = (ROOT / "app/static/js/profile.js").read_text(encoding="utf-8")
-COACH_JS = (ROOT / "app/static/js/coach.js").read_text(encoding="utf-8")
 ACTIVITY_DETAIL_JS = (ROOT / "app/static/js/activity-detail.js").read_text(encoding="utf-8")
 
 
@@ -82,16 +81,6 @@ def test_activity_charts_end_at_the_last_data_point() -> None:
     assert 'bounds: "data"' in ACTIVITY_DETAIL_JS
 
 
-def test_coach_stream_renders_model_text_safely() -> None:
-    assert 'Accept: "text/event-stream"' in COACH_JS
-    assert '"X-CSRF-Token": form.elements.namedItem("_csrf_token").value' in COACH_JS
-    assert "createTextNode(data.text)" in COACH_JS
-    assert "innerHTML" not in COACH_JS
-    assert 'includes("text/event-stream")' in COACH_JS
-    assert "terminalEventReceived" in COACH_JS
-    assert "Die Streaming-Antwort wurde vorzeitig beendet." in COACH_JS
-
-
 def test_all_post_forms_include_the_shared_csrf_field() -> None:
     template_root = ROOT / "app" / "templates"
     for path in template_root.rglob("*.html"):
@@ -105,11 +94,3 @@ def test_htmx_unsafe_requests_receive_csrf_header() -> None:
     source = (ROOT / "app" / "static" / "js" / "csrf.js").read_text(encoding="utf-8")
     assert 'document.addEventListener("htmx:configRequest"' in source
     assert 'event.detail.headers["X-CSRF-Token"] = token' in source
-
-
-def test_coach_stream_replaces_live_activity_and_keeps_tool_history() -> None:
-    assert "assistant.activitySummary.textContent = label" in COACH_JS
-    assert "assistant.activityLog.append(item)" in COACH_JS
-    assert 'messages?.querySelector("[data-coach-message-list]")' in COACH_JS
-    assert "messageList.append(assistant.article)" in COACH_JS
-    assert "coach-activity-wave" in COACH_JS

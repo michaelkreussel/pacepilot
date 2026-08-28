@@ -33,10 +33,11 @@ from app.models import (
     WorkoutRevision,
 )
 from app.models.user import utcnow
+from app.routes import coach as coach_route_module
 from app.services.analytics.health_trends import HEALTH_METRICS
 from app.services.coach import dependencies as coach_dependencies_module
 from app.services.coach import provider as coach_provider_module
-from app.services.coach.agent import CoachEvent, CoachProviderError
+from app.services.coach.agent import CoachEvent
 from app.services.coach.conversation import CoachHistoryMessage, CoachRuntimeContext
 from app.services.coach.dependencies import get_coach_agent_factory
 from app.services.coach.presentation import workout_artifact_presentation
@@ -68,6 +69,16 @@ class FakeCoachAgent:
         yield CoachEvent("answer_text", text="Du wirkst heute etwas weniger erholt. ")
         yield CoachEvent("answer_text", text="Dein Ruhepuls liegt leicht über deinem Basiswert.")
         yield CoachEvent("completed")
+
+
+def _sse_payload(stream: str, event_name: str) -> dict[str, object]:
+    for block in stream.split("\n\n"):
+        lines = block.splitlines()
+        if f"event: {event_name}" not in lines:
+            continue
+        data = "\n".join(line.removeprefix("data: ") for line in lines if line.startswith("data: "))
+        return cast(dict[str, object], json.loads(data))
+    raise AssertionError(f"Missing SSE event: {event_name}")
 
 
 @pytest.mark.parametrize(
@@ -352,6 +363,11 @@ def test_coach_streams_and_persists_conversation(
     assert "event: answer.completed" in response.text
     assert "Du wirkst heute etwas weniger erholt" in response.text
     assert fake.calls[0] == [CoachHistoryMessage("user", "Wie erholt bin ich heute?")]
+    started = _sse_payload(response.text, "run.started")
+    completed = _sse_payload(response.text, "answer.completed")
+    assert started["conversation_title"] == "Wie erholt bin ich heute?"
+    assert 'data-message-state="streaming"' in cast(str, started["assistant_html"])
+    assert 'data-message-state="completed"' in cast(str, completed["html"])
 
     with session_factory() as session:
         conversation = session.get(CoachConversation, conversation_id)
@@ -377,6 +393,8 @@ def test_coach_streams_and_persists_conversation(
     assert "data-coach-message-list" in page
     assert "Nur lesend" in page
     assert "data-coach-activity" in page
+    assert cast(str, started["user_html"]) in page
+    assert cast(str, completed["html"]) in page
 
 
 def test_coach_tool_creates_one_durable_server_rendered_proposal(
@@ -726,11 +744,13 @@ def test_proposal_survives_provider_failure_after_commit(
 
     app.dependency_overrides[get_coach_agent_factory] = lambda: lambda: FailingAfterProposalAgent()
     conversation_id = _new_chat(client)
-    with pytest.raises(CoachProviderError, match="Coach provider execution failed"):
-        client.post(
-            f"/coach/{conversation_id}/messages",
-            data={"message": "Plane einen Lauf."},
-        )
+    response = client.post(
+        f"/coach/{conversation_id}/messages",
+        data={"message": "Plane einen Lauf."},
+    )
+    assert response.status_code == 200
+    failed = _sse_payload(response.text, "error")
+    assert 'data-message-state="failed"' in cast(str, failed["html"])
 
     with session_factory() as session:
         messages = list(
@@ -756,6 +776,7 @@ def test_proposal_survives_provider_failure_after_commit(
     assert "Diese Antwort wurde nicht abgeschlossen" in reloaded.text
     assert "Unbestätigt" in reloaded.text
     assert f'href="/workouts/{workout_id}"' in reloaded.text
+    assert cast(str, failed["html"]) in reloaded.text
 
 
 def test_follow_up_includes_bounded_conversation_history(client: TestClient) -> None:
@@ -846,11 +867,12 @@ def test_provider_construction_failure_marks_claimed_answer_failed(
     monkeypatch.setattr(coach_provider_module, "ChatOpenRouter", fail_construction)
     conversation_id = _new_chat(client)
 
-    with pytest.raises(CoachProviderError, match="Coach provider execution failed"):
-        client.post(
-            f"/coach/{conversation_id}/messages",
-            data={"message": "Wie erholt bin ich?"},
-        )
+    response = client.post(
+        f"/coach/{conversation_id}/messages",
+        data={"message": "Wie erholt bin ich?"},
+    )
+    assert response.status_code == 200
+    assert "event: error" in response.text
 
     with session_factory() as session:
         messages = list(
@@ -882,11 +904,12 @@ def test_completed_local_event_without_answer_marks_message_failed(
     app.dependency_overrides[get_coach_agent_factory] = lambda: lambda: EmptyAnswerAgent()
     conversation_id = _new_chat(client)
 
-    with pytest.raises(CoachProviderError, match="completed without answer text"):
-        client.post(
-            f"/coach/{conversation_id}/messages",
-            data={"message": "Wie erholt bin ich?"},
-        )
+    response = client.post(
+        f"/coach/{conversation_id}/messages",
+        data={"message": "Wie erholt bin ich?"},
+    )
+    assert response.status_code == 200
+    assert "event: error" in response.text
 
     with session_factory() as session:
         assistant = session.scalar(
@@ -897,6 +920,43 @@ def test_completed_local_event_without_answer_marks_message_failed(
         )
         assert assistant is not None
         assert (assistant.status, assistant.content) == ("failed", "")
+
+
+def test_working_presentation_failure_marks_claimed_answer_failed(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = coach_route_module._message_html
+    attempts = 0
+
+    def fail_first_render(*args: Any, **kwargs: Any) -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("message presentation failed")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(coach_route_module, "_message_html", fail_first_render)
+    app.dependency_overrides[get_coach_agent_factory] = lambda: lambda: FakeCoachAgent()
+    conversation_id = _new_chat(client)
+
+    response = client.post(
+        f"/coach/{conversation_id}/messages",
+        data={"message": "Wie erholt bin ich?"},
+    )
+
+    assert response.status_code == 200
+    assert "event: error" in response.text
+    with session_factory() as session:
+        assistant = session.scalar(
+            select(CoachMessage).where(
+                CoachMessage.conversation_id == conversation_id,
+                CoachMessage.role == "assistant",
+            )
+        )
+        assert assistant is not None
+        assert assistant.status == "failed"
 
 
 def test_conversations_are_user_scoped(

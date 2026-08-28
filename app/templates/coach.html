@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}KI-Coach · PacePilot{% endblock %}
-{% block head %}<script src="{{ url_for('static', path='/js/coach.js') }}?v=20260824-2" defer></script>{% endblock %}
+{% block head %}<script src="{{ url_for('static', path='/js/coach.js') }}?v=20260828-1" type="module"></script>{% endblock %}
 {% block main_class %}flex h-dvh min-h-0 flex-col overflow-hidden{% endblock %}
 {% block content_class %}flex min-h-0 flex-1 flex-col overflow-hidden{% endblock %}
 {% block content %}
@@ -94,42 +94,8 @@
       <div class="min-h-0 flex-1 overflow-y-auto px-3 py-4 sm:px-5 sm:py-5" data-coach-messages aria-live="polite">
         <div class="mx-auto flex min-h-full w-full max-w-3xl flex-col gap-5" data-coach-message-list>
         {% for item in messages %}
-        {% if item.role == 'user' %}
-        <article class="flex justify-end"><div class="max-w-[88%] rounded-xl rounded-br-sm border border-primary/20 bg-primary-subtle px-3 py-2 text-sm leading-6 text-primary-emphasis sm:max-w-[78%]">{{ item.content }}</div></article>
-        {% else %}
-        {% set duration_seconds = ((item.completed_at - item.created_at).total_seconds()|round|int) if item.completed_at else none %}
-        {% set step_count = item.tool_calls|length + 2 %}
-        <article data-assistant-message="{{ item.id }}">
-          <div class="flex items-start gap-2.5">
-            <div class="grid size-7 shrink-0 place-items-center rounded-lg bg-secondary font-display text-[0.6875rem] font-bold text-secondary-foreground">P</div>
-            <div class="min-w-0 flex-1">
-              <details class="group mb-2 text-xs text-muted-foreground" data-coach-activity>
-                <summary class="flex w-fit cursor-pointer list-none items-center gap-1.5 rounded-md py-0.5 font-medium transition hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring">
-                  <span class="relative flex size-3.5 items-center justify-center" data-activity-icon><span class="size-1.5 rounded-full {{ 'coach-activity-pulse bg-primary' if item.status == 'streaming' else 'bg-muted-foreground' }}"></span></span>
-                  <span class="{{ 'coach-activity-wave' if item.status == 'streaming' else '' }}" data-activity-summary>{% if item.status == 'streaming' %}Deine Frage wird analysiert{% elif item.status in ['failed', 'interrupted'] %}Antwort nicht abgeschlossen{% elif duration_seconds is not none %}{{ step_count }} Schritte · {% if duration_seconds >= 60 %}{{ duration_seconds // 60 }} Min. {{ duration_seconds % 60 }} Sek.{% else %}{{ duration_seconds }} Sek.{% endif %} nachgedacht{% else %}{{ step_count }} Schritte ausgeführt{% endif %}</span>
-                  <svg class="size-3 fill-none stroke-current stroke-2 transition-transform group-open:rotate-180" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                </summary>
-                <ol class="mt-1.5 space-y-1.5 border-l border-border pl-3" data-activity-log>
-                  <li class="relative pl-3" data-activity-step><span class="absolute -left-[0.9375rem] top-1 size-1.5 rounded-full bg-muted-foreground"></span><span class="font-medium text-foreground">Frage analysiert</span></li>
-                  {% for call in item.tool_calls %}
-                  {% set call_duration = ((call.completed_at - call.started_at).total_seconds()|round|int) if call.completed_at else none %}
-                  <li class="relative pl-3" data-tool-call="{{ call.call_id }}" data-tool-state="{{ call.status }}">
-                    <span class="absolute -left-[0.9375rem] top-1 size-1.5 rounded-full {{ 'bg-danger' if call.status == 'failed' else 'bg-primary' if call.status == 'running' else 'bg-muted-foreground' }}"></span>
-                    <div class="flex flex-wrap items-baseline gap-x-2 gap-y-0.5"><span class="font-medium text-foreground" data-tool-label>{{ call.label }}</span><span class="text-[0.6875rem]" data-tool-status>{% if call.status == 'running' %}Wird ausgeführt{% elif call.status == 'failed' %}Fehlgeschlagen{% else %}Abgeschlossen{% endif %}{% if call_duration is not none %} · {{ call_duration }} Sek.{% endif %}</span></div>
-                    {% if call.input_summary %}<p class="mt-0.5 leading-5" data-tool-summary>{{ call.input_summary }}</p>{% endif %}
-                    {% if call.error_message %}<p class="mt-0.5 text-danger-emphasis">{{ call.error_message }}</p>{% endif %}
-                  </li>
-                  {% endfor %}
-                  {% if item.status == 'completed' %}<li class="relative pl-3" data-activity-final><span class="absolute -left-[0.9375rem] top-1 size-1.5 rounded-full bg-muted-foreground"></span><span class="font-medium text-foreground">Antwort formuliert</span></li>{% endif %}
-                </ol>
-              </details>
-               <div class="whitespace-pre-wrap text-sm leading-6 text-foreground" data-answer-text>{{ item.content }}</div>
-               <div data-proposal-artifacts>{% if proposal_cards.get(item.id) %}{% with card=proposal_cards[item.id] %}{% include "workouts/_coach_proposal_card.html" %}{% endwith %}{% endif %}</div>
-              {% if item.status in ['failed', 'interrupted'] %}<p class="mt-2 text-xs text-danger-emphasis" role="status">Diese Antwort wurde nicht abgeschlossen.</p>{% endif %}
-            </div>
-          </div>
-        </article>
-        {% endif %}
+        {% set card = proposal_cards.get(item.id) %}
+        {% include "coach/_message.html" %}
         {% else %}
         <div class="grid flex-1 place-items-center py-8 text-center" data-coach-empty>
           <div>

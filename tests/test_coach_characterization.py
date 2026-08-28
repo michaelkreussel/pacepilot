@@ -270,11 +270,12 @@ def test_partial_stream_failure_is_not_persisted_or_reused_as_history(
     app.dependency_overrides[get_coach_agent_factory] = lambda: lambda: failing
     conversation_id = _new_chat(client)
 
-    with pytest.raises(RuntimeError, match="Coach provider execution failed"):
-        client.post(
-            f"/coach/{conversation_id}/messages",
-            data={"message": "first-question"},
-        )
+    failed = client.post(
+        f"/coach/{conversation_id}/messages",
+        data={"message": "first-question"},
+    )
+    assert failed.status_code == 200
+    assert "event: error" in failed.text
 
     assert failing.persisted_user_message == ("user", "completed", "first-question")
     with session_factory() as session:

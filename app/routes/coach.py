@@ -66,18 +66,37 @@ router = APIRouter(prefix="/coach", dependencies=[Depends(require_data_access)])
 logger = logging.getLogger(__name__)
 
 
+def _proposal_card(
+    session: Session, user_id: int, conversation_id: int, message: CoachMessage
+) -> WorkoutArtifactPresentation | None:
+    run = message.generated_run
+    if run is None:
+        return None
+    return workout_artifact_presentation(session, user_id, conversation_id, run.id)
+
+
 def _proposal_cards(
     session: Session, user_id: int, conversation_id: int, messages: Sequence[CoachMessage]
 ) -> dict[int, WorkoutArtifactPresentation]:
     cards: dict[int, WorkoutArtifactPresentation] = {}
     for message in messages:
-        run = message.generated_run
-        if run is None:
-            continue
-        card = workout_artifact_presentation(session, user_id, conversation_id, run.id)
+        card = _proposal_card(session, user_id, conversation_id, message)
         if card is not None:
             cards[message.id] = card
     return cards
+
+
+def _message_html(
+    request: Request,
+    item: CoachMessage,
+    card: WorkoutArtifactPresentation | None,
+    *,
+    message_state: str | None = None,
+) -> str:
+    values = context(request, item=item, card=card)
+    if message_state is not None:
+        values["message_state"] = message_state
+    return templates.get_template("coach/_message.html").render(values)
 
 
 def _has_active_response(session: Session, messages: Sequence[CoachMessage]) -> bool:
@@ -499,10 +518,14 @@ async def _stream_answer(
     history: Sequence[CoachHistoryMessage],
     runtime: CoachRuntimeContext,
     assistant_message_id: int,
+    conversation_title: str,
 ) -> AsyncIterator[str]:
     started_at = monotonic()
     answer: list[str] = []
     proposal_emitted = False
+    if runtime.conversation_id is None or runtime.user_message_id is None:
+        raise RuntimeError("Coach stream context is incomplete")
+    conversation_id = runtime.conversation_id
     logger.info(
         "AI coach stream started request_id=%s user_id=%s assistant_message_id=%s "
         "history_messages=%s",
@@ -511,11 +534,24 @@ async def _stream_answer(
         assistant_message_id,
         len(history),
     )
-    yield _event(
-        "run.started",
-        {"message_id": assistant_message_id, "run_id": runtime.assistant_run_id},
-    )
     try:
+        with runtime.session_factory() as session:
+            user_message = session.get(CoachMessage, runtime.user_message_id)
+            assistant_message = session.get(CoachMessage, assistant_message_id)
+            if user_message is None or assistant_message is None:
+                raise RuntimeError("Coach stream messages are missing")
+            card = _proposal_card(session, runtime.user_id, conversation_id, assistant_message)
+            started_payload: dict[str, object] = {
+                "message_id": assistant_message_id,
+                "run_id": runtime.assistant_run_id,
+                "conversation_title": conversation_title,
+                "user_html": _message_html(request, user_message, None),
+                "assistant_html": _message_html(request, assistant_message, card),
+                "failure_html": _message_html(
+                    request, assistant_message, card, message_state="failed"
+                ),
+            }
+        yield _event("run.started", started_payload)
         agent = agent_factory()
         async for event in agent.stream(history, runtime):
             if await request.is_disconnected():
@@ -534,6 +570,13 @@ async def _stream_answer(
                 with runtime.session_factory() as session:
                     complete_message(session, assistant_message_id, content)
                     session.commit()
+                    assistant_message = session.get(CoachMessage, assistant_message_id)
+                    if assistant_message is None:
+                        raise RuntimeError("Completed Coach message is missing")
+                    card = _proposal_card(
+                        session, runtime.user_id, conversation_id, assistant_message
+                    )
+                    completed_html = _message_html(request, assistant_message, card)
                 logger.info(
                     "AI coach stream completed request_id=%s user_id=%s assistant_message_id=%s "
                     "duration_ms=%s answer_characters=%s",
@@ -543,7 +586,10 @@ async def _stream_answer(
                     round((monotonic() - started_at) * 1000),
                     len(content),
                 )
-                yield _event("answer.completed", {"message_id": assistant_message_id})
+                yield _event(
+                    "answer.completed",
+                    {"message_id": assistant_message_id, "html": completed_html},
+                )
                 return
             elif event.type == "failed":
                 raise CoachProviderError("Coach provider execution failed")
@@ -565,6 +611,11 @@ async def _stream_answer(
         with runtime.session_factory() as session:
             fail_message(session, assistant_message_id)
             session.commit()
+            assistant_message = session.get(CoachMessage, assistant_message_id)
+            if assistant_message is None:
+                raise RuntimeError("Failed Coach message is missing") from exc
+            card = _proposal_card(session, runtime.user_id, conversation_id, assistant_message)
+            failed_html = _message_html(request, assistant_message, card)
         logger.exception(
             "AI coach stream failed request_id=%s user_id=%s assistant_message_id=%s "
             "error_type=%s duration_ms=%s",
@@ -574,7 +625,7 @@ async def _stream_answer(
             type(exc).__name__,
             round((monotonic() - started_at) * 1000),
         )
-        raise
+        yield _event("error", {"message_id": assistant_message_id, "html": failed_html})
 
 
 @router.post("/{conversation_id}/messages")
@@ -621,6 +672,7 @@ async def ask_coach(
             history=execution.history,
             runtime=execution.runtime,
             assistant_message_id=execution.assistant_message_id,
+            conversation_title=conversation.title,
         ),
         media_type="text/event-stream",
         headers={
