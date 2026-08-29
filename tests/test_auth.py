@@ -37,6 +37,31 @@ def test_private_pages_redirect_to_login_and_healthcheck_stays_public(
     assert unauthenticated_client.get("/api/health").json() == {"status": "ok"}
 
 
+def test_conversational_planning_mutation_requires_authentication(
+    unauthenticated_client: TestClient,
+) -> None:
+    login = unauthenticated_client.get("/login")
+    match = re.search(r'name="_csrf_token" value="([^"]+)"', login.text)
+    assert match is not None
+
+    response = unauthenticated_client.post(
+        "/coach/1/messages",
+        data={"message": "Setze meine Verfügbarkeit."},
+        headers={"X-CSRF-Token": match.group(1)},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("/login")
+    confirmation = unauthenticated_client.post(
+        "/coach/1/messages/1/planning-goal-confirmation",
+        headers={"X-CSRF-Token": match.group(1)},
+        follow_redirects=False,
+    )
+    assert confirmation.status_code == 303
+    assert confirmation.headers["location"].startswith("/login")
+
+
 def test_google_callback_creates_session_and_reuses_identity(
     unauthenticated_client: TestClient,
     session_factory: sessionmaker[Session],

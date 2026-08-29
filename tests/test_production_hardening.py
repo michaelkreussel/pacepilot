@@ -93,7 +93,7 @@ def test_coach_tool_and_prompt_contracts_are_versioned_and_stable() -> None:
 
     assert fixture["contract_version"] == COACH_TOOL_CONTRACT_VERSION
     assert actual == fixture["tools"]
-    assert COACH_PROMPT_TEMPLATE_VERSION == "coach-prompt-v2"
+    assert COACH_PROMPT_TEMPLATE_VERSION == "coach-prompt-v3"
     assert {"user_id", "workout_id", "definition", "idempotency_key"}.isdisjoint(
         actual["create_running_workout_proposal"]
     )
@@ -111,7 +111,19 @@ def test_prompt_injection_corpus_cannot_expand_coach_mutation_authority() -> Non
         tool_names & {"accept_workout", "schedule_workout", "push_workout", "delete_workout"}
         == set()
     )
-    assert tool_names - {"create_running_workout_proposal"} == {
+    allowed_mutations = {
+        "create_running_workout_proposal",
+        "create_planning_goal",
+        "update_planning_goal",
+        "deactivate_planning_goal",
+        "update_planning_profile",
+        "set_planning_availability",
+        "deactivate_planning_availability",
+        "create_planning_anchor",
+        "update_planning_anchor",
+        "deactivate_planning_anchor",
+    }
+    assert tool_names - allowed_mutations == {
         "get_current_recovery_state",
         "get_subjective_context",
         "get_health_trends",
@@ -120,6 +132,7 @@ def test_prompt_injection_corpus_cannot_expand_coach_mutation_authority() -> Non
         "get_activity_details",
         "get_health_day",
         "get_upcoming_workouts",
+        "get_planning_inputs",
     }
 
 

@@ -21,13 +21,17 @@ from app.services.planning.planning_queries import (
     PlanningProfileFact,
 )
 
+GoalEventType = Literal["general_fitness", "5k", "10k", "half_marathon", "marathon"]
+ExperienceLevel = Literal["novice", "intermediate", "advanced"]
+AnchorKind = Literal["race", "time_trial", "manual"]
+
 
 class PlanningCommandInput(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
 
 class GoalCreateInput(PlanningCommandInput):
-    event_type: str
+    event_type: GoalEventType
     event_name: str | None = Field(default=None, max_length=200)
     target_date: date | None = None
 
@@ -40,7 +44,7 @@ class GoalCreateInput(PlanningCommandInput):
 
 
 class GoalUpdateInput(PlanningCommandInput):
-    event_type: str | None = None
+    event_type: GoalEventType | None = None
     event_name: str | None = Field(default=None, max_length=200)
     target_date: date | None = None
 
@@ -61,7 +65,7 @@ class GoalUpdateInput(PlanningCommandInput):
 
 
 class PlanningProfileUpdateInput(PlanningCommandInput):
-    experience_level: str | None = None
+    experience_level: ExperienceLevel | None = None
     preferred_long_run_weekday: int | None = Field(default=None, ge=0, le=6)
     self_declared_reentry: bool | None = None
     constraint_note: str | None = Field(default=None, max_length=2000)
@@ -97,7 +101,7 @@ class AvailabilityInput(PlanningCommandInput):
 
 
 class PerformanceAnchorCreateInput(PlanningCommandInput):
-    kind: str
+    kind: AnchorKind
     distance_m: float = Field(gt=0)
     duration_s: float = Field(gt=0)
     achieved_on: date
@@ -113,7 +117,7 @@ class PerformanceAnchorCreateInput(PlanningCommandInput):
 
 
 class PerformanceAnchorUpdateInput(PlanningCommandInput):
-    kind: str | None = None
+    kind: AnchorKind | None = None
     distance_m: float | None = Field(default=None, gt=0)
     duration_s: float | None = Field(default=None, gt=0)
     achieved_on: date | None = None
@@ -204,12 +208,20 @@ def _performance_anchor_fact(anchor: PerformanceAnchor) -> PerformanceAnchorFact
 
 
 class PlanningInputCommands:
-    """User-scoped mutations; each successful command owns commit and rollback."""
+    """User-scoped mutations with explicit command or caller transaction ownership."""
 
-    def __init__(self, session: Session, user: User, *, as_of: date | None = None) -> None:
+    def __init__(
+        self,
+        session: Session,
+        user: User,
+        *,
+        as_of: date | None = None,
+        commit: bool = True,
+    ) -> None:
         self.session = session
         self.user_id = user.id
         self.as_of = as_of or date.today()
+        self.commit = commit
 
     def create_goal(self, data: GoalCreateInput) -> GoalFact:
         self._validate_goal_target(data.event_type, data.target_date, reject_past=True)
@@ -352,6 +364,34 @@ class PlanningInputCommands:
             self._commit()
         return _performance_anchor_fact(anchor)
 
+    def referenced_goal_change_confirmation(
+        self,
+        goal_id: int,
+        *,
+        operation: Literal["update", "deactivate"],
+    ) -> ReferencedGoalChangeConfirmation | None:
+        self._goal(goal_id)
+        references = tuple(
+            AcceptedCycleReference(cycle_id=cycle_id, accepted_revision_id=revision_id)
+            for cycle_id, revision_id in self.session.execute(
+                select(TrainingCycle.id, TrainingCycle.accepted_revision_id)
+                .where(
+                    TrainingCycle.user_id == self.user_id,
+                    TrainingCycle.goal_id == goal_id,
+                    TrainingCycle.accepted_revision_id.is_not(None),
+                )
+                .order_by(TrainingCycle.id)
+            ).all()
+            if revision_id is not None
+        )
+        if not references:
+            return None
+        return ReferencedGoalChangeConfirmation(
+            goal_id=goal_id,
+            operation=operation,
+            accepted_cycles=references,
+        )
+
     def _goal(self, goal_id: int) -> AthleteGoal:
         goal = self.session.scalar(
             select(AthleteGoal).where(
@@ -408,18 +448,10 @@ class PlanningInputCommands:
         *,
         operation: Literal["update", "deactivate"],
     ) -> None:
-        references = tuple(
-            self.session.execute(
-                select(TrainingCycle.id, TrainingCycle.accepted_revision_id)
-                .where(
-                    TrainingCycle.user_id == self.user_id,
-                    TrainingCycle.goal_id == goal_id,
-                    TrainingCycle.accepted_revision_id.is_not(None),
-                )
-                .order_by(TrainingCycle.id)
-            ).all()
+        expected_confirmation = self.referenced_goal_change_confirmation(
+            goal_id, operation=operation
         )
-        if not references:
+        if expected_confirmation is None:
             return
         if confirmation is None:
             raise PlanningInputCommandError(
@@ -432,7 +464,10 @@ class PlanningInputCommands:
                 for reference in confirmation.accepted_cycles
             )
         )
-        expected = tuple((cycle_id, revision_id) for cycle_id, revision_id in references)
+        expected = tuple(
+            (reference.cycle_id, reference.accepted_revision_id)
+            for reference in expected_confirmation.accepted_cycles
+        )
         if (
             confirmation.goal_id != goal_id
             or confirmation.operation != operation
@@ -445,7 +480,10 @@ class PlanningInputCommands:
 
     def _commit(self) -> None:
         try:
-            self.session.commit()
+            if self.commit:
+                self.session.commit()
+            else:
+                self.session.flush()
         except Exception:
             self.session.rollback()
             raise

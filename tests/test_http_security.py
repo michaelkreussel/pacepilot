@@ -5,7 +5,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.config import get_settings
+from app.main import app
 from app.rate_limits import SlidingWindowLimiter, limiter
+from app.services.coach.dependencies import get_coach_agent_factory
 
 
 def _workout_data(csrf_token: str) -> dict[str, str]:
@@ -170,5 +172,50 @@ def test_coach_rate_limit_runs_after_csrf_and_returns_retry_after(
 
     assert invalid.status_code == 403
     assert accepted.status_code == 303
+    assert limited.status_code == 429
+    assert int(limited.headers["retry-after"]) > 0
+
+
+def test_conversational_planning_mutation_uses_coach_rate_limit(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created = client.post("/coach/conversations", follow_redirects=False)
+    conversation_id = int(created.headers["location"].rsplit("/", 1)[1])
+    monkeypatch.setattr(get_settings(), "coach_rate_limit_per_minute", 1)
+    app.dependency_overrides[get_coach_agent_factory] = lambda: None
+    limiter.clear()
+
+    accepted = client.post(
+        f"/coach/{conversation_id}/messages",
+        data={"message": "Setze meine Verfügbarkeit."},
+    )
+    limited = client.post(
+        f"/coach/{conversation_id}/messages",
+        data={"message": "Setze meine Verfügbarkeit erneut."},
+    )
+
+    assert accepted.status_code == 503
+    assert limited.status_code == 429
+    assert int(limited.headers["retry-after"]) > 0
+
+
+def test_planning_confirmation_uses_coach_rate_limit(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_rate_limit_per_minute", 1)
+    limiter.clear()
+
+    missing = client.post(
+        "/coach/999/messages/999/planning-goal-confirmation",
+        follow_redirects=False,
+    )
+    limited = client.post(
+        "/coach/999/messages/999/planning-goal-confirmation",
+        follow_redirects=False,
+    )
+
+    assert missing.status_code == 404
     assert limited.status_code == 429
     assert int(limited.headers["retry-after"]) > 0

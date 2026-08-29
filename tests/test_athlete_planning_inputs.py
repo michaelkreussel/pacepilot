@@ -2,6 +2,7 @@ from datetime import date, datetime, timedelta
 
 import pytest
 from pydantic import ValidationError
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from app.models import (
@@ -313,6 +314,23 @@ def test_planning_commands_persist_clear_changes_and_return_facts(session_factor
         assert persisted.goals == ()
         assert persisted.availability == ()
         assert persisted.performance_anchors[0].reliable is False
+
+
+def test_planning_commands_can_defer_commit_to_a_conversation_transaction(
+    session_factory,
+) -> None:
+    with session_factory() as session:
+        user = User(display_name="Conversation Transaction")
+        session.add(user)
+        session.commit()
+
+        PlanningInputCommands(session, user, commit=False).set_availability(
+            AvailabilityInput(weekday=1, available=True, available_minutes=50)
+        )
+        assert session.scalar(select(AthleteAvailability)) is not None
+        session.rollback()
+
+        assert session.scalar(select(AthleteAvailability)) is None
 
 
 def test_planning_commands_reject_invalid_dates_and_unavailable_fields(session_factory) -> None:

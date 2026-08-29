@@ -195,7 +195,7 @@ def test_feedback_owner_migration_upgrades_applied_revision_22(tmp_path: Path) -
         ).one() == (1, 1)
         assert connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
-        ).scalar_one() == ("20260828_35")
+        ).scalar_one() == ("20260829_36")
 
 
 def test_application_migration_uses_absolute_project_paths(tmp_path: Path, monkeypatch) -> None:
@@ -255,7 +255,7 @@ def test_workout_revision_migration_resumes_after_added_columns(tmp_path: Path) 
             "SELECT version_num FROM alembic_version"
         ).scalar_one()
         integrity = connection.exec_driver_sql("PRAGMA integrity_check").scalar_one()
-    assert revision == "20260828_35"
+    assert revision == "20260829_36"
     assert integrity == "ok"
     assert "workout_revisions" in inspector.get_table_names()
 
@@ -284,7 +284,7 @@ def test_reverted_athlete_profile_revision_upgrades_to_head(tmp_path: Path) -> N
         revision = connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
         ).scalar_one()
-    assert revision == "20260828_35"
+    assert revision == "20260829_36"
 
 
 def test_principal_fingerprint_migration_upgrades_applied_phase_4_schema(
@@ -732,7 +732,7 @@ def test_athlete_planning_inputs_fresh_and_filled_upgrade(tmp_path: Path) -> Non
         legacy = connection.exec_driver_sql("SELECT name FROM workouts WHERE id = 1").scalar()
     engine.dispose()
 
-    assert version == "20260828_35"
+    assert version == "20260829_36"
     assert {
         "athlete_planning_profiles",
         "athlete_goals",
@@ -1023,7 +1023,7 @@ def test_coach_message_lineage_migration_preserves_runs_and_workouts(tmp_path: P
         )
         assert (
             connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one()
-            == "20260828_35"
+            == "20260829_36"
         )
         assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
     source_key = next(
@@ -1302,7 +1302,7 @@ def test_plan_message_lineage_migration_preserves_artifacts_and_enforces_ownersh
         assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
         assert connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
-        ).scalar_one() == ("20260828_35")
+        ).scalar_one() == ("20260829_36")
 
     for table in ("training_plan_revisions", "training_cycle_revisions"):
         source_key = next(
@@ -1554,8 +1554,11 @@ def test_single_active_coach_response_migration_repairs_duplicates_and_enforces_
         ).all() == [(1, 3), (2, 6)]
         assert (
             connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one()
-            == "20260828_35"
+            == "20260829_36"
         )
+        assert connection.exec_driver_sql(
+            "SELECT DISTINCT artifacts_json FROM coach_messages"
+        ).all() == [("[]",)]
         index_sql = connection.exec_driver_sql(
             "SELECT sql FROM sqlite_master WHERE type = 'index' "
             "AND name = 'uq_coach_messages_active_assistant_per_conversation'"

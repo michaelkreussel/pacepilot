@@ -10,7 +10,9 @@ class CoachEvent:
     type: Literal["answer_text", "artifact_available", "completed", "failed"]
     text: str | None = None
     artifact_type: str | None = None
-    failure_category: Literal["provider_error", "missing_final_answer"] | None = None
+    failure_category: (
+        Literal["provider_error", "missing_final_answer", "tool_call_format"] | None
+    ) = None
 
 
 class CoachProviderError(RuntimeError):

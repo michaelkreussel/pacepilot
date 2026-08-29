@@ -5,7 +5,7 @@ from datetime import date
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import CoachMessage, Workout, WorkoutRevision
+from app.models import CoachConversation, CoachMessage, Workout, WorkoutRevision
 from app.repositories.coach import find_assistant_message
 from app.services.planning.workout_views import (
     WorkoutLifecycleProjection,
@@ -73,6 +73,206 @@ class WorkoutArtifactPresentation:
     @property
     def status_description(self) -> str:
         return self.lifecycle.description
+
+
+@dataclass(frozen=True)
+class PlanningArtifactPresentation:
+    resource: str
+    title: str
+    details: tuple[tuple[str, str], ...]
+    confirmation_endpoint: str | None = None
+    confirmation_label: str | None = None
+
+
+WEEKDAY_LABELS = (
+    "Montag",
+    "Dienstag",
+    "Mittwoch",
+    "Donnerstag",
+    "Freitag",
+    "Samstag",
+    "Sonntag",
+)
+EXPERIENCE_LABELS = {
+    "novice": "Einsteiger",
+    "intermediate": "Fortgeschritten",
+    "advanced": "Erfahren",
+}
+GOAL_LABELS = {
+    "general_fitness": "Allgemeine Fitness",
+    "5k": "5 km",
+    "10k": "10 km",
+    "half_marathon": "Halbmarathon",
+    "marathon": "Marathon",
+}
+ANCHOR_LABELS = {
+    "race": "Wettkampf",
+    "time_trial": "Zeitlauf",
+    "manual": "Manuell",
+}
+
+
+def _planning_artifact_presentation(
+    artifact: object,
+    *,
+    conversation_id: int,
+    message_id: int,
+) -> PlanningArtifactPresentation | None:
+    if not isinstance(artifact, dict) or artifact.get("type") != "planning_input":
+        return None
+    result = artifact.get("result")
+    resource = artifact.get("resource")
+    if not isinstance(resource, str):
+        return None
+    if resource == "goal" and artifact.get("status") == "confirmation_required":
+        request = artifact.get("request")
+        operation = artifact.get("operation")
+        if not isinstance(request, dict) or not isinstance(operation, str):
+            return None
+        if operation == "update_planning_goal":
+            changes = request.get("changes")
+            target = changes.get("target_date") if isinstance(changes, dict) else None
+            change_label = (
+                f"Zieldatum auf {target} ändern"
+                if isinstance(target, str)
+                else "Ziel wie angezeigt ändern"
+            )
+            action_label = "Diese Zieländerung ausdrücklich bestätigen"
+        elif operation == "deactivate_planning_goal":
+            change_label = "Ziel deaktivieren"
+            action_label = "Diese Zieldeaktivierung ausdrücklich bestätigen"
+        else:
+            return None
+        return PlanningArtifactPresentation(
+            resource=resource,
+            title="Bestätigung erforderlich",
+            details=(
+                ("Änderung", change_label),
+                ("Auswirkung", "Dieses Ziel wird im angenommenen Trainingszyklus verwendet."),
+            ),
+            confirmation_endpoint=(
+                f"/coach/{conversation_id}/messages/{message_id}/planning-goal-confirmation"
+            ),
+            confirmation_label=action_label,
+        )
+    if not isinstance(result, dict):
+        return None
+    if resource == "goal":
+        event_type = result.get("event_type")
+        status = result.get("status")
+        if not isinstance(event_type, str) or not isinstance(status, str):
+            return None
+        target = result.get("target_date")
+        details = [
+            ("Ziel", str(result.get("event_name") or GOAL_LABELS.get(event_type, event_type))),
+            ("Distanz", GOAL_LABELS.get(event_type, event_type)),
+            ("Status", "Aktiv" if status == "active" else "Archiviert"),
+        ]
+        if isinstance(target, str):
+            details.append(("Zieldatum", target))
+        return PlanningArtifactPresentation(
+            resource=resource,
+            title="Ziel aktualisiert",
+            details=tuple(details),
+        )
+    if resource == "profile":
+        experience = result.get("experience_level")
+        weekday = result.get("preferred_long_run_weekday")
+        reentry = result.get("self_declared_reentry")
+        details: list[tuple[str, str]] = []
+        if isinstance(experience, str):
+            details.append(("Erfahrung", EXPERIENCE_LABELS.get(experience, experience)))
+        if isinstance(weekday, int) and 0 <= weekday < len(WEEKDAY_LABELS):
+            details.append(("Langer Lauf", WEEKDAY_LABELS[weekday]))
+        if isinstance(reentry, bool):
+            details.append(("Wiedereinstieg", "Ja" if reentry else "Nein"))
+        note = result.get("constraint_note")
+        if isinstance(note, str):
+            details.append(("Hinweis", note))
+        return PlanningArtifactPresentation(
+            resource=resource,
+            title="Trainingsprofil aktualisiert",
+            details=tuple(details),
+        )
+    if resource == "anchor":
+        kind = result.get("kind")
+        distance_m = result.get("distance_m")
+        duration_s = result.get("duration_s")
+        achieved_on = result.get("achieved_on")
+        reliable = result.get("reliable")
+        if (
+            not isinstance(kind, str)
+            or not isinstance(distance_m, int | float)
+            or not isinstance(duration_s, int | float)
+            or not isinstance(achieved_on, str)
+            or not isinstance(reliable, bool)
+        ):
+            return None
+        minutes, seconds = divmod(round(float(duration_s)), 60)
+        return PlanningArtifactPresentation(
+            resource=resource,
+            title="Leistungsanker aktualisiert",
+            details=(
+                ("Art", ANCHOR_LABELS.get(kind, kind)),
+                ("Distanz", f"{float(distance_m) / 1000:.2f} km".replace(".", ",")),
+                ("Zeit", f"{minutes}:{seconds:02d} Minuten"),
+                ("Datum", achieved_on),
+                ("Verlässlich", "Ja" if reliable else "Nein"),
+            ),
+        )
+    if resource != "availability":
+        return None
+    weekday = result.get("weekday")
+    available = result.get("available")
+    minutes = result.get("available_minutes")
+    if not isinstance(weekday, int) or not 0 <= weekday < len(WEEKDAY_LABELS):
+        return None
+    if not isinstance(available, bool):
+        return None
+    availability = (
+        f"{minutes} Minuten" if available and isinstance(minutes, int) else "Nicht verfügbar"
+    )
+    return PlanningArtifactPresentation(
+        resource="availability",
+        title="Verfügbarkeit aktualisiert",
+        details=(("Wochentag", WEEKDAY_LABELS[weekday]), ("Zeitraum", availability)),
+    )
+
+
+def planning_artifact_presentations(
+    session: Session,
+    user_id: int,
+    messages: Sequence[CoachMessage],
+) -> dict[int, tuple[PlanningArtifactPresentation, ...]]:
+    message_ids = [message.id for message in messages if message.role == "assistant"]
+    if not message_ids:
+        return {}
+    owned_messages = session.scalars(
+        select(CoachMessage)
+        .join(CoachConversation)
+        .where(
+            CoachConversation.user_id == user_id,
+            CoachMessage.id.in_(message_ids),
+            CoachMessage.role == "assistant",
+        )
+    )
+    presentations: dict[int, tuple[PlanningArtifactPresentation, ...]] = {}
+    for message in owned_messages:
+        artifacts = tuple(
+            presentation
+            for artifact in message.artifacts_json
+            if (
+                presentation := _planning_artifact_presentation(
+                    artifact,
+                    conversation_id=message.conversation_id,
+                    message_id=message.id,
+                )
+            )
+            is not None
+        )
+        if artifacts:
+            presentations[message.id] = artifacts
+    return presentations
 
 
 def _date_value(value: object) -> date | None:

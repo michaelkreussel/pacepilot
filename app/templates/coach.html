@@ -101,6 +101,7 @@
         {% endif %}
         {% for item in messages %}
         {% set card = proposal_cards.get(item.id) %}
+        {% set planning_artifacts = planning_artifact_cards.get(item.id, ()) %}
         {% include "coach/_message.html" %}
         {% else %}
         <div class="grid flex-1 place-items-center py-8 text-center" data-coach-empty>

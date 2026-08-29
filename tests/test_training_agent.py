@@ -10,7 +10,7 @@ from unittest.mock import Mock
 
 import pytest
 from fastapi.testclient import TestClient
-from langchain.messages import AIMessageChunk, ToolMessage
+from langchain.messages import AIMessage, AIMessageChunk, ToolMessage
 from langchain_core.language_models import BaseChatModel
 from langchain_core.outputs import ChatGenerationChunk
 from langchain_core.tools import tool
@@ -22,10 +22,15 @@ from app.logging import FILE_HANDLER, configure_logging
 from app.main import app
 from app.models import (
     Activity,
+    AthleteAvailability,
+    AthleteGoal,
     CoachConversation,
     CoachMessage,
     CoachToolCall,
     DailyHealth,
+    PerformanceAnchor,
+    TrainingCycle,
+    TrainingCycleRevision,
     User,
     Workout,
     WorkoutEvent,
@@ -36,17 +41,31 @@ from app.routes import coach as coach_route_module
 from app.services.analytics.health_trends import HEALTH_METRICS
 from app.services.coach import dependencies as coach_dependencies_module
 from app.services.coach import provider as coach_provider_module
+from app.services.coach import tools as coach_operations
 from app.services.coach.agent import CoachEvent
 from app.services.coach.conversation import CoachHistoryMessage, CoachRuntimeContext
 from app.services.coach.dependencies import get_coach_agent_factory
-from app.services.coach.presentation import workout_artifact_presentation
+from app.services.coach.presentation import (
+    planning_artifact_presentations,
+    workout_artifact_presentation,
+)
 from app.services.coach.provider import OpenRouterCoachProvider, coach_tools
 from app.services.coach.tools import (
+    create_planning_anchor,
+    create_planning_goal,
     create_running_workout_proposal,
     get_health_day,
+    get_planning_inputs,
     get_subjective_context,
+    set_planning_availability,
+    update_planning_profile,
 )
 from app.services.planning import workout_proposals as workout_proposals_module
+from app.services.planning.planning_commands import (
+    GoalUpdateInput,
+    PerformanceAnchorUpdateInput,
+    PlanningProfileUpdateInput,
+)
 from app.services.planning.registry import WORKOUT_FORMAT_IDS
 from app.services.planning.workout_views import workout_lifecycle_projection
 
@@ -160,8 +179,9 @@ def test_openrouter_timeout_is_converted_to_sdk_milliseconds(
     assert asyncio.run(collect()) == [CoachEvent("failed", failure_category="missing_final_answer")]
 
     model: Any = captured["model"]
-    assert model.request_timeout == 60_000
-    assert model.max_tokens == 2000
+    assert type(model).__name__ == "_ToolMarkupAdapter"
+    assert model.inner.request_timeout == 60_000
+    assert model.inner.max_tokens == 4000
 
 
 def test_provider_failure_logs_only_a_privacy_safe_category(
@@ -344,6 +364,242 @@ def test_agent_stream_never_leaks_reasoning_into_answer(
     assert answer == "Antwort."
     assert "Denke" not in answer
     assert events[-1] == CoachEvent("completed")
+
+
+def test_agent_stream_fails_when_model_emits_unparseable_tool_call_markup(
+    session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = _ToolCallingFakeChatModel(
+        tool_name="get_planning_inputs",
+        tool_args={},
+        answer='<｜DSML｜invoke name="get_planning_inputs">{"weekday": }',
+    )
+    monkeypatch.setattr(coach_provider_module, "ChatOpenRouter", lambda **_: model)
+    agent = OpenRouterCoachProvider(api_key="test-key", model_id="fake/model", timeout_seconds=5)
+
+    with session_factory() as session:
+        user = User(display_name="Markup Runner")
+        session.add(user)
+        session.commit()
+        user_id = user.id
+    runtime = CoachRuntimeContext(
+        user_id=user_id,
+        as_of=date.today(),
+        session_factory=session_factory,
+    )
+
+    async def collect() -> list[CoachEvent]:
+        return [
+            event
+            async for event in agent.stream(
+                [CoachHistoryMessage(role="user", content="Mittwochs kann ich 75 Minuten?")],
+                runtime,
+            )
+        ]
+
+    events = asyncio.run(collect())
+
+    assert events[-1] == CoachEvent("failed", failure_category="tool_call_format")
+    assert not any(event.type == "completed" for event in events)
+
+
+def test_dsml_tool_call_markup_is_parsed_into_bounded_tool_calls() -> None:
+    parsed = coach_provider_module._parse_dsml_tool_calls(
+        "<｜DSML｜tool_calls>"
+        '<｜DSML｜invoke name="get_planning_inputs"></｜DSML｜invoke>'
+        "</｜DSML｜tool_calls>"
+    )
+    assert parsed == [
+        {"name": "get_planning_inputs", "args": {}, "id": "dsml-tool-1", "type": "tool_call"}
+    ]
+
+    with_args = coach_provider_module._parse_dsml_tool_calls(
+        '<｜DSML｜invoke name="set_planning_availability">'
+        '{"weekday": 2, "available": true, "available_minutes": 75}'
+        "</｜DSML｜invoke>"
+    )
+    assert with_args == [
+        {
+            "name": "set_planning_availability",
+            "args": {"weekday": 2, "available": True, "available_minutes": 75},
+            "id": "dsml-tool-1",
+            "type": "tool_call",
+        }
+    ]
+
+    assert coach_provider_module._parse_dsml_tool_calls("Normale Antwort.") is None
+    assert (
+        coach_provider_module._parse_dsml_tool_calls(
+            '<｜DSML｜invoke name="get_planning_inputs">{"weekday": }</｜DSML｜invoke>'
+        )
+        is None
+    )
+
+
+def test_agent_converts_model_tool_call_markup_into_structured_tool_call(
+    session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _DsmlFakeChatModel(BaseChatModel):
+        observed_tool_result: str | None = None
+
+        @property
+        def _llm_type(self) -> str:
+            return "dsml-fake"
+
+        def _generate(self, *args: Any, **kwargs: Any) -> Any:
+            raise NotImplementedError
+
+        def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
+            del tools, kwargs
+            return self
+
+        async def _astream(
+            self,
+            messages: Any,
+            stop: Any = None,
+            run_manager: Any = None,
+            **kwargs: Any,
+        ) -> AsyncIterator[ChatGenerationChunk]:
+            del stop, kwargs
+            tool_result = next(
+                (message for message in reversed(messages) if isinstance(message, ToolMessage)),
+                None,
+            )
+            if tool_result is None:
+                yield ChatGenerationChunk(
+                    message=AIMessageChunk(
+                        content=(
+                            "<｜DSML｜tool_calls>"
+                            '<｜DSML｜invoke name="get_planning_inputs"></｜DSML｜invoke>'
+                            "</｜DSML｜tool_calls>"
+                        )
+                    )
+                )
+            else:
+                self.observed_tool_result = str(tool_result.content)
+                yield ChatGenerationChunk(
+                    message=AIMessageChunk(
+                        content="Hier sind deine aktuellen Planungsdaten.",
+                        chunk_position="last",
+                    )
+                )
+
+    model = _DsmlFakeChatModel()
+    monkeypatch.setattr(coach_provider_module, "ChatOpenRouter", lambda **_: model)
+    agent = OpenRouterCoachProvider(api_key="test-key", model_id="fake/model", timeout_seconds=5)
+
+    with session_factory() as session:
+        user = User(display_name="DSML Runner")
+        session.add(user)
+        session.commit()
+        user_id = user.id
+    runtime = CoachRuntimeContext(
+        user_id=user_id,
+        as_of=date(2026, 8, 29),
+        session_factory=session_factory,
+    )
+
+    async def collect() -> list[CoachEvent]:
+        return [
+            event
+            async for event in agent.stream(
+                [CoachHistoryMessage(role="user", content="Welche Planungsdaten habe ich?")],
+                runtime,
+            )
+        ]
+
+    events = asyncio.run(collect())
+
+    assert events[-1] == CoachEvent("completed")
+    assert model.observed_tool_result is not None
+    assert '"goals"' in model.observed_tool_result
+    answer = "".join(event.text for event in events if event.type == "answer_text" and event.text)
+    assert answer == "Hier sind deine aktuellen Planungsdaten."
+    assert "DSML" not in answer
+
+
+def test_agent_stream_fails_when_final_answer_is_missing_after_tool_call(
+    session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _ScriptedAgentGraph:
+        async def astream(self, *_args: Any, **kwargs: Any) -> AsyncIterator[object]:
+            del kwargs
+            yield (
+                "messages",
+                (
+                    AIMessageChunk(content="Ich prüfe kurz deine Planungsdaten."),
+                    {"langgraph_node": "model"},
+                ),
+            )
+            yield (
+                "updates",
+                {
+                    "model": {
+                        "messages": [
+                            AIMessage(
+                                content="",
+                                tool_calls=[
+                                    {
+                                        "name": "get_planning_inputs",
+                                        "args": {},
+                                        "id": "scripted-tool-1",
+                                        "type": "tool_call",
+                                    }
+                                ],
+                            )
+                        ]
+                    }
+                },
+            )
+            yield (
+                "updates",
+                {
+                    "tools": {
+                        "messages": [
+                            ToolMessage(
+                                content='{"goals": []}',
+                                name="get_planning_inputs",
+                                tool_call_id="scripted-tool-1",
+                            )
+                        ]
+                    }
+                },
+            )
+
+    monkeypatch.setattr(
+        coach_provider_module, "create_agent", lambda *_, **__: _ScriptedAgentGraph()
+    )
+    agent = OpenRouterCoachProvider(api_key="test-key", model_id="fake/model", timeout_seconds=5)
+
+    with session_factory() as session:
+        user = User(display_name="Silent End Runner")
+        session.add(user)
+        session.commit()
+        user_id = user.id
+    runtime = CoachRuntimeContext(
+        user_id=user_id,
+        as_of=date.today(),
+        session_factory=session_factory,
+    )
+
+    async def collect() -> list[CoachEvent]:
+        return [
+            event
+            async for event in agent.stream(
+                [CoachHistoryMessage(role="user", content="Mittwochs kann ich 75 Minuten?")],
+                runtime,
+            )
+        ]
+
+    events = asyncio.run(collect())
+
+    assert events[-1] == CoachEvent("failed", failure_category="missing_final_answer")
+    assert not any(event.type == "completed" for event in events)
+    answer = "".join(event.text for event in events if event.type == "answer_text" and event.text)
+    assert "Ich prüfe kurz deine Planungsdaten." in answer
 
 
 def _new_chat(client: TestClient) -> int:
@@ -670,6 +926,638 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
         assert workout.source_assistant_message_id is None
 
 
+def test_conversation_updates_availability_with_durable_server_artifact(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+) -> None:
+    class AvailabilityAgent:
+        runtime: CoachRuntimeContext | None = None
+
+        async def stream(
+            self,
+            messages: Sequence[CoachHistoryMessage],
+            runtime: CoachRuntimeContext,
+        ) -> AsyncIterator[CoachEvent]:
+            del messages
+            self.runtime = runtime
+            result = json.loads(
+                set_planning_availability(
+                    runtime=runtime,
+                    weekday=2,
+                    available=True,
+                    available_minutes=75,
+                )
+            )
+            assert result == {
+                "status": "updated",
+                "artifact": {"type": "planning_input", "resource": "availability"},
+            }
+            assert (
+                json.loads(
+                    set_planning_availability(
+                        runtime=runtime,
+                        weekday=2,
+                        available=True,
+                        available_minutes=75,
+                    )
+                )
+                == result
+            )
+            yield CoachEvent("artifact_available", artifact_type="planning_input")
+            yield CoachEvent("answer_text", text="Deine Verfügbarkeit wurde gespeichert.")
+            yield CoachEvent("completed")
+
+    fake = AvailabilityAgent()
+    app.dependency_overrides[get_coach_agent_factory] = lambda: lambda: fake
+    conversation_id = _new_chat(client)
+
+    response = client.post(
+        f"/coach/{conversation_id}/messages",
+        data={"message": "Mittwochs kann ich 75 Minuten trainieren."},
+    )
+
+    assert response.status_code == 200
+    completed = _sse_payload(response.text, "answer.completed")
+    completed_html = cast(str, completed["html"])
+    assert "Verfügbarkeit aktualisiert" in completed_html
+    assert "Mittwoch" in completed_html
+    assert "75 Minuten" in completed_html
+    assert fake.runtime is not None and fake.runtime.assistant_message_id is not None
+
+    with session_factory() as session:
+        availability = session.scalar(select(AthleteAvailability))
+        assert availability is not None
+        assert (
+            availability.weekday,
+            availability.available,
+            availability.available_minutes,
+        ) == (2, True, 75)
+        assistant = session.get(CoachMessage, fake.runtime.assistant_message_id)
+        assert assistant is not None
+        assert assistant.artifacts_json == [
+            {
+                "type": "planning_input",
+                "resource": "availability",
+                "operation": "set_planning_availability",
+                "request": {"weekday": 2, "available": True, "available_minutes": 75},
+                "result": {"weekday": 2, "available": True, "available_minutes": 75},
+            }
+        ]
+        user = session.scalar(select(User))
+        assert user is not None
+        other_user = User(display_name="Andere Person")
+        session.add(other_user)
+        session.flush()
+        assert planning_artifact_presentations(session, other_user.id, [assistant]) == {}
+
+    reloaded = client.get(f"/coach/{conversation_id}")
+    assert reloaded.status_code == 200
+    assert completed_html in reloaded.text
+
+
+def test_ambiguous_availability_returns_one_question_and_persists_nothing(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+) -> None:
+    class AmbiguousAvailabilityAgent:
+        async def stream(
+            self,
+            messages: Sequence[CoachHistoryMessage],
+            runtime: CoachRuntimeContext,
+        ) -> AsyncIterator[CoachEvent]:
+            del messages
+            result = json.loads(
+                set_planning_availability(
+                    runtime=runtime,
+                    weekday=4,
+                    available=True,
+                    available_minutes=None,
+                )
+            )
+            assert result == {
+                "status": "needs_clarification",
+                "question": "Wie viele Minuten kannst du am Freitag trainieren?",
+            }
+            yield CoachEvent("answer_text", text=result["question"])
+            yield CoachEvent("completed")
+
+    app.dependency_overrides[get_coach_agent_factory] = lambda: lambda: AmbiguousAvailabilityAgent()
+    conversation_id = _new_chat(client)
+
+    response = client.post(
+        f"/coach/{conversation_id}/messages",
+        data={"message": "Freitags kann ich trainieren."},
+    )
+
+    assert response.status_code == 200
+    assert response.text.count("Wie viele Minuten kannst du am Freitag trainieren?") == 2
+    with session_factory() as session:
+        assert session.scalar(select(AthleteAvailability)) is None
+        assistant = session.scalar(
+            select(CoachMessage).where(
+                CoachMessage.conversation_id == conversation_id,
+                CoachMessage.role == "assistant",
+            )
+        )
+        assert assistant is not None
+        assert assistant.artifacts_json == []
+
+
+def test_distinct_availability_changes_in_one_run_each_persist(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+) -> None:
+    class TwoAvailabilityAgent:
+        async def stream(
+            self,
+            messages: Sequence[CoachHistoryMessage],
+            runtime: CoachRuntimeContext,
+        ) -> AsyncIterator[CoachEvent]:
+            del messages
+            assert (
+                json.loads(
+                    set_planning_availability(
+                        runtime=runtime, weekday=0, available=True, available_minutes=45
+                    )
+                )["status"]
+                == "updated"
+            )
+            assert (
+                json.loads(
+                    set_planning_availability(
+                        runtime=runtime, weekday=2, available=True, available_minutes=60
+                    )
+                )["status"]
+                == "updated"
+            )
+            assert (
+                json.loads(
+                    set_planning_availability(
+                        runtime=runtime, weekday=0, available=True, available_minutes=45
+                    )
+                )["status"]
+                == "updated"
+            )
+            yield CoachEvent("answer_text", text="Beide Verfügbarkeiten wurden gespeichert.")
+            yield CoachEvent("completed")
+
+    app.dependency_overrides[get_coach_agent_factory] = lambda: lambda: TwoAvailabilityAgent()
+    conversation_id = _new_chat(client)
+
+    response = client.post(
+        f"/coach/{conversation_id}/messages",
+        data={"message": "Montags kann ich 45 Minuten und mittwochs 60 Minuten trainieren."},
+    )
+
+    assert response.status_code == 200
+    with session_factory() as session:
+        availability = {
+            row.weekday: row.available_minutes
+            for row in session.scalars(select(AthleteAvailability))
+        }
+        assert availability == {0: 45, 2: 60}
+        assistant = session.scalar(
+            select(CoachMessage).where(
+                CoachMessage.conversation_id == conversation_id,
+                CoachMessage.role == "assistant",
+            )
+        )
+        assert assistant is not None
+        assert len(assistant.artifacts_json) == 2
+
+
+def test_conversation_reads_and_updates_planning_inputs_with_server_artifacts(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coaching_date = date(2026, 8, 29)
+
+    class PlanningAgent:
+        read_result: dict[str, object] | None = None
+
+        async def stream(
+            self,
+            messages: Sequence[CoachHistoryMessage],
+            runtime: CoachRuntimeContext,
+        ) -> AsyncIterator[CoachEvent]:
+            del messages
+            assert (
+                json.loads(
+                    create_planning_goal(
+                        runtime=runtime,
+                        event_type="10k",
+                        event_name="Stadtlauf",
+                        target_date=date(2026, 10, 18),
+                    )
+                )["status"]
+                == "updated"
+            )
+            assert (
+                json.loads(
+                    update_planning_profile(
+                        runtime=runtime,
+                        changes=PlanningProfileUpdateInput(
+                            experience_level="intermediate",
+                            preferred_long_run_weekday=6,
+                        ),
+                    )
+                )["status"]
+                == "updated"
+            )
+            assert (
+                json.loads(
+                    create_planning_anchor(
+                        runtime=runtime,
+                        kind="race",
+                        distance_m=5000,
+                        duration_s=1500,
+                        achieved_on=date(2026, 8, 1),
+                    )
+                )["status"]
+                == "updated"
+            )
+            self.read_result = json.loads(get_planning_inputs(runtime=runtime))
+            yield CoachEvent("answer_text", text="Deine Planungsdaten wurden aktualisiert.")
+            yield CoachEvent("completed")
+
+    fake = PlanningAgent()
+    app.dependency_overrides[get_coach_agent_factory] = lambda: lambda: fake
+
+    class CoachingDate(date):
+        @classmethod
+        def today(cls) -> date:
+            return coaching_date
+
+    monkeypatch.setattr(coach_route_module, "date", CoachingDate)
+    conversation_id = _new_chat(client)
+    response = client.post(
+        f"/coach/{conversation_id}/messages",
+        data={"message": "Setze mein Ziel, Profil und meine aktuelle 5-km-Leistung."},
+    )
+
+    assert response.status_code == 200
+    completed_html = cast(str, _sse_payload(response.text, "answer.completed")["html"])
+    assert "Ziel aktualisiert" in completed_html
+    assert "Trainingsprofil aktualisiert" in completed_html
+    assert "Leistungsanker aktualisiert" in completed_html
+    assert "Stadtlauf" in completed_html
+    assert "Sonntag" in completed_html
+    assert "5,00 km" in completed_html
+    assert fake.read_result is not None
+    assert fake.read_result["as_of"] == coaching_date.isoformat()
+    assert len(cast(list[object], fake.read_result["goals"])) == 1
+    assert len(cast(list[object], fake.read_result["performance_anchors"])) == 1
+
+    reloaded = client.get(f"/coach/{conversation_id}")
+    assert reloaded.status_code == 200
+    assert completed_html in reloaded.text
+
+
+def test_planning_tool_schemas_expose_only_bounded_user_choices() -> None:
+    tools = {tool.name: tool for tool in coach_tools(workout_proposals_enabled=False)}
+    expected = {
+        "get_planning_inputs": set(),
+        "create_planning_goal": {"event_type", "event_name", "target_date"},
+        "update_planning_goal": {"goal_id", "changes"},
+        "deactivate_planning_goal": {"goal_id"},
+        "update_planning_profile": {"changes"},
+        "set_planning_availability": {
+            "weekday",
+            "available",
+            "available_minutes",
+        },
+        "deactivate_planning_availability": {"weekday"},
+        "create_planning_anchor": {
+            "kind",
+            "distance_m",
+            "duration_s",
+            "achieved_on",
+            "reliable",
+            "notes",
+        },
+        "update_planning_anchor": {"anchor_id", "changes"},
+        "deactivate_planning_anchor": {"anchor_id"},
+    }
+    assert expected.keys() <= tools.keys()
+    for name, properties in expected.items():
+        schema_model: Any = tools[name].tool_call_schema
+        schema = schema_model.model_json_schema()
+        assert set(schema["properties"]) == properties
+        serialized = json.dumps(schema)
+        assert "user_id" not in serialized
+        assert "conversation_id" not in serialized
+        assert "assistant_message_id" not in serialized
+        assert "accepted_cycles" not in serialized
+        assert "idempotency" not in serialized
+    goal_schema_model: Any = tools["create_planning_goal"].tool_call_schema
+    anchor_schema_model: Any = tools["create_planning_anchor"].tool_call_schema
+    assert goal_schema_model.model_json_schema()["properties"]["event_type"]["enum"] == [
+        "general_fitness",
+        "5k",
+        "10k",
+        "half_marathon",
+        "marathon",
+    ]
+    assert anchor_schema_model.model_json_schema()["properties"]["kind"]["enum"] == [
+        "race",
+        "time_trial",
+        "manual",
+    ]
+
+
+def test_referenced_goal_update_requires_exact_server_artifact_confirmation(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+) -> None:
+    original_date = date(2026, 10, 11)
+    changed_date = date(2026, 10, 18)
+    with session_factory() as session:
+        user = session.scalar(select(User))
+        assert user is not None
+        goal = AthleteGoal(user_id=user.id, event_type="10k", target_date=original_date)
+        session.add(goal)
+        session.flush()
+        cycle = TrainingCycle(
+            user_id=user.id,
+            goal_id=goal.id,
+            event_type="10k",
+            start_date=date(2026, 8, 17),
+            target_date=original_date,
+        )
+        session.add(cycle)
+        session.flush()
+        revision = TrainingCycleRevision(
+            cycle_id=cycle.id,
+            owner_user_id=user.id,
+            revision_number=1,
+            event_type="10k",
+            start_date=cycle.start_date,
+            target_date=cycle.target_date,
+            planner_version="test",
+            knowledge_base_version="test",
+            input_fingerprint="b" * 64,
+            confidence="high",
+            phase_plan_json=[],
+            assumptions_json={},
+            impact_json={},
+            validation_report_json={"valid": True},
+        )
+        session.add(revision)
+        session.flush()
+        cycle.current_revision_id = revision.id
+        cycle.accepted_revision_id = revision.id
+        session.commit()
+        goal_id = goal.id
+        cycle_id = cycle.id
+        revision_id = revision.id
+
+    class ReferencedGoalAgent:
+        runtime: CoachRuntimeContext | None = None
+
+        async def stream(
+            self,
+            messages: Sequence[CoachHistoryMessage],
+            runtime: CoachRuntimeContext,
+        ) -> AsyncIterator[CoachEvent]:
+            del messages
+            self.runtime = runtime
+            result = json.loads(
+                coach_operations.update_planning_goal(
+                    runtime,
+                    goal_id,
+                    GoalUpdateInput(target_date=changed_date),
+                )
+            )
+            assert result == {
+                "status": "confirmation_required",
+                "artifact": {"type": "planning_input", "resource": "goal"},
+            }
+            assert (
+                json.loads(
+                    coach_operations.update_planning_goal(
+                        runtime,
+                        goal_id,
+                        GoalUpdateInput(target_date=changed_date),
+                    )
+                )
+                == result
+            )
+            yield CoachEvent("answer_text", text="Bitte bestätige die Zieländerung.")
+            yield CoachEvent("completed")
+
+    fake = ReferencedGoalAgent()
+    app.dependency_overrides[get_coach_agent_factory] = lambda: lambda: fake
+    conversation_id = _new_chat(client)
+    response = client.post(
+        f"/coach/{conversation_id}/messages",
+        data={"message": "Verschiebe mein 10-km-Ziel auf den 18. Oktober."},
+    )
+
+    assert response.status_code == 200
+    completed_html = cast(str, _sse_payload(response.text, "answer.completed")["html"])
+    assert "Bestätigung erforderlich" in completed_html
+    assert "Zieldatum auf 2026-10-18 ändern" in completed_html
+    assert "Dieses Ziel wird im angenommenen Trainingszyklus verwendet." in completed_html
+    assert fake.runtime is not None and fake.runtime.assistant_message_id is not None
+    endpoint = (
+        f"/coach/{conversation_id}/messages/{fake.runtime.assistant_message_id}/"
+        "planning-goal-confirmation"
+    )
+    assert f'action="{endpoint}"' in completed_html
+
+    with session_factory() as session:
+        goal = session.get(AthleteGoal, goal_id)
+        assistant = session.get(CoachMessage, fake.runtime.assistant_message_id)
+        assert goal is not None and goal.target_date == original_date
+        assert assistant is not None
+        artifact = assistant.artifacts_json[0]
+        assert artifact["status"] == "confirmation_required"
+        assert artifact["confirmation"] == {
+            "goal_id": goal_id,
+            "operation": "update",
+            "accepted_cycles": [{"cycle_id": cycle_id, "accepted_revision_id": revision_id}],
+        }
+
+    csrf_token = client.headers.pop("X-CSRF-Token")
+    try:
+        blocked = client.post(endpoint, follow_redirects=False)
+    finally:
+        client.headers["X-CSRF-Token"] = csrf_token
+    assert blocked.status_code == 403
+    with session_factory() as session:
+        goal = session.get(AthleteGoal, goal_id)
+        assert goal is not None and goal.target_date == original_date
+
+    confirmed = client.post(endpoint, follow_redirects=False)
+    assert confirmed.status_code == 303
+    assert confirmed.headers["location"] == f"/coach/{conversation_id}"
+    with session_factory() as session:
+        goal = session.get(AthleteGoal, goal_id)
+        assistant = session.get(CoachMessage, fake.runtime.assistant_message_id)
+        assert goal is not None and goal.target_date == changed_date
+        assert assistant is not None
+        result = assistant.artifacts_json[0].get("result")
+        assert isinstance(result, dict)
+        assert result["target_date"] == changed_date.isoformat()
+        assert "confirmation" not in assistant.artifacts_json[0]
+
+    reloaded = client.get(f"/coach/{conversation_id}")
+    assert "Ziel aktualisiert" in reloaded.text
+    assert "Bestätigung erforderlich" not in reloaded.text
+
+
+def test_ambiguous_planning_dates_return_focused_questions_without_storage(
+    session_factory: sessionmaker[Session],
+) -> None:
+    with session_factory() as session:
+        user = User(display_name="Ambiguous Planning")
+        session.add(user)
+        session.commit()
+        user_id = user.id
+    runtime = CoachRuntimeContext(user_id, date(2026, 8, 29), session_factory)
+
+    goal_result = json.loads(
+        create_planning_goal(runtime=runtime, event_type="10k", target_date=None)
+    )
+    anchor_result = json.loads(
+        create_planning_anchor(
+            runtime=runtime,
+            kind="race",
+            distance_m=5000,
+            duration_s=1500,
+            achieved_on=None,
+        )
+    )
+
+    assert goal_result == {
+        "status": "needs_clarification",
+        "question": "Für welches Datum soll dieses Ziel gelten?",
+    }
+    assert anchor_result == {
+        "status": "needs_clarification",
+        "question": "An welchem Datum hast du diese Leistung erreicht?",
+    }
+    with session_factory() as session:
+        assert session.scalar(select(AthleteGoal)) is None
+        assert session.scalar(select(PerformanceAnchor)) is None
+
+
+def test_planning_mutations_reject_cross_user_entity_ids(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+) -> None:
+    with session_factory() as session:
+        owner = session.scalar(select(User))
+        assert owner is not None
+        other = User(display_name="Other Planning Owner")
+        session.add(other)
+        session.flush()
+        goal = AthleteGoal(
+            user_id=other.id,
+            event_type="10k",
+            target_date=date(2026, 11, 1),
+        )
+        anchor = PerformanceAnchor(
+            user_id=other.id,
+            kind="race",
+            distance_m=5000,
+            duration_s=1500,
+            achieved_on=date(2026, 8, 1),
+        )
+        session.add_all([goal, anchor])
+        other_conversation = CoachConversation(user_id=other.id, title="Private Planung")
+        session.add(other_conversation)
+        session.flush()
+        other_message = CoachMessage(
+            conversation_id=other_conversation.id,
+            role="assistant",
+            status="completed",
+            artifacts_json=[
+                {
+                    "type": "planning_input",
+                    "resource": "goal",
+                    "operation": "deactivate_planning_goal",
+                    "status": "confirmation_required",
+                    "request": {"goal_id": goal.id},
+                    "confirmation": {},
+                }
+            ],
+        )
+        session.add(other_message)
+        session.commit()
+        goal_id = goal.id
+        anchor_id = anchor.id
+        other_conversation_id = other_conversation.id
+        other_message_id = other_message.id
+
+    class CrossUserAgent:
+        async def stream(
+            self,
+            messages: Sequence[CoachHistoryMessage],
+            runtime: CoachRuntimeContext,
+        ) -> AsyncIterator[CoachEvent]:
+            del messages
+            goal_result = json.loads(
+                coach_operations.update_planning_goal(
+                    runtime,
+                    goal_id,
+                    GoalUpdateInput(event_name="Übernommen"),
+                )
+            )
+            anchor_result = json.loads(
+                coach_operations.update_planning_anchor(
+                    runtime,
+                    anchor_id,
+                    PerformanceAnchorUpdateInput(notes="Übernommen"),
+                )
+            )
+            assert goal_result["error"]["code"] == "planning.goal_not_found"
+            assert anchor_result["error"]["code"] == "planning.anchor_not_found"
+            yield CoachEvent("answer_text", text="Diese Planungsdaten wurden nicht gefunden.")
+            yield CoachEvent("completed")
+
+    app.dependency_overrides[get_coach_agent_factory] = lambda: lambda: CrossUserAgent()
+    conversation_id = _new_chat(client)
+    response = client.post(
+        f"/coach/{conversation_id}/messages",
+        data={"message": "Ändere fremde Planungsdaten."},
+    )
+
+    assert response.status_code == 200
+    cross_user_confirmation = client.post(
+        f"/coach/{other_conversation_id}/messages/{other_message_id}/planning-goal-confirmation",
+        follow_redirects=False,
+    )
+    assert cross_user_confirmation.status_code == 404
+    with session_factory() as session:
+        goal = session.get(AthleteGoal, goal_id)
+        anchor = session.get(PerformanceAnchor, anchor_id)
+        assistant = session.scalar(
+            select(CoachMessage).where(
+                CoachMessage.conversation_id == conversation_id,
+                CoachMessage.role == "assistant",
+            )
+        )
+        assert goal is not None and goal.event_name is None
+        assert anchor is not None and anchor.notes is None
+        assert assistant is not None and assistant.artifacts_json == []
+
+
+def test_conversational_planning_mutation_requires_csrf(client: TestClient) -> None:
+    conversation_id = _new_chat(client)
+    csrf_token = client.headers.pop("X-CSRF-Token")
+    try:
+        response = client.post(
+            f"/coach/{conversation_id}/messages",
+            data={"message": "Setze meine Verfügbarkeit."},
+        )
+    finally:
+        client.headers["X-CSRF-Token"] = csrf_token
+
+    assert response.status_code == 403
+
+
 def test_invalid_proposal_date_returns_completed_stream_without_artifact(
     client: TestClient,
     session_factory: sessionmaker[Session],
@@ -756,9 +1644,20 @@ def test_health_trend_tool_schema_uses_analytics_metric_choices() -> None:
     assert schema["properties"]["metrics"]["items"]["enum"] == list(HEALTH_METRICS)
 
 
-def test_agent_registers_exactly_one_bounded_mutation_tool() -> None:
+def test_agent_registers_only_bounded_conversational_mutation_tools() -> None:
     read_only = {tool.name for tool in coach_tools(workout_proposals_enabled=False)}
     enabled = {tool.name for tool in coach_tools(workout_proposals_enabled=True)}
+    assert {
+        "create_planning_goal",
+        "update_planning_goal",
+        "deactivate_planning_goal",
+        "update_planning_profile",
+        "set_planning_availability",
+        "deactivate_planning_availability",
+        "create_planning_anchor",
+        "update_planning_anchor",
+        "deactivate_planning_anchor",
+    } <= read_only
     assert enabled - read_only == {"create_running_workout_proposal"}
     assert (
         not {
@@ -837,6 +1736,47 @@ def test_proposal_survives_provider_failure_after_commit(
     assert "Unbestätigt" in reloaded.text
     assert f'href="/workouts/{workout_id}"' in reloaded.text
     assert cast(str, failed["html"]) in reloaded.text
+
+
+def test_planning_artifact_survives_provider_failure_after_commit(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+) -> None:
+    class FailingAfterPlanningAgent:
+        async def stream(
+            self,
+            messages: Sequence[CoachHistoryMessage],
+            runtime: CoachRuntimeContext,
+        ) -> AsyncIterator[CoachEvent]:
+            del messages
+            set_planning_availability(runtime, 5, True, 90)
+            yield CoachEvent("artifact_available", artifact_type="planning_input")
+            yield CoachEvent("failed")
+
+    app.dependency_overrides[get_coach_agent_factory] = lambda: lambda: FailingAfterPlanningAgent()
+    conversation_id = _new_chat(client)
+    response = client.post(
+        f"/coach/{conversation_id}/messages",
+        data={"message": "Samstags kann ich 90 Minuten trainieren."},
+    )
+
+    assert response.status_code == 200
+    failed_html = cast(str, _sse_payload(response.text, "error")["html"])
+    assert "Verfügbarkeit aktualisiert" in failed_html
+    assert "Samstag" in failed_html
+    assert "90 Minuten" in failed_html
+    with session_factory() as session:
+        availability = session.scalar(
+            select(AthleteAvailability).where(AthleteAvailability.weekday == 5)
+        )
+        assistant = session.scalar(select(CoachMessage).where(CoachMessage.role == "assistant"))
+        assert availability is not None and availability.available_minutes == 90
+        assert assistant is not None and assistant.status == "failed"
+        assert len(assistant.artifacts_json) == 1
+
+    reloaded = client.get(f"/coach/{conversation_id}")
+    assert reloaded.status_code == 200
+    assert failed_html in reloaded.text
 
 
 def test_follow_up_includes_bounded_conversation_history(client: TestClient) -> None:
@@ -1268,6 +2208,40 @@ async def test_langchain_backend_maps_only_valid_proposal_artifact(
         CoachEvent("answer_text", text="Der Vorschlag ist bereit."),
         CoachEvent("completed"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_langchain_backend_maps_valid_planning_artifact(
+    session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @tool("set_planning_availability")
+    def fake_planning_tool() -> str:
+        """Store one deterministic planning input for adapter testing."""
+        return '{"status":"updated","artifact":{"type":"planning_input","resource":"availability"}}'
+
+    model = _ToolCallingFakeChatModel(
+        tool_name="set_planning_availability",
+        tool_args={},
+        answer="Die Verfügbarkeit ist gespeichert.",
+    )
+    monkeypatch.setattr(coach_provider_module, "ChatOpenRouter", lambda **_: model)
+    monkeypatch.setattr(coach_provider_module, "coach_tools", lambda **_: [fake_planning_tool])
+    agent = OpenRouterCoachProvider(
+        api_key="test-key",
+        model_id="fake/model",
+        timeout_seconds=5,
+    )
+    events = [
+        event
+        async for event in agent.stream(
+            [CoachHistoryMessage("user", "Speichere meine Verfügbarkeit.")],
+            CoachRuntimeContext(1, date(2026, 8, 29), session_factory),
+        )
+    ]
+
+    assert CoachEvent("artifact_available", artifact_type="planning_input") in events
+    assert events[-1] == CoachEvent("completed")
 
 
 @pytest.mark.asyncio

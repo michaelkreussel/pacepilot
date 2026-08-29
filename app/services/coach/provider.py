@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from collections.abc import AsyncIterator, Sequence
 from datetime import date, timedelta
 from time import monotonic
@@ -11,6 +12,9 @@ from langchain.agents.middleware import (
     ToolCallLimitMiddleware,
 )
 from langchain.tools import ToolRuntime, tool
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, AIMessageChunk
+from langchain_core.outputs import ChatGenerationChunk, ChatResult
 from langchain_core.tools import BaseTool
 from langchain_openrouter import ChatOpenRouter
 from pydantic import Field
@@ -19,11 +23,18 @@ from app.services.analytics.health_trends import HealthMetric
 from app.services.coach import tools as coach_operations
 from app.services.coach.agent import CoachEvent
 from app.services.coach.conversation import CoachHistoryMessage, CoachRuntimeContext
+from app.services.planning.planning_commands import (
+    AnchorKind,
+    GoalEventType,
+    GoalUpdateInput,
+    PerformanceAnchorUpdateInput,
+    PlanningProfileUpdateInput,
+)
 from app.services.planning.workout_proposals import RunningTemplateId
 
 logger = logging.getLogger(__name__)
-COACH_PROMPT_TEMPLATE_VERSION = "coach-prompt-v2"
-COACH_TOOL_CONTRACT_VERSION = "coach-tools-v2"
+COACH_PROMPT_TEMPLATE_VERSION = "coach-prompt-v3"
+COACH_TOOL_CONTRACT_VERSION = "coach-tools-v3"
 
 SYSTEM_PROMPT = """Du bist der vorsichtige, präzise Gesundheits- und Trainingscoach von PacePilot.
 
@@ -69,6 +80,18 @@ Workout-Vorschläge:
   wie "passt" ist niemals Annahme, Planung oder Garmin-Freigabe.
 """
 
+PLANNING_INPUT_PROMPT = """
+Planungsdaten:
+- Lies Ziele, Trainingsprofil, wiederkehrende Verfügbarkeit und Leistungsanker mit
+  get_planning_inputs, wenn sie für die Frage oder Änderung relevant sind.
+- Speichere nur ausdrücklich gewünschte, eindeutige Änderungen mit dem passenden
+  Planungswerkzeug. Erfinde keine Daten, Zeiten, Distanzen oder Leistungswerte.
+- Bei status needs_clarification stelle ausschließlich die zurückgegebene konkrete Frage.
+- Bei status not_updated behaupte keine Änderung. Eine Textantwort ist niemals die Bestätigung
+  für eine Änderung oder Deaktivierung eines von einem angenommenen Zyklus verwendeten Ziels.
+- Verweise nach status updated knapp auf das serverseitige Ergebnis-Artefakt.
+"""
+
 
 def _date_context_message(as_of: date) -> dict[str, str]:
     return {
@@ -81,6 +104,136 @@ def _date_context_message(as_of: date) -> dict[str, str]:
             "Dieser Kontext hat Vorrang vor Annahmen über das aktuelle Datum."
         ),
     }
+
+
+_DSML_INVOKE_PATTERN = re.compile(
+    r'<｜DSML｜invoke name="([^"]*)">(.*?)</｜DSML｜invoke>',
+    re.DOTALL,
+)
+_DSML_TOOL_CALLS_TAG_PATTERN = re.compile(r"</?｜DSML｜tool_calls>")
+
+
+def _parse_dsml_tool_calls(content: str) -> list[dict[str, Any]] | None:
+    if "DSML" not in content:
+        return None
+    matches = list(_DSML_INVOKE_PATTERN.finditer(content))
+    if not matches:
+        return None
+    tool_calls: list[dict[str, Any]] = []
+    for match in matches:
+        name = match.group(1)
+        raw_args = match.group(2).strip()
+        if raw_args:
+            try:
+                args = json.loads(raw_args)
+            except json.JSONDecodeError:
+                return None
+            if not isinstance(args, dict):
+                return None
+        else:
+            args = {}
+        tool_calls.append(
+            {
+                "name": name,
+                "args": args,
+                "id": f"dsml-tool-{len(tool_calls) + 1}",
+                "type": "tool_call",
+            }
+        )
+    return tool_calls
+
+
+def _split_dsml_content(content: str) -> tuple[str, list[dict[str, Any]]] | None:
+    tool_calls = _parse_dsml_tool_calls(content)
+    if tool_calls is None:
+        return None
+    text = _DSML_INVOKE_PATTERN.sub("", content)
+    text = _DSML_TOOL_CALLS_TAG_PATTERN.sub("", text)
+    return text.strip(), tool_calls
+
+
+class _ToolMarkupAdapter(BaseChatModel):
+    """Converts model tool-call markup emitted as content into structured tool calls.
+
+    Some models served through OpenRouter (observed: DeepSeek) return their tool
+    invocation as plain text instead of a structured tool_calls field. This
+    adapter restores the provider contract: native tool calls pass through
+    unchanged, markup is parsed into bounded tool calls, and anything else is
+    streamed unchanged. Unparseable markup is left as text so the execution
+    guard fails the run instead of leaking markup as an answer.
+    """
+
+    inner: Any
+
+    @property
+    def _llm_type(self) -> str:
+        return "tool-markup-adapter"
+
+    def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
+        return _ToolMarkupAdapter(inner=self.inner.bind_tools(tools, **kwargs))
+
+    def _generate(self, *args: Any, **kwargs: Any) -> ChatResult:  # type: ignore[override]
+        messages = args[0] if args else kwargs.get("input")
+        result = self.inner._generate(messages, stop=kwargs.get("stop"))
+        for generation in result.generations:
+            if isinstance(generation.message, AIMessage):
+                converted = _split_dsml_content(generation.message.content)
+                if converted is not None:
+                    text, tool_calls = converted
+                    generation.message = AIMessage(
+                        content=text,
+                        id=generation.message.id,
+                        additional_kwargs=generation.message.additional_kwargs,
+                        tool_calls=tool_calls,
+                    )
+        return result
+
+    async def _astream(
+        self,
+        messages: Any,
+        stop: Any = None,
+        run_manager: Any = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[ChatGenerationChunk]:
+        del run_manager
+        # The inner model's private _astream is used deliberately: the public
+        # astream API fires callback token events for the raw inner chunks,
+        # which would leak unparsed markup into the visible answer stream.
+        chunks: list[ChatGenerationChunk] = [
+            chunk async for chunk in self.inner._astream(messages, stop=stop, **kwargs)
+        ]
+        has_native_tool_calls = any(
+            getattr(chunk.message, "tool_call_chunks", None) for chunk in chunks
+        )
+        if has_native_tool_calls:
+            for chunk in chunks:
+                yield chunk
+            return
+        content = "".join(
+            chunk.message.content for chunk in chunks if isinstance(chunk.message.content, str)
+        )
+        converted = _split_dsml_content(content) if content else None
+        if converted is None:
+            for chunk in chunks:
+                yield chunk
+            return
+        text, tool_calls = converted
+        yield ChatGenerationChunk(
+            message=AIMessageChunk(
+                content=text,
+                tool_call_chunks=[
+                    {
+                        "name": call["name"],
+                        "args": json.dumps(call["args"]),
+                        "id": call["id"],
+                        "index": index,
+                        "type": "tool_call_chunk",
+                    }
+                    for index, call in enumerate(tool_calls)
+                ],
+                chunk_position="last",
+            )
+        )
 
 
 @tool
@@ -180,6 +333,116 @@ def get_upcoming_workouts(
 
 
 @tool
+def get_planning_inputs(runtime: ToolRuntime[CoachRuntimeContext]) -> str:
+    """Read active goals, planning profile, recurring availability, and performance anchors."""
+    return coach_operations.get_planning_inputs(runtime.context)
+
+
+@tool
+def create_planning_goal(
+    runtime: ToolRuntime[CoachRuntimeContext],
+    event_type: GoalEventType,
+    event_name: Annotated[str | None, Field(max_length=200)] = None,
+    target_date: date | None = None,
+) -> str:
+    """Create one explicitly requested running goal through validated planning rules."""
+    return coach_operations.create_planning_goal(
+        runtime.context, event_type, event_name, target_date
+    )
+
+
+@tool
+def update_planning_goal(
+    runtime: ToolRuntime[CoachRuntimeContext],
+    goal_id: Annotated[int, Field(gt=0)],
+    changes: GoalUpdateInput,
+) -> str:
+    """Update one goal returned by get_planning_inputs."""
+    return coach_operations.update_planning_goal(runtime.context, goal_id, changes)
+
+
+@tool
+def deactivate_planning_goal(
+    runtime: ToolRuntime[CoachRuntimeContext],
+    goal_id: Annotated[int, Field(gt=0)],
+) -> str:
+    """Deactivate one goal returned by get_planning_inputs."""
+    return coach_operations.deactivate_planning_goal(runtime.context, goal_id)
+
+
+@tool
+def update_planning_profile(
+    runtime: ToolRuntime[CoachRuntimeContext],
+    changes: PlanningProfileUpdateInput,
+) -> str:
+    """Update explicitly supplied experience, re-entry, long-run, or constraint choices."""
+    return coach_operations.update_planning_profile(runtime.context, changes)
+
+
+@tool
+def set_planning_availability(
+    runtime: ToolRuntime[CoachRuntimeContext],
+    weekday: Annotated[int, Field(ge=0, le=6)],
+    available: bool,
+    available_minutes: Annotated[int | None, Field(ge=1, le=1440)] = None,
+) -> str:
+    """Set one recurring weekday and its explicitly supplied available minutes."""
+    return coach_operations.set_planning_availability(
+        runtime.context, weekday, available, available_minutes
+    )
+
+
+@tool
+def deactivate_planning_availability(
+    runtime: ToolRuntime[CoachRuntimeContext],
+    weekday: Annotated[int, Field(ge=0, le=6)],
+) -> str:
+    """Mark one recurring weekday unavailable."""
+    return coach_operations.deactivate_planning_availability(runtime.context, weekday)
+
+
+@tool
+def create_planning_anchor(
+    runtime: ToolRuntime[CoachRuntimeContext],
+    kind: AnchorKind,
+    distance_m: Annotated[float, Field(gt=0)],
+    duration_s: Annotated[float, Field(gt=0)],
+    achieved_on: date | None = None,
+    reliable: bool = True,
+    notes: Annotated[str | None, Field(max_length=2000)] = None,
+) -> str:
+    """Create one explicitly supplied race, time-trial, or manual performance anchor."""
+    return coach_operations.create_planning_anchor(
+        runtime.context,
+        kind,
+        distance_m,
+        duration_s,
+        achieved_on,
+        reliable,
+        notes,
+    )
+
+
+@tool
+def update_planning_anchor(
+    runtime: ToolRuntime[CoachRuntimeContext],
+    anchor_id: Annotated[int, Field(gt=0)],
+    changes: PerformanceAnchorUpdateInput,
+) -> str:
+    """Update one performance anchor returned by get_planning_inputs."""
+    return coach_operations.update_planning_anchor(runtime.context, anchor_id, changes)
+
+
+@tool
+def deactivate_planning_anchor(
+    runtime: ToolRuntime[CoachRuntimeContext],
+    anchor_id: Annotated[int, Field(gt=0)],
+) -> str:
+    """Mark one performance anchor unreliable."""
+    return coach_operations.deactivate_planning_anchor(runtime.context, anchor_id)
+
+
+@tool
 def create_running_workout_proposal(
     runtime: ToolRuntime[CoachRuntimeContext],
     suggested_for: date,
@@ -210,6 +473,16 @@ COACH_TOOLS = (
     get_activity_details,
     get_health_day,
     get_upcoming_workouts,
+    get_planning_inputs,
+    create_planning_goal,
+    update_planning_goal,
+    deactivate_planning_goal,
+    update_planning_profile,
+    set_planning_availability,
+    deactivate_planning_availability,
+    create_planning_anchor,
+    update_planning_anchor,
+    deactivate_planning_anchor,
 )
 
 
@@ -234,15 +507,19 @@ class OpenRouterCoachProvider:
         self._workout_proposals_enabled = workout_proposals_enabled
 
     def _build_agent(self) -> Any:
-        model = ChatOpenRouter(
-            model=self._model_id,
-            api_key=self._api_key,
-            # langchain-openrouter forwards this value to the SDK as milliseconds.
-            timeout=round(self._timeout_seconds * 1000),
-            max_retries=1,
-            max_tokens=2000,
-            temperature=0.2,
-            streaming=True,
+        model = _ToolMarkupAdapter(
+            inner=ChatOpenRouter(
+                model=self._model_id,
+                api_key=self._api_key,
+                # langchain-openrouter forwards this value to the SDK as milliseconds.
+                timeout=round(self._timeout_seconds * 1000),
+                max_retries=1,
+                # Reasoning models spend output tokens on internal reasoning
+                # across multi-step tool loops, so the budget needs headroom.
+                max_tokens=4000,
+                temperature=0.2,
+                streaming=True,
+            )
         )
         middleware: Any = (
             ModelCallLimitMiddleware(run_limit=4, exit_behavior="error"),
@@ -252,6 +529,7 @@ class OpenRouterCoachProvider:
             model,
             tools=coach_tools(workout_proposals_enabled=self._workout_proposals_enabled),
             system_prompt=SYSTEM_PROMPT
+            + PLANNING_INPUT_PROMPT
             + (PROPOSAL_PROMPT if self._workout_proposals_enabled else ""),
             context_schema=CoachRuntimeContext,
             middleware=middleware,
@@ -271,6 +549,8 @@ class OpenRouterCoachProvider:
             *({"role": message.role, "content": message.content} for message in messages),
         ]
         produced_text = False
+        raw_answer: list[str] = []
+        needs_final_answer = False
         logger.info(
             "AI coach agent started model=%s user_id=%s history_messages=%s",
             self._model_id,
@@ -293,6 +573,20 @@ class OpenRouterCoachProvider:
                     text = getattr(message, "text", "")
                     if text:
                         produced_text = True
+                        needs_final_answer = False
+                        raw_answer.append(text)
+                        if _contains_tool_call_markup(text):
+                            logger.warning(
+                                "AI coach agent emitted tool-call markup as answer text "
+                                "model=%s user_id=%s failure_category=tool_call_format "
+                                "duration_ms=%s tool_calls=%s",
+                                self._model_id,
+                                runtime.user_id,
+                                round((monotonic() - started_at) * 1000),
+                                tool_calls,
+                            )
+                            yield CoachEvent("failed", failure_category="tool_call_format")
+                            return
                         yield CoachEvent("answer_text", text=text)
                     continue
 
@@ -315,6 +609,8 @@ class OpenRouterCoachProvider:
                                 )
                         elif node == "tools":
                             failed = getattr(message, "status", None) == "error"
+                            if not failed:
+                                needs_final_answer = True
                             tool_name = getattr(message, "name", "") or ""
                             call_id = getattr(message, "tool_call_id", None)
                             call_started = tool_started_at.pop(call_id, None)
@@ -334,12 +630,12 @@ class OpenRouterCoachProvider:
                                 "failed" if failed else "completed",
                                 duration_ms,
                             )
-                            if (
-                                not failed
-                                and tool_name == "create_running_workout_proposal"
-                                and _contains_proposal_artifact(getattr(message, "content", None))
-                            ):
-                                yield CoachEvent("artifact_available", artifact_type="workout")
+                            if not failed:
+                                artifact_type = _artifact_type(getattr(message, "content", None))
+                                if artifact_type is not None:
+                                    yield CoachEvent(
+                                        "artifact_available", artifact_type=artifact_type
+                                    )
         except Exception:
             logger.warning(
                 "AI coach agent failed model=%s user_id=%s failure_category=provider_error "
@@ -350,6 +646,34 @@ class OpenRouterCoachProvider:
                 tool_calls,
             )
             yield CoachEvent("failed", failure_category="provider_error")
+            return
+        if _contains_tool_call_markup("".join(raw_answer)):
+            logger.warning(
+                "AI coach agent emitted tool-call markup as answer text "
+                "model=%s user_id=%s failure_category=tool_call_format "
+                "duration_ms=%s tool_calls=%s",
+                self._model_id,
+                runtime.user_id,
+                round((monotonic() - started_at) * 1000),
+                tool_calls,
+            )
+            yield CoachEvent("failed", failure_category="tool_call_format")
+            return
+        if needs_final_answer:
+            # The agent stream ended after successful tool use without a final
+            # model response (observed with reasoning models that exhaust their
+            # output budget). Treating this as completed would silently truncate
+            # the conversation, so the run fails as incomplete instead.
+            logger.warning(
+                "AI coach agent ended without final answer after tool use "
+                "model=%s user_id=%s failure_category=missing_final_answer "
+                "duration_ms=%s tool_calls=%s",
+                self._model_id,
+                runtime.user_id,
+                round((monotonic() - started_at) * 1000),
+                tool_calls,
+            )
+            yield CoachEvent("failed", failure_category="missing_final_answer")
             return
         if not produced_text:
             logger.warning(
@@ -372,16 +696,25 @@ class OpenRouterCoachProvider:
         yield CoachEvent("completed")
 
 
-def _contains_proposal_artifact(content: object) -> bool:
+def _contains_tool_call_markup(text: str) -> bool:
+    # Some models (observed: DeepSeek via OpenRouter) emit their tool invocation
+    # as plain content instead of a structured tool_calls field. Such provider
+    # contract drift must never reach the user as answer text.
+    return "DSML" in text
+
+
+def _artifact_type(content: object) -> str | None:
     if not isinstance(content, str):
-        return False
+        return None
     try:
         payload = json.loads(content)
     except json.JSONDecodeError:
-        return False
+        return None
     artifact = payload.get("artifact") if isinstance(payload, dict) else None
-    return (
-        payload.get("status") == "created"
-        and isinstance(artifact, dict)
-        and artifact.get("type") == "workout_proposal"
-    )
+    if payload.get("status") not in {"created", "updated"} or not isinstance(artifact, dict):
+        return None
+    if artifact.get("type") == "workout_proposal":
+        return "workout"
+    if artifact.get("type") == "planning_input":
+        return "planning_input"
+    return None

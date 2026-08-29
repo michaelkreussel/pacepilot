@@ -69,10 +69,23 @@ def test_coach_requires_completed_data_onboarding(
 
     page = client.get("/coach", follow_redirects=False)
     create = client.post("/coach/conversations", follow_redirects=False)
+    mutate = client.post(
+        "/coach/1/messages",
+        data={"message": "Setze meine Verfügbarkeit."},
+        follow_redirects=False,
+    )
+    confirm = client.post(
+        "/coach/1/messages/1/planning-goal-confirmation",
+        follow_redirects=False,
+    )
 
-    assert page.status_code == create.status_code == 303
+    assert (
+        page.status_code == create.status_code == mutate.status_code == confirm.status_code == 303
+    )
     assert page.headers["location"] == "/onboarding?blocked=data"
     assert create.headers["location"] == "/onboarding?blocked=data"
+    assert mutate.headers["location"] == "/onboarding?blocked=data"
+    assert confirm.headers["location"] == "/onboarding?blocked=data"
     with session_factory() as session:
         assert list(session.scalars(select(CoachConversation))) == []
 

@@ -1,12 +1,37 @@
 import json
+from collections.abc import Callable
 from dataclasses import asdict
 from datetime import date, datetime, timedelta
+
+from pydantic import ValidationError
 
 from app.models import CoachMessage, User
 from app.repositories.coach import find_assistant_message
 from app.services.analytics.athlete_data import AthleteDataService
 from app.services.analytics.health_trends import HealthMetric
 from app.services.coach.conversation import CoachRuntimeContext
+from app.services.planning.planning_commands import (
+    AnchorKind,
+    AvailabilityInput,
+    GoalCreateInput,
+    GoalEventType,
+    GoalUpdateInput,
+    PerformanceAnchorCreateInput,
+    PerformanceAnchorUpdateInput,
+    PlanningInputCommandError,
+    PlanningInputCommands,
+    PlanningProfileUpdateInput,
+    ReferencedGoalChangeConfirmation,
+)
+from app.services.planning.planning_queries import (
+    AvailabilityFact,
+    GoalFact,
+    PerformanceAnchorFact,
+    PlanningProfileFact,
+)
+from app.services.planning.planning_queries import (
+    get_planning_inputs as planning_inputs,
+)
 from app.services.planning.workout_proposals import (
     RunningProposalRequest,
     RunningProposalService,
@@ -25,6 +50,18 @@ def _json_default(value: object) -> str:
 
 def _json(value: object) -> str:
     return json.dumps(value, default=_json_default, ensure_ascii=False, separators=(",", ":"))
+
+
+WEEKDAY_LABELS = (
+    "Montag",
+    "Dienstag",
+    "Mittwoch",
+    "Donnerstag",
+    "Freitag",
+    "Samstag",
+    "Sonntag",
+)
+PlanningArtifactFact = GoalFact | PlanningProfileFact | AvailabilityFact | PerformanceAnchorFact
 
 
 def get_current_recovery_state(runtime: CoachRuntimeContext) -> str:
@@ -147,6 +184,373 @@ def get_upcoming_workouts(
             session, runtime.user_id, as_of=runtime.as_of
         ).get_upcoming_workouts(days)
     return _json(tuple(asdict(workout) for workout in workouts))
+
+
+def get_planning_inputs(runtime: CoachRuntimeContext) -> str:
+    """Read active goals, planning profile, availability, and performance anchors."""
+    with runtime.session_factory() as session:
+        result = planning_inputs(session, runtime.user_id, as_of=runtime.as_of)
+    return _json(asdict(result))
+
+
+def _run_planning_mutation(
+    runtime: CoachRuntimeContext,
+    *,
+    operation: str,
+    resource: str,
+    request: dict[str, object],
+    command: Callable[[PlanningInputCommands], PlanningArtifactFact],
+    clarifications: dict[str, str] | None = None,
+    pending_confirmation: Callable[
+        [PlanningInputCommands], tuple[ReferencedGoalChangeConfirmation, dict[str, object]]
+    ]
+    | None = None,
+) -> str:
+    if (
+        runtime.conversation_id is None
+        or runtime.user_message_id is None
+        or runtime.assistant_message_id is None
+    ):
+        raise ValueError("Coach planning runtime is incomplete")
+    with runtime.session_factory() as session:
+        user_message = session.get(CoachMessage, runtime.user_message_id)
+        assistant_message = find_assistant_message(
+            session,
+            runtime.user_id,
+            runtime.conversation_id,
+            runtime.assistant_message_id,
+        )
+        user = session.get(User, runtime.user_id)
+        if (
+            user is None
+            or user_message is None
+            or user_message.conversation_id != runtime.conversation_id
+            or user_message.role != "user"
+            or assistant_message is None
+        ):
+            raise ValueError("Coach planning runtime is invalid")
+        # A retried tool call with the same bounded request is a duplicate and
+        # reports the stored outcome; a different request for the same operation
+        # is a legitimate new change and supersedes only stale pending
+        # confirmations.
+        for existing_artifact in assistant_message.artifacts_json:
+            if (
+                existing_artifact.get("operation") == operation
+                and existing_artifact.get("request") == request
+            ):
+                status = (
+                    "confirmation_required"
+                    if existing_artifact.get("status") == "confirmation_required"
+                    else "updated"
+                )
+                return _json(
+                    {
+                        "status": status,
+                        "artifact": {"type": "planning_input", "resource": resource},
+                    }
+                )
+        kept_artifacts = [
+            artifact
+            for artifact in assistant_message.artifacts_json
+            if not (
+                artifact.get("operation") == operation
+                and artifact.get("status") == "confirmation_required"
+            )
+        ]
+        commands = PlanningInputCommands(
+            session,
+            user,
+            as_of=runtime.as_of,
+            commit=False,
+        )
+        try:
+            fact = command(commands)
+        except PlanningInputCommandError as exc:
+            if exc.code == "planning.goal_confirmation_required" and pending_confirmation:
+                confirmation, _ = pending_confirmation(commands)
+                assistant_message.artifacts_json = [
+                    *kept_artifacts,
+                    {
+                        "type": "planning_input",
+                        "resource": resource,
+                        "operation": operation,
+                        "status": "confirmation_required",
+                        "request": request,
+                        "confirmation": confirmation.model_dump(mode="json"),
+                    },
+                ]
+                session.commit()
+                return _json(
+                    {
+                        "status": "confirmation_required",
+                        "artifact": {"type": "planning_input", "resource": resource},
+                    }
+                )
+            session.rollback()
+            if clarifications and exc.code in clarifications:
+                return _json(
+                    {
+                        "status": "needs_clarification",
+                        "question": clarifications[exc.code],
+                    }
+                )
+            return _json(
+                {
+                    "status": "not_updated",
+                    "error": {"code": exc.code, "message": str(exc)},
+                }
+            )
+        result = json.loads(_json(asdict(fact)))
+        assistant_message.artifacts_json = [
+            *kept_artifacts,
+            {
+                "type": "planning_input",
+                "resource": resource,
+                "operation": operation,
+                "request": request,
+                "result": result,
+            },
+        ]
+        try:
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+    return _json(
+        {
+            "status": "updated",
+            "artifact": {"type": "planning_input", "resource": resource},
+        }
+    )
+
+
+def create_planning_goal(
+    runtime: CoachRuntimeContext,
+    event_type: GoalEventType,
+    event_name: str | None = None,
+    target_date: date | None = None,
+) -> str:
+    """Create one running goal; ask for a material missing target date before storage."""
+    if event_type != "general_fitness" and target_date is None:
+        return _json(
+            {
+                "status": "needs_clarification",
+                "question": "Für welches Datum soll dieses Ziel gelten?",
+            }
+        )
+    try:
+        data = GoalCreateInput(
+            event_type=event_type,
+            event_name=event_name,
+            target_date=target_date,
+        )
+    except ValidationError:
+        return _json({"status": "not_updated", "error": {"code": "planning.invalid_input"}})
+    return _run_planning_mutation(
+        runtime,
+        operation="create_planning_goal",
+        resource="goal",
+        request={
+            "event_type": event_type,
+            "event_name": event_name,
+            "target_date": target_date.isoformat() if target_date is not None else None,
+        },
+        command=lambda commands: commands.create_goal(data),
+        clarifications={
+            "planning.goal_target_date_required": "Für welches Datum soll dieses Ziel gelten?"
+        },
+    )
+
+
+def update_planning_goal(
+    runtime: CoachRuntimeContext,
+    goal_id: int,
+    changes: GoalUpdateInput,
+) -> str:
+    """Update one user-owned goal without accepting referenced-cycle changes in prose."""
+    request: dict[str, object] = {
+        "goal_id": goal_id,
+        "changes": changes.model_dump(exclude_unset=True, mode="json"),
+    }
+    return _run_planning_mutation(
+        runtime,
+        operation="update_planning_goal",
+        resource="goal",
+        request=request,
+        command=lambda commands: commands.update_goal(goal_id, changes),
+        clarifications={
+            "planning.goal_target_date_required": "Für welches Datum soll dieses Ziel gelten?"
+        },
+        pending_confirmation=lambda commands: (
+            _required_goal_confirmation(commands, goal_id, operation="update"),
+            request,
+        ),
+    )
+
+
+def deactivate_planning_goal(runtime: CoachRuntimeContext, goal_id: int) -> str:
+    """Deactivate one user-owned goal unless an accepted cycle requires exact confirmation."""
+    return _run_planning_mutation(
+        runtime,
+        operation="deactivate_planning_goal",
+        resource="goal",
+        request={"goal_id": goal_id},
+        command=lambda commands: commands.deactivate_goal(goal_id),
+        pending_confirmation=lambda commands: (
+            _required_goal_confirmation(commands, goal_id, operation="deactivate"),
+            {"goal_id": goal_id},
+        ),
+    )
+
+
+def _required_goal_confirmation(
+    commands: PlanningInputCommands,
+    goal_id: int,
+    *,
+    operation: str,
+) -> ReferencedGoalChangeConfirmation:
+    if operation not in {"update", "deactivate"}:
+        raise ValueError("Unsupported goal confirmation operation")
+    confirmation = commands.referenced_goal_change_confirmation(
+        goal_id,
+        operation="update" if operation == "update" else "deactivate",
+    )
+    if confirmation is None:
+        raise RuntimeError("Referenced goal confirmation is missing")
+    return confirmation
+
+
+def update_planning_profile(
+    runtime: CoachRuntimeContext,
+    changes: PlanningProfileUpdateInput,
+) -> str:
+    """Update the user-owned planning profile."""
+    return _run_planning_mutation(
+        runtime,
+        operation="update_planning_profile",
+        resource="profile",
+        request={"changes": changes.model_dump(exclude_unset=True, mode="json")},
+        command=lambda commands: commands.update_profile(changes),
+    )
+
+
+def set_planning_availability(
+    runtime: CoachRuntimeContext,
+    weekday: int,
+    available: bool,
+    available_minutes: int | None = None,
+) -> str:
+    """Set one recurring training day through the planning command boundary."""
+    if available and available_minutes is None:
+        return _json(
+            {
+                "status": "needs_clarification",
+                "question": f"Wie viele Minuten kannst du am {WEEKDAY_LABELS[weekday]} trainieren?",
+            }
+        )
+    try:
+        data = AvailabilityInput(
+            weekday=weekday,
+            available=available,
+            available_minutes=available_minutes,
+        )
+    except ValidationError:
+        return _json({"status": "not_updated", "error": {"code": "planning.invalid_input"}})
+    return _run_planning_mutation(
+        runtime,
+        operation="set_planning_availability",
+        resource="availability",
+        request={
+            "weekday": weekday,
+            "available": available,
+            "available_minutes": available_minutes,
+        },
+        command=lambda commands: commands.set_availability(data),
+    )
+
+
+def deactivate_planning_availability(runtime: CoachRuntimeContext, weekday: int) -> str:
+    """Mark one existing recurring training day unavailable."""
+    return _run_planning_mutation(
+        runtime,
+        operation="deactivate_planning_availability",
+        resource="availability",
+        request={"weekday": weekday},
+        command=lambda commands: commands.deactivate_availability(weekday=weekday),
+    )
+
+
+def create_planning_anchor(
+    runtime: CoachRuntimeContext,
+    kind: AnchorKind,
+    distance_m: float,
+    duration_s: float,
+    achieved_on: date | None = None,
+    reliable: bool = True,
+    notes: str | None = None,
+) -> str:
+    """Create one performance anchor with an explicit achievement date."""
+    if achieved_on is None:
+        return _json(
+            {
+                "status": "needs_clarification",
+                "question": "An welchem Datum hast du diese Leistung erreicht?",
+            }
+        )
+    try:
+        data = PerformanceAnchorCreateInput(
+            kind=kind,
+            distance_m=distance_m,
+            duration_s=duration_s,
+            achieved_on=achieved_on,
+            reliable=reliable,
+            notes=notes,
+        )
+    except ValidationError:
+        return _json({"status": "not_updated", "error": {"code": "planning.invalid_input"}})
+    return _run_planning_mutation(
+        runtime,
+        operation="create_planning_anchor",
+        resource="anchor",
+        request={
+            "kind": kind,
+            "distance_m": distance_m,
+            "duration_s": duration_s,
+            "achieved_on": achieved_on.isoformat() if achieved_on is not None else None,
+            "reliable": reliable,
+            "notes": notes,
+        },
+        command=lambda commands: commands.create_performance_anchor(data),
+    )
+
+
+def update_planning_anchor(
+    runtime: CoachRuntimeContext,
+    anchor_id: int,
+    changes: PerformanceAnchorUpdateInput,
+) -> str:
+    """Update one user-owned performance anchor."""
+    return _run_planning_mutation(
+        runtime,
+        operation="update_planning_anchor",
+        resource="anchor",
+        request={
+            "anchor_id": anchor_id,
+            "changes": changes.model_dump(exclude_unset=True, mode="json"),
+        },
+        command=lambda commands: commands.update_performance_anchor(anchor_id, changes),
+    )
+
+
+def deactivate_planning_anchor(runtime: CoachRuntimeContext, anchor_id: int) -> str:
+    """Mark one user-owned performance anchor unreliable."""
+    return _run_planning_mutation(
+        runtime,
+        operation="deactivate_planning_anchor",
+        resource="anchor",
+        request={"anchor_id": anchor_id},
+        command=lambda commands: commands.deactivate_performance_anchor(anchor_id),
+    )
 
 
 def create_running_workout_proposal(

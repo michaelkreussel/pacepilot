@@ -1,6 +1,6 @@
 {
   "source": "synthetic",
-  "contract_version": "coach-tools-v2",
+  "contract_version": "coach-tools-v3",
   "tools": {
     "get_current_recovery_state": [],
     "get_subjective_context": [],
@@ -10,6 +10,16 @@
     "get_activity_details": ["activity_id"],
     "get_health_day": ["day"],
     "get_upcoming_workouts": ["days"],
+    "get_planning_inputs": [],
+    "create_planning_goal": ["event_name", "event_type", "target_date"],
+    "update_planning_goal": ["changes", "goal_id"],
+    "deactivate_planning_goal": ["goal_id"],
+    "update_planning_profile": ["changes"],
+    "set_planning_availability": ["available", "available_minutes", "weekday"],
+    "deactivate_planning_availability": ["weekday"],
+    "create_planning_anchor": ["achieved_on", "distance_m", "duration_s", "kind", "notes", "reliable"],
+    "update_planning_anchor": ["anchor_id", "changes"],
+    "deactivate_planning_anchor": ["anchor_id"],
     "create_running_workout_proposal": ["available_minutes", "suggested_for", "template_id"]
   }
 }

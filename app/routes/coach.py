@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator, Sequence
+from dataclasses import asdict
 from datetime import date, timedelta
 from time import monotonic
 from typing import Annotated
@@ -28,6 +29,7 @@ from app.repositories.coach import (
     conversation_messages,
     create_conversation,
     fail_message,
+    find_assistant_message,
     find_conversation,
     list_conversations,
 )
@@ -45,13 +47,21 @@ from app.services.coach.dependencies import (
     CoachProviderConfiguredDep,
 )
 from app.services.coach.presentation import (
+    PlanningArtifactPresentation,
     WorkoutArtifactPresentation,
+    planning_artifact_presentations,
     workout_artifact_presentation,
     workout_artifact_presentations,
 )
 from app.services.coach.provider import (
     COACH_PROMPT_TEMPLATE_VERSION,
     COACH_TOOL_CONTRACT_VERSION,
+)
+from app.services.planning.planning_commands import (
+    GoalUpdateInput,
+    PlanningInputCommandError,
+    PlanningInputCommands,
+    ReferencedGoalChangeConfirmation,
 )
 from app.services.planning.registry import registered_workout_formats
 from app.services.planning.weekly_planner import (
@@ -89,10 +99,16 @@ def _message_html(
     request: Request,
     item: CoachMessage,
     card: WorkoutArtifactPresentation | None,
+    planning_artifacts: Sequence[PlanningArtifactPresentation] = (),
     *,
     message_state: str | None = None,
 ) -> str:
-    values = context(request, item=item, card=card)
+    values = context(
+        request,
+        item=item,
+        card=card,
+        planning_artifacts=planning_artifacts,
+    )
     if message_state is not None:
         values["message_state"] = message_state
     return templates.get_template("coach/_message.html").render(values)
@@ -148,6 +164,9 @@ def _render_coach(
             older_messages_before=older_messages_before,
             viewing_older_messages=message_before is not None,
             proposal_cards=(_proposal_cards(session, user.id, messages) if selected else {}),
+            planning_artifact_cards=(
+                planning_artifact_presentations(session, user.id, messages) if selected else {}
+            ),
             today=date.today(),
             proposal_error=proposal_error,
             proposal_date=proposal_date or date.today().isoformat(),
@@ -503,6 +522,75 @@ def _event(event: str, payload: dict[str, object]) -> str:
     return f"event: {event}\ndata: {data}\n\n"
 
 
+@router.post("/{conversation_id}/messages/{message_id}/planning-goal-confirmation")
+def confirm_planning_goal_change(
+    conversation_id: int,
+    message_id: int,
+    session: SessionDep,
+    user: CurrentUser,
+) -> RedirectResponse:
+    message = find_assistant_message(session, user.id, conversation_id, message_id)
+    if message is None:
+        raise HTTPException(status_code=404, detail="Zieländerung nicht gefunden")
+    artifact_index = next(
+        (
+            index
+            for index, artifact in enumerate(message.artifacts_json)
+            if artifact.get("resource") == "goal"
+            and artifact.get("status") == "confirmation_required"
+        ),
+        None,
+    )
+    if artifact_index is None:
+        raise HTTPException(status_code=409, detail="Diese Zieländerung ist nicht mehr offen.")
+    artifact = message.artifacts_json[artifact_index]
+    request_payload = artifact.get("request")
+    confirmation_payload = artifact.get("confirmation")
+    operation = artifact.get("operation")
+    if not isinstance(request_payload, dict) or not isinstance(confirmation_payload, dict):
+        raise HTTPException(status_code=409, detail="Die Zielbestätigung ist unvollständig.")
+    try:
+        confirmation = ReferencedGoalChangeConfirmation.model_validate(confirmation_payload)
+        commands = PlanningInputCommands(session, user, as_of=date.today(), commit=False)
+        if operation == "update_planning_goal":
+            goal_id = request_payload.get("goal_id")
+            changes = request_payload.get("changes")
+            if not isinstance(goal_id, int) or not isinstance(changes, dict):
+                raise ValueError("invalid goal update confirmation")
+            fact = commands.update_goal(
+                goal_id,
+                GoalUpdateInput.model_validate(changes),
+                confirmation=confirmation,
+            )
+        elif operation == "deactivate_planning_goal":
+            goal_id = request_payload.get("goal_id")
+            if not isinstance(goal_id, int):
+                raise ValueError("invalid goal deactivation confirmation")
+            fact = commands.deactivate_goal(goal_id, confirmation=confirmation)
+        else:
+            raise ValueError("unsupported goal confirmation operation")
+    except (PlanningInputCommandError, ValidationError, ValueError) as exc:
+        session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Die Zielbestätigung ist veraltet oder ungültig.",
+        ) from exc
+    result = asdict(fact)
+    if fact.target_date is not None:
+        result["target_date"] = fact.target_date.isoformat()
+    updated_artifact = {
+        "type": "planning_input",
+        "resource": "goal",
+        "operation": operation,
+        "result": result,
+    }
+    artifacts = list(message.artifacts_json)
+    artifacts[artifact_index] = updated_artifact
+    message.artifacts_json = artifacts
+    session.commit()
+    return RedirectResponse(f"/coach/{conversation_id}", status_code=303)
+
+
 def _proposal_event_payload(runtime: CoachRuntimeContext) -> dict[str, object]:
     if runtime.conversation_id is None or runtime.assistant_message_id is None:
         raise RuntimeError("Proposal event has no assistant message")
@@ -595,7 +683,12 @@ async def _stream_answer(
                     card = _proposal_card(
                         session, runtime.user_id, conversation_id, assistant_message
                     )
-                    completed_html = _message_html(request, assistant_message, card)
+                    planning_artifacts = planning_artifact_presentations(
+                        session, runtime.user_id, [assistant_message]
+                    ).get(assistant_message.id, ())
+                    completed_html = _message_html(
+                        request, assistant_message, card, planning_artifacts
+                    )
                 logger.info(
                     "AI coach stream completed request_id=%s user_id=%s assistant_message_id=%s "
                     "duration_ms=%s answer_characters=%s",
@@ -644,7 +737,10 @@ async def _stream_answer(
             if assistant_message is None:
                 raise RuntimeError("Failed Coach message is missing") from exc
             card = _proposal_card(session, runtime.user_id, conversation_id, assistant_message)
-            failed_html = _message_html(request, assistant_message, card)
+            planning_artifacts = planning_artifact_presentations(
+                session, runtime.user_id, [assistant_message]
+            ).get(assistant_message.id, ())
+            failed_html = _message_html(request, assistant_message, card, planning_artifacts)
         logger.warning(
             "AI coach stream failed request_id=%s user_id=%s assistant_message_id=%s "
             "failure_category=%s duration_ms=%s",
