@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
@@ -10,6 +11,13 @@ from app.models.user import utcnow
 CoachFailureCategory = Literal[
     "provider_error", "missing_final_answer", "interrupted", "internal_error"
 ]
+RENDERED_MESSAGE_PAGE_SIZE = 40
+
+
+@dataclass(frozen=True)
+class CoachMessagePage:
+    messages: tuple[CoachMessage, ...]
+    older_before: int | None
 
 
 def list_conversations(
@@ -57,6 +65,35 @@ def conversation_messages(
         )
     )
     return list(conversation.messages) if conversation is not None else None
+
+
+def conversation_message_page(
+    session: Session,
+    user_id: int,
+    conversation_id: int,
+    *,
+    before: int | None = None,
+) -> CoachMessagePage:
+    statement = (
+        select(CoachMessage)
+        .join(CoachConversation)
+        .options(selectinload(CoachMessage.tool_calls))
+        .where(
+            CoachMessage.conversation_id == conversation_id,
+            CoachConversation.user_id == user_id,
+        )
+        .order_by(CoachMessage.id.desc())
+        .limit(RENDERED_MESSAGE_PAGE_SIZE + 1)
+    )
+    if before is not None:
+        statement = statement.where(CoachMessage.id < before)
+    newest_first = list(session.scalars(statement))
+    has_older = len(newest_first) > RENDERED_MESSAGE_PAGE_SIZE
+    messages = tuple(reversed(newest_first[:RENDERED_MESSAGE_PAGE_SIZE]))
+    return CoachMessagePage(
+        messages=messages,
+        older_before=messages[0].id if has_older else None,
+    )
 
 
 def find_assistant_message(

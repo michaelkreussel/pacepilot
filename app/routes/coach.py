@@ -7,7 +7,7 @@ from time import monotonic
 from typing import Annotated
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response, StreamingResponse
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
@@ -24,6 +24,7 @@ from app.models import CoachMessage
 from app.onboarding import require_data_access
 from app.repositories.coach import (
     complete_message,
+    conversation_message_page,
     conversation_messages,
     create_conversation,
     fail_message,
@@ -46,6 +47,7 @@ from app.services.coach.dependencies import (
 from app.services.coach.presentation import (
     WorkoutArtifactPresentation,
     workout_artifact_presentation,
+    workout_artifact_presentations,
 )
 from app.services.coach.provider import (
     COACH_PROMPT_TEMPLATE_VERSION,
@@ -78,14 +80,9 @@ def _proposal_card(
 
 
 def _proposal_cards(
-    session: Session, user_id: int, conversation_id: int, messages: Sequence[CoachMessage]
+    session: Session, user_id: int, messages: Sequence[CoachMessage]
 ) -> dict[int, WorkoutArtifactPresentation]:
-    cards: dict[int, WorkoutArtifactPresentation] = {}
-    for message in messages:
-        card = _proposal_card(session, user_id, conversation_id, message)
-        if card is not None:
-            cards[message.id] = card
-    return cards
+    return workout_artifact_presentations(session, user_id, messages)
 
 
 def _message_html(
@@ -108,6 +105,7 @@ def _render_coach(
     configured: bool,
     conversation_id: int | None,
     *,
+    message_before: int | None = None,
     proposal_error: str | None = None,
     proposal_date: str | None = None,
     proposal_minutes: str = "45",
@@ -117,20 +115,23 @@ def _render_coach(
     conversations = list_conversations(session, user.id)
     selected = None
     messages: list[CoachMessage] = []
+    older_messages_before = None
     if conversation_id is not None:
         selected = find_conversation(session, user.id, conversation_id)
         if selected is None:
             raise HTTPException(status_code=404, detail="Chat nicht gefunden")
         if repair_stale_responses(session, user.id, conversation_id):
             session.commit()
-        loaded = conversation_messages(session, user.id, conversation_id)
-        messages = loaded or []
+        page = conversation_message_page(session, user.id, conversation_id, before=message_before)
+        messages = list(page.messages)
+        older_messages_before = page.older_before
     elif conversations:
         selected = conversations[0]
         if repair_stale_responses(session, user.id, selected.id):
             session.commit()
-        loaded = conversation_messages(session, user.id, selected.id)
-        messages = loaded or []
+        page = conversation_message_page(session, user.id, selected.id)
+        messages = list(page.messages)
+        older_messages_before = page.older_before
 
     settings = get_settings()
     return templates.TemplateResponse(
@@ -144,9 +145,9 @@ def _render_coach(
             conversations=conversations,
             conversation=selected,
             messages=messages,
-            proposal_cards=(
-                _proposal_cards(session, user.id, selected.id, messages) if selected else {}
-            ),
+            older_messages_before=older_messages_before,
+            viewing_older_messages=message_before is not None,
+            proposal_cards=(_proposal_cards(session, user.id, messages) if selected else {}),
             today=date.today(),
             proposal_error=proposal_error,
             proposal_date=proposal_date or date.today().isoformat(),
@@ -374,8 +375,16 @@ def coach_conversation(
     session: SessionDep,
     configured: CoachProviderConfiguredDep,
     user: CurrentUser,
+    before: Annotated[int | None, Query(gt=0)] = None,
 ) -> HTMLResponse:
-    return _render_coach(request, session, user, configured, conversation_id)
+    return _render_coach(
+        request,
+        session,
+        user,
+        configured,
+        conversation_id,
+        message_before=before,
+    )
 
 
 @router.post("/conversations")

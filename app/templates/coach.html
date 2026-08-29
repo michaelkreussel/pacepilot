@@ -93,6 +93,12 @@
 
       <div class="min-h-0 flex-1 overflow-y-auto px-3 py-4 sm:px-5 sm:py-5" data-coach-messages aria-live="polite">
         <div class="mx-auto flex min-h-full w-full max-w-3xl flex-col gap-5" data-coach-message-list>
+        {% if older_messages_before or viewing_older_messages %}
+        <nav class="flex flex-wrap items-center justify-center gap-2 text-xs" aria-label="Nachrichtenverlauf">
+          {% if older_messages_before %}<a class="rounded-lg border border-border bg-surface px-3 py-1.5 font-semibold text-foreground transition hover:bg-secondary" href="/coach/{{ conversation.id }}?before={{ older_messages_before }}">Noch ältere Nachrichten</a>{% endif %}
+          {% if viewing_older_messages %}<a class="rounded-lg px-3 py-1.5 font-semibold text-primary-emphasis transition hover:bg-primary-subtle" href="/coach/{{ conversation.id }}">Zu den neuesten Nachrichten</a>{% endif %}
+        </nav>
+        {% endif %}
         {% for item in messages %}
         {% set card = proposal_cards.get(item.id) %}
         {% include "coach/_message.html" %}

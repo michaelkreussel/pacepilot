@@ -9,7 +9,7 @@ from threading import Barrier
 import pytest
 from fastapi import Request
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
@@ -50,6 +50,102 @@ def _new_chat(client: TestClient) -> int:
     response = client.post("/coach/conversations", follow_redirects=False)
     assert response.status_code == 303
     return int(response.headers["location"].rsplit("/", 1)[1])
+
+
+def test_rendered_history_pages_newest_messages_without_gaps_or_duplicates(
+    client: TestClient, session_factory: sessionmaker[Session]
+) -> None:
+    conversation_id = _new_chat(client)
+    with session_factory() as session:
+        conversation = session.get(CoachConversation, conversation_id)
+        assert conversation is not None
+        messages = [
+            CoachMessage(
+                conversation=conversation,
+                role="user",
+                content=f"page-message-{index:02d}",
+                status="completed",
+                completed_at=utcnow(),
+            )
+            for index in range(44)
+        ]
+        latest = CoachMessage(
+            conversation=conversation,
+            role="assistant",
+            content="newest-terminal-response",
+            status="completed",
+            completed_at=utcnow(),
+        )
+        session.add_all((*messages, latest))
+        session.commit()
+        older_before = messages[5].id
+        latest_id = latest.id
+
+    newest = client.get(f"/coach/{conversation_id}")
+
+    assert newest.status_code == 200
+    assert all(f"page-message-{index:02d}" not in newest.text for index in range(5))
+    newest_positions = [newest.text.index(f"page-message-{index:02d}") for index in range(5, 44)]
+    assert newest_positions == sorted(newest_positions)
+    assert f'data-assistant-message="{latest_id}"' in newest.text
+    assert "newest-terminal-response" in newest.text
+    assert f"/coach/{conversation_id}?before={older_before}" in newest.text
+
+    older = client.get(f"/coach/{conversation_id}?before={older_before}")
+
+    assert older.status_code == 200
+    older_positions = [older.text.index(f"page-message-{index:02d}") for index in range(5)]
+    assert older_positions == sorted(older_positions)
+    assert all(f"page-message-{index:02d}" not in older.text for index in range(5, 44))
+    assert "newest-terminal-response" not in older.text
+    assert f'href="/coach/{conversation_id}"' in older.text
+
+
+def test_default_render_query_count_is_independent_of_conversation_length(
+    client: TestClient, session_factory: sessionmaker[Session]
+) -> None:
+    with session_factory() as session:
+        user = session.scalar(select(User))
+        assert user is not None
+        short = CoachConversation(user=user, title="Short conversation")
+        long = CoachConversation(user=user, title="Long conversation")
+        session.add_all((short, long))
+        session.flush()
+        for conversation, count in ((short, 2), (long, 80)):
+            session.add_all(
+                CoachMessage(
+                    conversation=conversation,
+                    role="user" if index % 2 == 0 else "assistant",
+                    content=f"{conversation.title}-{index}",
+                    status="completed",
+                    completed_at=utcnow(),
+                )
+                for index in range(count)
+            )
+        session.commit()
+        short_id = short.id
+        long_id = long.id
+
+    engine = session_factory.kw["bind"]
+
+    def rendered_select_count(path: str) -> int:
+        statements = 0
+
+        def count_selects(*args: object) -> None:
+            nonlocal statements
+            statement = args[2]
+            if isinstance(statement, str) and statement.lstrip().upper().startswith("SELECT"):
+                statements += 1
+
+        event.listen(engine, "before_cursor_execute", count_selects)
+        try:
+            response = client.get(path)
+        finally:
+            event.remove(engine, "before_cursor_execute", count_selects)
+        assert response.status_code == 200
+        return statements
+
+    assert rendered_select_count(f"/coach/{long_id}") == rendered_select_count(f"/coach/{short_id}")
 
 
 def test_follow_up_uses_only_the_latest_twenty_completed_messages(

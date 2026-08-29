@@ -1,10 +1,11 @@
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import Workout, WorkoutRevision
+from app.models import CoachMessage, Workout, WorkoutRevision
 from app.repositories.coach import find_assistant_message
 from app.services.planning.workout_views import (
     WorkoutLifecycleProjection,
@@ -253,6 +254,80 @@ def workout_artifact_presentation(
         if workout.accepted_revision_id is not None
         else None
     )
+    return _workout_artifact_presentation(
+        message.id,
+        workout,
+        current_model,
+        accepted_model,
+    )
+
+
+def workout_artifact_presentations(
+    session: Session,
+    user_id: int,
+    messages: Sequence[CoachMessage],
+) -> dict[int, WorkoutArtifactPresentation]:
+    assistant_messages = {
+        message.id: message for message in messages if message.role == "assistant"
+    }
+    if not assistant_messages:
+        return {}
+    workouts = list(
+        session.scalars(
+            select(Workout)
+            .where(
+                Workout.user_id == user_id,
+                Workout.deleted_at.is_(None),
+                Workout.source_type == "coach_single",
+                Workout.source_assistant_message_id.in_(assistant_messages),
+                Workout.current_revision_id.is_not(None),
+            )
+            .order_by(Workout.id)
+        )
+    )
+    revision_ids = {
+        revision_id
+        for workout in workouts
+        for revision_id in (workout.current_revision_id, workout.accepted_revision_id)
+        if revision_id is not None
+    }
+    revisions = {
+        (revision.id, revision.workout_id): revision
+        for revision in session.scalars(
+            select(WorkoutRevision).where(WorkoutRevision.id.in_(revision_ids))
+        )
+    }
+    cards: dict[int, WorkoutArtifactPresentation] = {}
+    for workout in workouts:
+        message_id = workout.source_assistant_message_id
+        if message_id not in assistant_messages or workout.current_revision_id is None:
+            continue
+        current_model = revisions.get((workout.current_revision_id, workout.id))
+        if current_model is None:
+            continue
+        accepted_model = (
+            revisions.get((workout.accepted_revision_id, workout.id))
+            if workout.accepted_revision_id is not None
+            else None
+        )
+        cards.setdefault(
+            message_id,
+            _workout_artifact_presentation(
+                message_id,
+                workout,
+                current_model,
+                accepted_model,
+            ),
+        )
+    return cards
+
+
+def _workout_artifact_presentation(
+    source_assistant_message_id: int,
+    workout: Workout,
+    current_model: WorkoutRevision,
+    accepted_model: WorkoutRevision | None,
+) -> WorkoutArtifactPresentation:
     current = revision_view(current_model)
     accepted = revision_view(accepted_model) if accepted_model is not None else None
     lifecycle = workout_lifecycle_projection(workout)
@@ -270,7 +345,7 @@ def workout_artifact_presentation(
     return WorkoutArtifactPresentation(
         artifact_type="workout",
         workout_id=workout.id,
-        source_assistant_message_id=message.id,
+        source_assistant_message_id=source_assistant_message_id,
         revision_id=current.id,
         revision_number=current.revision_number,
         accepted_revision_id=accepted.id if accepted is not None else None,
