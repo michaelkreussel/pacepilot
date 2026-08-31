@@ -32,6 +32,12 @@ def test_coach_workout_features_default_to_disabled() -> None:
     assert settings.coach_deferred_quality_templates_enabled is False
 
 
+def test_coach_defaults_to_zai_glm_flash() -> None:
+    settings = Settings(_env_file=None)
+
+    assert settings.llm_model == "z-ai/glm-5.3-flash"
+
+
 @pytest.mark.parametrize(
     ("api_key", "model", "expected"),
     (

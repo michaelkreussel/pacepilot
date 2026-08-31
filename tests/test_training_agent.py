@@ -185,6 +185,10 @@ def test_openrouter_timeout_is_converted_to_sdk_milliseconds(
     assert model.inner.request_timeout == 60_000
     assert model.inner.max_tokens == 4000
     assert model.inner.reasoning == {"effort": "low"}
+    assert model.inner.openrouter_provider == {
+        "order": ["z-ai"],
+        "allow_fallbacks": False,
+    }
 
 
 def test_provider_failure_logs_only_a_privacy_safe_category(

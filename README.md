@@ -195,7 +195,7 @@ Settings are read from environment variables and, for local development, from `.
 | `GARMIN_EMAIL` | unset | Optional credential for unattended Garmin reauthentication |
 | `GARMIN_PASSWORD` | unset | Optional credential for unattended Garmin reauthentication |
 | `LLM_API_KEY` | unset | OpenRouter API key for the optional coach |
-| `LLM_MODEL` | unset | OpenRouter model ID, for example `openai/gpt-4o-mini` |
+| `LLM_MODEL` | `z-ai/glm-5.3-flash` | OpenRouter model ID; Coach calls are routed only through Z.AI |
 | `LLM_TIMEOUT_SECONDS` | `60` | Timeout for an OpenRouter model call |
 | `COACH_WORKOUT_PROPOSALS_ENABLED` | `false` | Enables future local coach workout proposals |
 | `COACH_GARMIN_SYNC_ENABLED` | `false` | Enables future Garmin sync for accepted coach workouts |

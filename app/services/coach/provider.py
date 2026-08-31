@@ -545,6 +545,7 @@ class OpenRouterCoachProvider:
                 # across multi-step tool loops, so the budget needs headroom.
                 max_tokens=4000,
                 reasoning={"effort": "low"},
+                openrouter_provider={"order": ["z-ai"], "allow_fallbacks": False},
                 temperature=0.2,
                 streaming=True,
             )

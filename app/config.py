@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     github_client_id: str | None = None
     github_client_secret: str | None = None
     llm_api_key: str | None = None
-    llm_model: str = ""
+    llm_model: str = "z-ai/glm-5.3-flash"
     llm_timeout_seconds: float = Field(default=60, ge=5, le=180)
     coach_workout_proposals_enabled: bool = False
     coach_garmin_sync_enabled: bool = False
