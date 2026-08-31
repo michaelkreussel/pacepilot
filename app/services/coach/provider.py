@@ -33,8 +33,8 @@ from app.services.planning.planning_commands import (
 from app.services.planning.workout_proposals import RunningTemplateId
 
 logger = logging.getLogger(__name__)
-COACH_PROMPT_TEMPLATE_VERSION = "coach-prompt-v3"
-COACH_TOOL_CONTRACT_VERSION = "coach-tools-v3"
+COACH_PROMPT_TEMPLATE_VERSION = "coach-prompt-v4"
+COACH_TOOL_CONTRACT_VERSION = "coach-tools-v4"
 
 SYSTEM_PROMPT = """Du bist der vorsichtige, präzise Gesundheits- und Trainingscoach von PacePilot.
 
@@ -90,6 +90,18 @@ Planungsdaten:
 - Bei status not_updated behaupte keine Änderung. Eine Textantwort ist niemals die Bestätigung
   für eine Änderung oder Deaktivierung eines von einem angenommenen Zyklus verwendeten Ziels.
 - Verweise nach status updated knapp auf das serverseitige Ergebnis-Artefakt.
+"""
+
+PROGRESS_PROMPT = """
+Fortschrittsauswertung:
+- Bei Fragen nach Fortschritt, Zielentwicklung oder Planerfüllung:
+  rufe immer zuerst get_progress auf.
+- Übersetze "letzte vier Wochen" in days=28. Übergib goal_id nur, wenn sich die Frage eindeutig
+  auf ein zuvor gelesenes Ziel bezieht.
+- Nutze die zurückgegebenen Vergleiche, Abdeckung und Unsicherheit. Ein fehlender angenommener Plan
+  bedeutet nicht, dass keine Aktivitäten oder keine Verlaufsdaten vorhanden sind.
+- Behaupte nur dann, es lägen keine Verlaufsdaten vor, wenn get_progress dafür fehlende Abdeckung
+  ausweist. Bitte den Nutzer nicht um Werte, die das Werkzeug bereits liefert.
 """
 
 
@@ -288,6 +300,20 @@ def get_training_summary(
 
 
 @tool
+def get_progress(
+    runtime: ToolRuntime[CoachRuntimeContext],
+    days: Annotated[int, Field(ge=7, le=84)] = 28,
+    goal_id: Annotated[int | None, Field(gt=0)] = None,
+) -> str:
+    """Compare accepted planned work with observed activities and feedback.
+
+    Use this for progress, plan adherence, goal trajectory, interruptions, or evidence gaps. The
+    result reports synchronization and linkage uncertainty instead of inventing missing progress.
+    """
+    return coach_operations.get_progress(runtime.context, days, goal_id)
+
+
+@tool
 def get_recent_activities(
     runtime: ToolRuntime[CoachRuntimeContext],
     limit: Annotated[int, Field(ge=1, le=10)] = 5,
@@ -469,6 +495,7 @@ COACH_TOOLS = (
     get_subjective_context,
     get_health_trends,
     get_training_summary,
+    get_progress,
     get_recent_activities,
     get_activity_details,
     get_health_day,
@@ -517,6 +544,7 @@ class OpenRouterCoachProvider:
                 # Reasoning models spend output tokens on internal reasoning
                 # across multi-step tool loops, so the budget needs headroom.
                 max_tokens=4000,
+                reasoning={"effort": "low"},
                 temperature=0.2,
                 streaming=True,
             )
@@ -530,6 +558,7 @@ class OpenRouterCoachProvider:
             tools=coach_tools(workout_proposals_enabled=self._workout_proposals_enabled),
             system_prompt=SYSTEM_PROMPT
             + PLANNING_INPUT_PROMPT
+            + PROGRESS_PROMPT
             + (PROPOSAL_PROMPT if self._workout_proposals_enabled else ""),
             context_schema=CoachRuntimeContext,
             middleware=middleware,

@@ -21,6 +21,7 @@ from app.services.analytics.health_trends import (
     get_health_trends,
     get_hrv_baseline,
 )
+from app.services.analytics.progress import ProgressResult, get_progress
 from app.services.analytics.running_baseline import RunningBaseline, get_running_baseline
 from app.services.analytics.running_intensity import (
     PerformanceAnchorLike,
@@ -212,6 +213,15 @@ class AthleteDataService:
             if feedback[activity.id].effort is not None or feedback[activity.id].feel is not None
         )
         return SubjectiveContext(self.as_of, recent)
+
+    def get_progress(self, *, days: int = 28, goal_id: int | None = None) -> ProgressResult:
+        return get_progress(
+            self.session,
+            self.user_id,
+            as_of=self.as_of,
+            days=days,
+            goal_id=goal_id,
+        )
 
     def get_health_day(self, day: date) -> HealthDaySummary | None:
         health = find_health_day(self.session, self.user_id, day)

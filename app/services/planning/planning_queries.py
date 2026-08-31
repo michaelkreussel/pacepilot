@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -17,6 +17,7 @@ from app.models import (
     TrainingPlanWorkout,
     Workout,
 )
+from app.services.planning.workout_definition import workout_metrics
 
 
 @dataclass(frozen=True)
@@ -140,6 +141,11 @@ class TrainingPlanWorkoutFact:
 class PlannedWorkoutFact:
     id: int
     name: str
+    sport: str
+    duration_seconds: float | None
+    distance_meters: float | None
+    duration_complete: bool
+    distance_complete: bool
 
 
 @dataclass(frozen=True)
@@ -152,6 +158,19 @@ class CycleWorkoutFact:
 class TrainingCycleWeekDetail:
     membership: TrainingCycleWeekFact
     workouts: tuple[CycleWorkoutFact, ...]
+
+
+def _planned_workout_fact(workout: Workout) -> PlannedWorkoutFact:
+    metrics = workout_metrics(workout.definition_model)
+    return PlannedWorkoutFact(
+        id=workout.id,
+        name=workout.name,
+        sport=workout.sport,
+        duration_seconds=metrics.duration_seconds if metrics.duration_seconds > 0 else None,
+        distance_meters=metrics.distance_meters if metrics.distance_meters > 0 else None,
+        duration_complete=metrics.duration_complete,
+        distance_complete=metrics.distance_complete,
+    )
 
 
 def _goal_fact(goal: AthleteGoal) -> GoalFact:
@@ -404,16 +423,22 @@ def list_current_training_plans(
 
 
 def list_training_cycle_week_details(
-    session: Session, user_id: int, revision_id: int
+    session: Session,
+    user_id: int,
+    revision_id: int,
+    *,
+    starts_on: date | None = None,
+    ends_on: date | None = None,
 ) -> tuple[TrainingCycleWeekDetail, ...]:
-    weeks = session.scalars(
-        select(TrainingCycleWeek)
-        .where(
-            TrainingCycleWeek.owner_user_id == user_id,
-            TrainingCycleWeek.cycle_revision_id == revision_id,
-        )
-        .order_by(TrainingCycleWeek.position)
+    query = select(TrainingCycleWeek).where(
+        TrainingCycleWeek.owner_user_id == user_id,
+        TrainingCycleWeek.cycle_revision_id == revision_id,
     )
+    if starts_on is not None:
+        query = query.where(TrainingCycleWeek.week_start >= starts_on - timedelta(days=6))
+    if ends_on is not None:
+        query = query.where(TrainingCycleWeek.week_start <= ends_on)
+    weeks = session.scalars(query.order_by(TrainingCycleWeek.position))
     details = []
     for week in weeks:
         rows = session.execute(
@@ -451,7 +476,7 @@ def list_training_cycle_week_details(
                             role=membership.role,
                             scheduled_for=membership.scheduled_for,
                         ),
-                        workout=PlannedWorkoutFact(id=workout.id, name=workout.name),
+                        workout=_planned_workout_fact(workout),
                     )
                     for membership, workout in rows
                 ),

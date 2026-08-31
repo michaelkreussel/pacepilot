@@ -154,6 +154,8 @@ class WorkoutMetrics:
     expanded_step_count: int = 0
     duration_seconds: float = 0
     distance_meters: float = 0
+    duration_complete: bool = True
+    distance_complete: bool = True
 
 
 def new_id() -> str:
@@ -311,6 +313,8 @@ def workout_metrics(definition: WorkoutDefinitionModel) -> WorkoutMetrics:
                     expanded_step_count=multiplier,
                     duration_seconds=duration,
                     distance_meters=distance,
+                    duration_complete=isinstance(block.end, TimeEnd),
+                    distance_complete=isinstance(block.end, DistanceEnd),
                 ),
             )
         return result
@@ -324,6 +328,8 @@ def _add_metrics(left: WorkoutMetrics, right: WorkoutMetrics) -> WorkoutMetrics:
         expanded_step_count=left.expanded_step_count + right.expanded_step_count,
         duration_seconds=left.duration_seconds + right.duration_seconds,
         distance_meters=left.distance_meters + right.distance_meters,
+        duration_complete=left.duration_complete and right.duration_complete,
+        distance_complete=left.distance_complete and right.distance_complete,
     )
 
 

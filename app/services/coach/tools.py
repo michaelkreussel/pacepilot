@@ -9,6 +9,7 @@ from app.models import CoachMessage, User
 from app.repositories.coach import find_assistant_message
 from app.services.analytics.athlete_data import AthleteDataService
 from app.services.analytics.health_trends import HealthMetric
+from app.services.analytics.progress import ProgressReferenceError
 from app.services.coach.conversation import CoachRuntimeContext
 from app.services.planning.planning_commands import (
     AnchorKind,
@@ -125,6 +126,26 @@ def get_training_summary(
             session, runtime.user_id, as_of=runtime.as_of
         ).get_training_summary(days)
     return _json(asdict(summary))
+
+
+def get_progress(
+    runtime: CoachRuntimeContext,
+    days: int = 28,
+    goal_id: int | None = None,
+) -> str:
+    """Compare accepted planned work with observed activities and feedback.
+
+    Use this for progress, plan adherence, goal trajectory, interruptions, or evidence gaps. The
+    result reports synchronization and linkage uncertainty instead of inventing missing progress.
+    """
+    try:
+        with runtime.session_factory() as session:
+            progress = AthleteDataService(
+                session, runtime.user_id, as_of=runtime.as_of
+            ).get_progress(days=days, goal_id=goal_id)
+    except ProgressReferenceError:
+        return _json({"status": "not_found"})
+    return _json(asdict(progress))
 
 
 def get_recent_activities(

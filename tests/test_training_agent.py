@@ -28,6 +28,7 @@ from app.models import (
     CoachMessage,
     CoachToolCall,
     DailyHealth,
+    GarminSyncState,
     PerformanceAnchor,
     TrainingCycle,
     TrainingCycleRevision,
@@ -56,6 +57,7 @@ from app.services.coach.tools import (
     create_running_workout_proposal,
     get_health_day,
     get_planning_inputs,
+    get_progress,
     get_subjective_context,
     set_planning_availability,
     update_planning_profile,
@@ -182,6 +184,7 @@ def test_openrouter_timeout_is_converted_to_sdk_milliseconds(
     assert type(model).__name__ == "_ToolMarkupAdapter"
     assert model.inner.request_timeout == 60_000
     assert model.inner.max_tokens == 4000
+    assert model.inner.reasoning == {"effort": "low"}
 
 
 def test_provider_failure_logs_only_a_privacy_safe_category(
@@ -2133,6 +2136,79 @@ def test_subjective_context_tool_uses_runtime_user_scope(
     assert [item["name"] for item in payload["recent_activity_feedback"]] == ["Lauf"]
     assert payload["recent_activity_feedback"][0]["effort"] == 7
     assert payload["recent_activity_feedback"][0]["effort_source"] == "garmin"
+
+
+def test_progress_tool_is_bounded_and_uses_runtime_authority(
+    session_factory: sessionmaker[Session],
+) -> None:
+    day = date(2026, 8, 11)
+    with session_factory() as session:
+        first = User(display_name="Erste Person")
+        second = User(display_name="Zweite Person")
+        session.add_all((first, second))
+        session.flush()
+        first_goal = AthleteGoal(
+            user_id=first.id,
+            event_type="10k",
+            target_date=date(2026, 10, 1),
+        )
+        hidden_goal = AthleteGoal(
+            user_id=second.id,
+            event_type="marathon",
+            target_date=date(2026, 11, 1),
+        )
+        session.add_all((first_goal, hidden_goal))
+        session.flush()
+        session.add_all(
+            [
+                Activity(
+                    user_id=first.id,
+                    garmin_activity_id="visible-progress",
+                    name="Sichtbar",
+                    activity_type="running",
+                    started_at=datetime(2026, 8, 10, 8),
+                    duration_s=1_800,
+                ),
+                Activity(
+                    user_id=second.id,
+                    garmin_activity_id="hidden-progress",
+                    name="Verborgen",
+                    activity_type="running",
+                    started_at=datetime(2026, 8, 10, 8),
+                    duration_s=9_999,
+                ),
+                GarminSyncState(
+                    user_id=first.id,
+                    resource="activities",
+                    status="ok",
+                    backfill_complete=True,
+                    oldest_synced_date=date(2026, 7, 1),
+                    newest_synced_date=day,
+                ),
+            ]
+        )
+        session.commit()
+        first_id = first.id
+        first_goal_id = first_goal.id
+        hidden_goal_id = hidden_goal.id
+
+    runtime = CoachRuntimeContext(first_id, day, session_factory)
+    payload = json.loads(get_progress(runtime=runtime, days=7, goal_id=first_goal_id))
+    hidden = json.loads(get_progress(runtime=runtime, days=7, goal_id=hidden_goal_id))
+    tool = {item.name: item for item in coach_tools(workout_proposals_enabled=False)}[
+        "get_progress"
+    ]
+    schema_model: Any = tool.tool_call_schema
+    schema = schema_model if isinstance(schema_model, dict) else schema_model.model_json_schema()
+
+    assert payload["period"] == {"start": "2026-08-05", "end": "2026-08-11", "days": 7}
+    assert payload["goal"]["id"] == first_goal_id
+    assert payload["comparison"]["observed_activity_sessions"] == 1
+    assert "Verborgen" not in json.dumps(payload, ensure_ascii=False)
+    assert hidden == {"status": "not_found"}
+    assert set(schema["properties"]) == {"days", "goal_id"}
+    assert schema["properties"]["days"]["minimum"] == 7
+    assert schema["properties"]["days"]["maximum"] == 84
 
 
 def test_agent_stream_uses_trusted_runtime_context(
