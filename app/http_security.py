@@ -100,7 +100,7 @@ class SecurityHeadersMiddleware:
                 headers = MutableHeaders(scope=message)
                 headers["X-Content-Type-Options"] = "nosniff"
                 headers["X-Frame-Options"] = "DENY"
-                headers["Referrer-Policy"] = "no-referrer"
+                headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
                 headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
                 headers["Content-Security-Policy"] = (
                     "base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'"
