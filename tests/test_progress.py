@@ -1,3 +1,4 @@
+import json
 from dataclasses import asdict
 from datetime import date, datetime
 
@@ -21,6 +22,8 @@ from app.models import (
     Workout,
 )
 from app.services.analytics.progress import ProgressReferenceError, get_progress
+from app.services.coach.conversation import CoachRuntimeContext
+from app.services.coach.tools import get_adaptive_context
 
 AS_OF = date(2026, 6, 28)
 
@@ -469,6 +472,10 @@ def test_progress_recomputes_changed_goal_activity_feedback_and_accepted_plan(
         session.commit()
 
         before = get_progress(session, user.id, as_of=AS_OF, days=7, goal_id=goal.id)
+        runtime = CoachRuntimeContext(user.id, AS_OF, session_factory)
+        before_context = json.loads(
+            get_adaptive_context(runtime, focus="progress", days=7, goal_id=goal.id)
+        )
         assert before.comparison.completed_planned_sessions == 0
         assert before.comparison.observed_activity_sessions == 0
         assert before.comparison.planned_sessions == 1
@@ -512,6 +519,9 @@ def test_progress_recomputes_changed_goal_activity_feedback_and_accepted_plan(
         session.commit()
 
         after = get_progress(session, user.id, as_of=AS_OF, days=7, goal_id=goal.id)
+        after_context = json.loads(
+            get_adaptive_context(runtime, focus="progress", days=7, goal_id=goal.id)
+        )
 
     assert first_revision.id != second_revision.id
     assert after.goal is not None and after.goal.target_date == date(2026, 9, 6)
@@ -520,6 +530,11 @@ def test_progress_recomputes_changed_goal_activity_feedback_and_accepted_plan(
     assert after.comparison.completed_planned_sessions == 0
     assert after.comparison.observed_activity_sessions == 1
     assert after.feedback.completion_percent == 90
+    assert before_context != after_context
+    assert after_context["planning"]["goals"][0]["target_date"] == "2026-09-06"
+    assert after_context["progress"]["plan"]["phase"] == "peak"
+    assert after_context["progress"]["comparison"]["observed_activity_sessions"] == 1
+    assert after_context["progress"]["feedback"]["completion_percent"] == 90
 
 
 def test_progress_ignores_projected_impact_and_rejects_cross_user_goal(session_factory) -> None:

@@ -1,6 +1,6 @@
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -41,7 +41,10 @@ from app.services.analytics.training_trends import (
     get_training_summary,
     get_training_timeline,
 )
+from app.services.planning.planning_queries import get_planning_inputs
 from app.services.planning.workout_definition import workout_metrics
+
+AdaptiveContextFocus = Literal["planning", "progress", "recovery", "next_session"]
 
 
 @dataclass(frozen=True)
@@ -312,6 +315,44 @@ class AthleteDataService:
             goal_id=goal_id,
         )
 
+    def get_adaptive_context(
+        self,
+        *,
+        focus: AdaptiveContextFocus,
+        days: int = 28,
+        goal_id: int | None = None,
+    ) -> dict[str, object]:
+        if not 7 <= days <= 84:
+            raise ValueError("days must be between 7 and 84")
+
+        context: dict[str, object] = {
+            "as_of": self.as_of,
+            "focus": focus,
+            "period_days": days,
+        }
+        if focus in {"planning", "progress", "next_session"}:
+            context["planning"] = asdict(
+                get_planning_inputs(self.session, self.user_id, as_of=self.as_of)
+            )
+            context["progress"] = asdict(self.get_progress(days=days, goal_id=goal_id))
+        if focus in {"planning", "next_session"}:
+            context["scheduled_work"] = tuple(asdict(item) for item in self.get_upcoming_workouts())
+        if focus in {"progress", "recovery", "next_session"}:
+            summary = self.get_training_summary(days)
+            source_available = summary.data_status in {"ok", "partial", "empty"}
+            if focus in {"recovery", "next_session"}:
+                health = self.get_health_trends(days)
+                context["recovery"] = asdict(self.get_current_recovery_state())
+                context["health_coverage"] = tuple(asdict(item) for item in health.coverage)
+                context["training_load"] = _adaptive_training_payload(summary)
+            context["completed_work"] = (
+                tuple(asdict(item) for item in self.get_recent_workouts(5))
+                if source_available
+                else ()
+            )
+            context["effective_feedback"] = asdict(self.get_subjective_context())
+        return context
+
     def get_health_day(self, day: date) -> HealthDaySummary | None:
         health = find_health_day(self.session, self.user_id, day)
         if health is None:
@@ -387,3 +428,20 @@ def _bounded_metric_trend_payload(trend: MetricTrend) -> dict[str, Any]:
     )
     payload["points"] = payload["points"][-31:]
     return payload
+
+
+def _adaptive_training_payload(summary: TrainingSummary) -> dict[str, object]:
+    source_available = summary.data_status in {"ok", "partial", "empty"}
+    return {
+        "period": {"start": summary.start, "end": summary.end, "days": summary.days},
+        "data_status": summary.data_status,
+        "history_complete": summary.history_complete,
+        "oldest_synced_date": summary.oldest_synced_date,
+        "newest_synced_date": summary.newest_synced_date,
+        "workouts": summary.workouts if source_available else None,
+        "active_days": summary.active_days if source_available else None,
+        "total_duration_s": summary.total_duration_s if source_available else None,
+        "running_distance_m": summary.running_distance_m if source_available else None,
+        "exercise_load": summary.exercise_load if source_available else None,
+        "hard_workouts": summary.hard_workouts if source_available else None,
+    }

@@ -24,6 +24,7 @@ from langchain_openrouter import ChatOpenRouter
 from langgraph.runtime import Runtime
 from pydantic import Field
 
+from app.services.analytics.athlete_data import AdaptiveContextFocus
 from app.services.analytics.health_trends import HealthMetric
 from app.services.coach import tools as coach_operations
 from app.services.coach.agent import CoachEvent
@@ -39,8 +40,8 @@ from app.services.planning.safety_triage import IllnessSignal, PainInput
 from app.services.planning.workout_proposals import RunningTemplateId
 
 logger = logging.getLogger(__name__)
-COACH_PROMPT_TEMPLATE_VERSION = "coach-prompt-v6"
-COACH_TOOL_CONTRACT_VERSION = "coach-tools-v5"
+COACH_PROMPT_TEMPLATE_VERSION = "coach-prompt-v7"
+COACH_TOOL_CONTRACT_VERSION = "coach-tools-v6"
 
 
 def _exception_source(exc: Exception) -> str:
@@ -113,14 +114,32 @@ Planungsdaten:
 
 PROGRESS_PROMPT = """
 Fortschrittsauswertung:
-- Bei Fragen nach Fortschritt, Zielentwicklung oder Planerfüllung:
-  rufe immer zuerst get_progress auf.
+- Bei reinen Datenfragen nach Fortschritt, Zielentwicklung oder Planerfüllung rufe get_progress
+  auf. Vor einer daraus abgeleiteten materiellen Empfehlung nutze get_adaptive_context mit
+  focus progress.
 - Übersetze "letzte vier Wochen" in days=28. Übergib goal_id nur, wenn sich die Frage eindeutig
   auf ein zuvor gelesenes Ziel bezieht.
 - Nutze die zurückgegebenen Vergleiche, Abdeckung und Unsicherheit. Ein fehlender angenommener Plan
   bedeutet nicht, dass keine Aktivitäten oder keine Verlaufsdaten vorhanden sind.
 - Behaupte nur dann, es lägen keine Verlaufsdaten vor, wenn get_progress dafür fehlende Abdeckung
   ausweist. Bitte den Nutzer nicht um Werte, die das Werkzeug bereits liefert.
+"""
+
+ADAPTIVE_CONTEXT_PROMPT = """
+Adaptive Empfehlungen und Unsicherheit:
+- Rufe vor jeder materiellen Empfehlung get_adaptive_context mit genau dem relevanten Fokus auf:
+  planning für Planungsentscheidungen, progress für Ziel- oder Planfortschritt, recovery für die
+  aktuelle Erholung und next_session für die Empfehlung zur nächsten Einheit. Übergib goal_id nur,
+  wenn sich die Frage eindeutig auf ein zuvor gelesenes eigenes Ziel bezieht.
+- Nenne in der Antwort die wichtigsten datierten Belege und Annahmen in Nutzersprache. Gib keinen
+  Rohkontext aus und nutze keine zweite Modellprüfung.
+- Unterscheide fehlende, partielle, nicht unterstützte und synchronisiert leere Abdeckung. Behandle
+  fehlende oder nicht unterstützte Beobachtungen niemals als Null oder als Beleg.
+- Fahre bei einer nicht-materiellen Annahme fort und benenne sie knapp. Stelle genau eine
+  fokussierte Frage nur dann, wenn die Antwort die Empfehlung oder ausführbaren Inhalte materiell
+  ändern könnte.
+- Stoppe nur strukturell ungültige, unautorisierte oder ungültige externe Operationen mit einem
+  konkreten Grund. Lehne unterstützte gewöhnliche Trainingsfragen nicht pauschal ab.
 """
 
 FEEDBACK_PROMPT = """
@@ -383,6 +402,21 @@ def get_current_recovery_state(runtime: ToolRuntime[CoachRuntimeContext]) -> str
     athlete should train hard. The result includes source dates and confidence.
     """
     return coach_operations.get_current_recovery_state(runtime.context)
+
+
+@tool
+def get_adaptive_context(
+    runtime: ToolRuntime[CoachRuntimeContext],
+    focus: AdaptiveContextFocus,
+    days: Annotated[int, Field(ge=7, le=84)] = 28,
+    goal_id: Annotated[int | None, Field(gt=0)] = None,
+) -> str:
+    """Select fresh, bounded durable evidence for one material coaching recommendation.
+
+    Use this before recommending a plan, interpreting progress, evaluating recovery, or advising
+    on the next session. The focus determines which dated state and coverage sections are returned.
+    """
+    return coach_operations.get_adaptive_context(runtime.context, focus, days, goal_id)
 
 
 @tool
@@ -662,6 +696,7 @@ def create_running_workout_proposal(
 
 
 COACH_TOOLS = (
+    get_adaptive_context,
     get_current_recovery_state,
     get_subjective_context,
     get_health_trends,
@@ -732,6 +767,7 @@ class OpenRouterCoachProvider:
             model,
             tools=coach_tools(workout_proposals_enabled=self._workout_proposals_enabled),
             system_prompt=SYSTEM_PROMPT
+            + ADAPTIVE_CONTEXT_PROMPT
             + PLANNING_INPUT_PROMPT
             + PROGRESS_PROMPT
             + FEEDBACK_PROMPT

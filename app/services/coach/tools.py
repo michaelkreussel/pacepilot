@@ -7,7 +7,7 @@ from pydantic import ValidationError
 
 from app.models import CoachMessage, PostSessionFeedback, PreSessionFeedback, User
 from app.repositories.coach import find_assistant_message
-from app.services.analytics.athlete_data import AthleteDataService
+from app.services.analytics.athlete_data import AdaptiveContextFocus, AthleteDataService
 from app.services.analytics.health_trends import HealthMetric
 from app.services.analytics.progress import ProgressReferenceError
 from app.services.coach.conversation import CoachRuntimeContext
@@ -84,6 +84,23 @@ def get_current_recovery_state(runtime: CoachRuntimeContext) -> str:
             session, runtime.user_id, as_of=runtime.as_of
         ).get_current_recovery_state()
     return _json(asdict(state))
+
+
+def get_adaptive_context(
+    runtime: CoachRuntimeContext,
+    focus: AdaptiveContextFocus,
+    days: int = 28,
+    goal_id: int | None = None,
+) -> str:
+    """Select fresh, bounded durable context for one material coaching focus."""
+    try:
+        with runtime.session_factory() as session:
+            context = AthleteDataService(
+                session, runtime.user_id, as_of=runtime.as_of
+            ).get_adaptive_context(focus=focus, days=days, goal_id=goal_id)
+    except ProgressReferenceError:
+        return _json({"status": "not_found"})
+    return _json(context)
 
 
 def get_subjective_context(runtime: CoachRuntimeContext) -> str:

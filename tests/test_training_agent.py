@@ -58,6 +58,7 @@ from app.services.coach.tools import (
     create_planning_anchor,
     create_planning_goal,
     create_running_workout_proposal,
+    get_adaptive_context,
     get_health_day,
     get_planning_inputs,
     get_progress,
@@ -2620,6 +2621,95 @@ def test_subjective_context_tool_uses_runtime_user_scope(
     assert payload["recent_activity_feedback"][0]["effort_source"] == "garmin"
 
 
+@pytest.mark.parametrize(
+    ("sync_status", "expected_status", "expected_workouts"),
+    [
+        (None, "not_synced", None),
+        ("partial", "partial", 1),
+        ("unsupported", "unsupported", None),
+        ("empty", "empty", 0),
+    ],
+)
+def test_adaptive_context_is_focus_bounded_and_preserves_coverage_meaning(
+    session_factory: sessionmaker[Session],
+    sync_status: str | None,
+    expected_status: str,
+    expected_workouts: int | None,
+) -> None:
+    day = date(2026, 8, 11)
+    with session_factory() as session:
+        user = User(display_name="Adaptive context")
+        session.add(user)
+        session.flush()
+        if sync_status is not None:
+            session.add(
+                GarminSyncState(
+                    user_id=user.id,
+                    resource="activities",
+                    status=sync_status,
+                    backfill_complete=sync_status == "empty",
+                    oldest_synced_date=day if sync_status == "empty" else None,
+                    newest_synced_date=day,
+                )
+            )
+        if sync_status == "partial":
+            session.add(
+                Activity(
+                    user_id=user.id,
+                    garmin_activity_id="adaptive-visible",
+                    name="Sichtbarer Lauf",
+                    activity_type="running",
+                    started_at=datetime(2026, 8, 10, 8),
+                    duration_s=1_800,
+                )
+            )
+        session.commit()
+        user_id = user.id
+
+    runtime = CoachRuntimeContext(user_id, day, session_factory)
+    recovery = json.loads(get_adaptive_context(runtime, focus="recovery", days=7))
+    planning = json.loads(get_adaptive_context(runtime, focus="planning", days=7))
+    next_session = json.loads(get_adaptive_context(runtime, focus="next_session", days=7))
+
+    assert set(recovery) == {
+        "as_of",
+        "focus",
+        "period_days",
+        "recovery",
+        "health_coverage",
+        "training_load",
+        "completed_work",
+        "effective_feedback",
+    }
+    assert recovery["training_load"]["data_status"] == expected_status
+    assert recovery["training_load"]["workouts"] == expected_workouts
+    assert set(planning) == {
+        "as_of",
+        "focus",
+        "period_days",
+        "planning",
+        "progress",
+        "scheduled_work",
+    }
+    assert set(next_session) == set(recovery) | {
+        "planning",
+        "progress",
+        "scheduled_work",
+    }
+
+
+def test_adaptive_context_prompt_requires_evidence_and_one_material_question() -> None:
+    prompt = coach_provider_module.ADAPTIVE_CONTEXT_PROMPT.lower()
+
+    assert "get_adaptive_context" in prompt
+    assert "vor jeder materiellen empfehlung" in prompt
+    assert "nicht-materiellen annahme" in prompt
+    assert "stelle genau eine" in prompt
+    assert "fokussierte frage" in prompt
+    assert "rohkontext" in prompt
+    assert "zweite modellprüfung" in prompt
+
+
 def test_progress_tool_is_bounded_and_uses_runtime_authority(
     session_factory: sessionmaker[Session],
 ) -> None:
@@ -2677,6 +2767,12 @@ def test_progress_tool_is_bounded_and_uses_runtime_authority(
     runtime = CoachRuntimeContext(first_id, day, session_factory)
     payload = json.loads(get_progress(runtime=runtime, days=7, goal_id=first_goal_id))
     hidden = json.loads(get_progress(runtime=runtime, days=7, goal_id=hidden_goal_id))
+    adaptive = json.loads(
+        get_adaptive_context(runtime, focus="progress", days=7, goal_id=first_goal_id)
+    )
+    hidden_adaptive = json.loads(
+        get_adaptive_context(runtime, focus="progress", days=7, goal_id=hidden_goal_id)
+    )
     tool = {item.name: item for item in coach_tools(workout_proposals_enabled=False)}[
         "get_progress"
     ]
@@ -2685,9 +2781,11 @@ def test_progress_tool_is_bounded_and_uses_runtime_authority(
 
     assert payload["period"] == {"start": "2026-08-05", "end": "2026-08-11", "days": 7}
     assert payload["goal"]["id"] == first_goal_id
+    assert adaptive["progress"]["goal"]["id"] == first_goal_id
     assert payload["comparison"]["observed_activity_sessions"] == 1
     assert "Verborgen" not in json.dumps(payload, ensure_ascii=False)
     assert hidden == {"status": "not_found"}
+    assert hidden_adaptive == {"status": "not_found"}
     assert set(schema["properties"]) == {"days", "goal_id"}
     assert schema["properties"]["days"]["minimum"] == 7
     assert schema["properties"]["days"]["maximum"] == 84
