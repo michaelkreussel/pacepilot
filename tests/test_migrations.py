@@ -1,4 +1,5 @@
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -1583,3 +1584,27 @@ def test_single_active_coach_response_migration_repairs_duplicates_and_enforces_
             "(1, 'assistant', '', 'streaming', '2026-08-28 16:00:00')"
         )
     engine.dispose()
+
+
+def test_upgrade_database_preserves_application_logging(tmp_path: Path) -> None:
+    database_path = tmp_path / "logging.db"
+    log_path = tmp_path / "app.log"
+    file_handler = logging.FileHandler(log_path, encoding="utf-8")
+    root_logger = logging.getLogger()
+    root_logger.addHandler(file_handler)
+    previous_level = root_logger.level
+    root_logger.setLevel(logging.INFO)
+    probe_logger = logging.getLogger("app.migrations_probe")
+    previously_disabled = probe_logger.disabled
+    try:
+        upgrade_database(f"sqlite:///{database_path.as_posix()}")
+
+        assert probe_logger.disabled is False
+        probe_logger.info("logging survives migrations")
+        file_handler.flush()
+        assert "logging survives migrations" in log_path.read_text(encoding="utf-8")
+    finally:
+        root_logger.removeHandler(file_handler)
+        file_handler.close()
+        root_logger.setLevel(previous_level)
+        probe_logger.disabled = previously_disabled

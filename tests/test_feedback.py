@@ -1,3 +1,4 @@
+from dataclasses import asdict
 from datetime import date, timedelta
 
 import pytest
@@ -16,6 +17,7 @@ from app.models import (
     WorkoutValidationRun,
 )
 from app.models.user import utcnow
+from app.services.analytics.athlete_data import AthleteDataService
 from app.services.analytics.subjective_feedback import effective_activity_feedback
 from app.services.planning.feedback_service import (
     FeedbackCommands,
@@ -599,6 +601,17 @@ def test_effective_activity_feedback_prefers_garmin_and_falls_back_per_field(
         assert (feedback[garmin.id].feel, feedback[garmin.id].feel_source) == (4, "garmin")
         assert (feedback[manual.id].effort, feedback[manual.id].effort_source) == (7, "manual")
         assert (feedback[manual.id].feel, feedback[manual.id].feel_source) == (3, "manual")
+
+        context = AthleteDataService(session, user.id).get_subjective_context()
+        context_feedback = {item.activity_id: item for item in context.recent_activity_feedback}
+        assert (context_feedback[garmin.id].effort, context_feedback[garmin.id].effort_source) == (
+            8,
+            "garmin",
+        )
+        post_details = [asdict(item) for item in context.recent_post_session_feedback]
+        assert all(
+            "session_rpe" not in item and "overall_feel" not in item for item in post_details
+        )
 
 
 def test_german_feedback_forms_routes_and_export(

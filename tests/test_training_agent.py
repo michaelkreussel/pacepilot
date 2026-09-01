@@ -12,8 +12,9 @@ import pytest
 from fastapi.testclient import TestClient
 from langchain.messages import AIMessage, AIMessageChunk, ToolMessage
 from langchain_core.language_models import BaseChatModel
-from langchain_core.outputs import ChatGenerationChunk
+from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from langchain_core.tools import tool
+from langchain_core.utils.function_calling import convert_to_openai_tool
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -30,6 +31,8 @@ from app.models import (
     DailyHealth,
     GarminSyncState,
     PerformanceAnchor,
+    PostSessionFeedback,
+    PreSessionFeedback,
     TrainingCycle,
     TrainingCycleRevision,
     User,
@@ -69,6 +72,7 @@ from app.services.planning.planning_commands import (
     PlanningProfileUpdateInput,
 )
 from app.services.planning.registry import WORKOUT_FORMAT_IDS
+from app.services.planning.safety_triage import IllnessSignal, PainInput
 from app.services.planning.workout_views import workout_lifecycle_projection
 
 
@@ -222,6 +226,8 @@ def test_provider_failure_logs_only_a_privacy_safe_category(
 
     assert asyncio.run(collect()) == [CoachEvent("failed", failure_category="provider_error")]
     assert "failure_category=provider_error" in caplog.text
+    assert "error_type=RuntimeError" in caplog.text
+    assert "error_source=test_training_agent.astream:" in caplog.text
     assert "private provider response detail" not in caplog.text
 
 
@@ -264,6 +270,71 @@ class _ReasoningFakeChatModel(BaseChatModel):
             if run_manager is not None:
                 await run_manager.on_llm_new_token(answer_token, chunk=chunk)
             yield chunk
+
+
+class _BindingRecordingFakeChatModel(BaseChatModel):
+    """Uses the default bind_tools so binding produces a real RunnableBinding."""
+
+    observed_astream_kwargs: list[dict[str, Any]] = []
+    observed_generate_kwargs: list[dict[str, Any]] = []
+
+    @property
+    def _llm_type(self) -> str:
+        return "binding-recording-fake"
+
+    def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
+        return self.bind(
+            tools=[convert_to_openai_tool(tool) for tool in tools],
+            **kwargs,
+        )
+
+    def _generate(
+        self,
+        messages: Any,
+        stop: Any = None,
+        run_manager: Any = None,
+        **kwargs: Any,
+    ) -> Any:
+        del messages, run_manager
+        self.observed_generate_kwargs.append(kwargs)
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(content="ok"))])
+
+    async def _astream(
+        self,
+        messages: Any,
+        stop: Any = None,
+        run_manager: Any = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[ChatGenerationChunk]:
+        del messages, stop
+        self.observed_astream_kwargs.append(kwargs)
+        if run_manager is not None:
+            await run_manager.on_llm_new_token(
+                "ok", chunk=ChatGenerationChunk(message=AIMessageChunk(content="ok"))
+            )
+        yield ChatGenerationChunk(message=AIMessageChunk(content="ok", chunk_position="last"))
+
+
+@pytest.mark.asyncio
+async def test_tool_markup_adapter_preserves_bound_tools_on_model_requests() -> None:
+    @tool
+    def get_recent_activities(limit: int = 5) -> str:
+        """List recent activities."""
+
+        return "[]"
+
+    inner = _BindingRecordingFakeChatModel()
+    bound = coach_provider_module._ToolMarkupAdapter(inner=inner).bind_tools(
+        [get_recent_activities]
+    )
+
+    chunks = [chunk async for chunk in bound.astream([("user", "Test")])]
+    assert [chunk.content for chunk in chunks] == ["ok"]
+    assert inner.observed_astream_kwargs and "tools" in inner.observed_astream_kwargs[0]
+
+    message = await bound.ainvoke([("user", "Test")])
+    assert message.content == "ok"
+    assert inner.observed_generate_kwargs and "tools" in inner.observed_generate_kwargs[0]
 
 
 class _ToolCallingFakeChatModel(BaseChatModel):
@@ -314,6 +385,68 @@ class _ToolCallingFakeChatModel(BaseChatModel):
             self.observed_tool_result = str(tool_result.content)
             chunk = ChatGenerationChunk(
                 message=AIMessageChunk(content=self.answer, chunk_position="last")
+            )
+        if run_manager is not None:
+            await run_manager.on_llm_new_token(chunk.text, chunk=chunk)
+        yield chunk
+
+
+class _DeferredThenToolCallingFakeChatModel(BaseChatModel):
+    invocation_count: int = 0
+    first_answer: str = "Ich schaue kurz deine letzte Aktivität raus."
+
+    @property
+    def _llm_type(self) -> str:
+        return "deferred-then-tool-calling-fake"
+
+    def _generate(self, *args: Any, **kwargs: Any) -> Any:
+        raise NotImplementedError
+
+    def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
+        del tools, kwargs
+        return self
+
+    async def _astream(
+        self,
+        messages: Any,
+        stop: Any = None,
+        run_manager: Any = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[ChatGenerationChunk]:
+        del stop, kwargs
+        self.invocation_count += 1
+        tool_result = next(
+            (message for message in reversed(messages) if isinstance(message, ToolMessage)),
+            None,
+        )
+        if self.invocation_count == 1:
+            chunk = ChatGenerationChunk(
+                message=AIMessageChunk(
+                    content=self.first_answer,
+                    chunk_position="last",
+                )
+            )
+        elif tool_result is None:
+            chunk = ChatGenerationChunk(
+                message=AIMessageChunk(
+                    content="",
+                    tool_call_chunks=[
+                        {
+                            "name": "record_post_session_feedback",
+                            "args": "{}",
+                            "id": "deferred-tool-call",
+                            "index": 0,
+                        }
+                    ],
+                    chunk_position="last",
+                )
+            )
+        else:
+            chunk = ChatGenerationChunk(
+                message=AIMessageChunk(
+                    content="Dein Feedback wurde gespeichert.",
+                    chunk_position="last",
+                )
             )
         if run_manager is not None:
             await run_manager.on_llm_new_token(chunk.text, chunk=chunk)
@@ -1020,6 +1153,351 @@ def test_conversation_updates_availability_with_durable_server_artifact(
     reloaded = client.get(f"/coach/{conversation_id}")
     assert reloaded.status_code == 200
     assert completed_html in reloaded.text
+
+
+def test_conversation_records_pre_and_post_feedback_with_durable_artifacts(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+) -> None:
+    with session_factory() as session:
+        user = session.scalar(select(User))
+        assert user is not None
+        workout = Workout(
+            user_id=user.id,
+            name="Morgenlauf",
+            sport="running",
+            definition_version=1,
+            definition={"blocks": []},
+            source_type="manual",
+        )
+        activity = Activity(
+            user_id=user.id,
+            garmin_activity_id="coach-feedback-run",
+            name="Abendlauf",
+            activity_type="running",
+            started_at=utcnow(),
+        )
+        session.add_all([workout, activity])
+        session.commit()
+        workout_id = workout.id
+        activity_id = activity.id
+
+    class FeedbackAgent:
+        call_count = 0
+        later_context: dict[str, object] | None = None
+
+        async def stream(
+            self,
+            messages: Sequence[CoachHistoryMessage],
+            runtime: CoachRuntimeContext,
+        ) -> AsyncIterator[CoachEvent]:
+            del messages
+            if self.call_count == 0:
+                result = json.loads(
+                    coach_operations.record_pre_session_feedback(
+                        runtime,
+                        workout_id=workout_id,
+                        pain=PainInput(
+                            present=True,
+                            location="Knie",
+                            severity=3,
+                            alters_gait=False,
+                            worsens_with_activity=False,
+                        ),
+                        illness_signal=IllnessSignal.NONE,
+                        available_minutes=35,
+                        notes="Heute nur locker.",
+                    )
+                )
+                assert result == {
+                    "status": "recorded",
+                    "artifact": {"type": "feedback", "resource": "pre_session"},
+                }
+                assert (
+                    json.loads(
+                        coach_operations.record_pre_session_feedback(
+                            runtime,
+                            workout_id=workout_id,
+                            pain=PainInput(
+                                present=True,
+                                location="Knie",
+                                severity=3,
+                                alters_gait=False,
+                                worsens_with_activity=False,
+                            ),
+                            illness_signal=IllnessSignal.NONE,
+                            available_minutes=35,
+                            notes="Heute nur locker.",
+                        )
+                    )
+                    == result
+                )
+                answer = "Dein Feedback vor dem Training wurde gespeichert."
+            else:
+                result = json.loads(
+                    coach_operations.record_post_session_feedback(
+                        runtime,
+                        activity_id=activity_id,
+                        completion_percent=80,
+                        session_rpe=8,
+                        overall_feel=2,
+                        pain=PainInput(present=False),
+                        stopped_reason="Zu müde",
+                        notes="Bewusst verkürzt.",
+                    )
+                )
+                assert result == {
+                    "status": "recorded",
+                    "artifact": {"type": "feedback", "resource": "post_session"},
+                }
+                assert (
+                    json.loads(
+                        coach_operations.record_post_session_feedback(
+                            runtime,
+                            activity_id=activity_id,
+                            completion_percent=80,
+                            session_rpe=8,
+                            overall_feel=2,
+                            pain=PainInput(present=False),
+                            stopped_reason="Zu müde",
+                            notes="Bewusst verkürzt.",
+                        )
+                    )
+                    == result
+                )
+                self.later_context = json.loads(get_subjective_context(runtime))
+                answer = "Dein Feedback nach dem Training wurde gespeichert."
+            self.call_count += 1
+            yield CoachEvent("artifact_available", artifact_type="feedback")
+            yield CoachEvent("answer_text", text=answer)
+            yield CoachEvent("completed")
+
+    fake = FeedbackAgent()
+    app.dependency_overrides[get_coach_agent_factory] = lambda: lambda: fake
+    conversation_id = _new_chat(client)
+
+    pre_response = client.post(
+        f"/coach/{conversation_id}/messages",
+        data={
+            "message": (
+                "Vor Workout "
+                f"{workout_id}: Knie 3 von 10, kein verändertes Gangbild, nicht krank, "
+                "35 Minuten verfügbar. Heute nur locker."
+            )
+        },
+    )
+    post_response = client.post(
+        f"/coach/{conversation_id}/messages",
+        data={
+            "message": (
+                f"Aktivität {activity_id}: 80 Prozent, RPE 8, Gefühl 2 von 5, "
+                "keine Schmerzen, wegen Müdigkeit bewusst verkürzt."
+            )
+        },
+    )
+
+    assert pre_response.status_code == post_response.status_code == 200
+    pre_html = cast(str, _sse_payload(pre_response.text, "answer.completed")["html"])
+    post_html = cast(str, _sse_payload(post_response.text, "answer.completed")["html"])
+    assert "Feedback vor dem Training gespeichert" in pre_html
+    assert f"Workout #{workout_id}" in pre_html
+    assert "35 Minuten" in pre_html
+    assert "Knie · 3/10" in pre_html
+    assert "Feedback nach dem Training gespeichert" in post_html
+    assert f"Aktivität #{activity_id}" in post_html
+    assert "80 %" in post_html
+    assert "8/10" in post_html
+    assert "Zu müde" in post_html
+
+    assert fake.later_context is not None
+    pre_context = cast(list[dict[str, object]], fake.later_context["recent_pre_session_feedback"])
+    post_context = cast(list[dict[str, object]], fake.later_context["recent_post_session_feedback"])
+    activity_context = cast(list[dict[str, object]], fake.later_context["recent_activity_feedback"])
+    assert pre_context[0]["workout_id"] == workout_id
+    assert pre_context[0]["pain_severity"] == 3
+    assert pre_context[0]["available_minutes"] == 35
+    assert post_context[0]["activity_id"] == activity_id
+    assert post_context[0]["completion_percent"] == 80
+    assert post_context[0]["stopped_reason"] == "Zu müde"
+    assert activity_context[0]["effort"] == 8
+    assert activity_context[0]["feel"] == 2
+
+    with session_factory() as session:
+        pre = list(session.scalars(select(PreSessionFeedback)))
+        post = list(session.scalars(select(PostSessionFeedback)))
+        assert len(pre) == len(post) == 1
+        assistants = list(
+            session.scalars(
+                select(CoachMessage)
+                .where(
+                    CoachMessage.conversation_id == conversation_id,
+                    CoachMessage.role == "assistant",
+                )
+                .order_by(CoachMessage.id)
+            )
+        )
+        assert [item.artifacts_json[0]["resource"] for item in assistants] == [
+            "pre_session",
+            "post_session",
+        ]
+        pre_result = cast(dict[str, object], assistants[0].artifacts_json[0]["result"])
+        post_result = cast(dict[str, object], assistants[1].artifacts_json[0]["result"])
+        assert pre_result["feedback_id"] == pre[0].id
+        assert post_result["feedback_id"] == post[0].id
+        other_user = User(display_name="Andere Person")
+        session.add(other_user)
+        session.flush()
+        assert planning_artifact_presentations(session, other_user.id, assistants) == {}
+
+    reloaded = client.get(f"/coach/{conversation_id}")
+    assert reloaded.status_code == 200
+    assert pre_html in reloaded.text
+    assert post_html in reloaded.text
+
+
+@pytest.mark.parametrize("ambiguous_kind", ["pain", "illness"])
+def test_ambiguous_conversational_health_feedback_asks_once_and_writes_nothing(
+    ambiguous_kind: str,
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+) -> None:
+    with session_factory() as session:
+        user = session.scalar(select(User))
+        assert user is not None
+        workout = Workout(
+            user_id=user.id,
+            name="Testlauf",
+            sport="running",
+            definition_version=1,
+            definition={"blocks": []},
+            source_type="manual",
+        )
+        session.add(workout)
+        session.commit()
+        workout_id = workout.id
+
+    class AmbiguousFeedbackAgent:
+        async def stream(
+            self,
+            messages: Sequence[CoachHistoryMessage],
+            runtime: CoachRuntimeContext,
+        ) -> AsyncIterator[CoachEvent]:
+            del messages
+            if ambiguous_kind == "pain":
+                result = json.loads(
+                    coach_operations.record_pre_session_feedback(
+                        runtime,
+                        workout_id=workout_id,
+                        pain=PainInput(present=True, location="Knie"),
+                    )
+                )
+            else:
+                result = json.loads(
+                    coach_operations.record_pre_session_feedback(
+                        runtime,
+                        workout_id=workout_id,
+                        illness_signal=IllnessSignal.UNKNOWN,
+                    )
+                )
+            assert result["status"] == "needs_clarification"
+            assert set(result) == {"status", "question"}
+            yield CoachEvent("answer_text", text=cast(str, result["question"]))
+            yield CoachEvent("completed")
+
+    app.dependency_overrides[get_coach_agent_factory] = lambda: lambda: AmbiguousFeedbackAgent()
+    conversation_id = _new_chat(client)
+    response = client.post(
+        f"/coach/{conversation_id}/messages",
+        data={"message": "Ich habe Beschwerden."},
+    )
+
+    assert response.status_code == 200
+    assert response.text.count("event: answer.delta") == 1
+    with session_factory() as session:
+        assert list(session.scalars(select(PreSessionFeedback))) == []
+        assistant = session.scalar(
+            select(CoachMessage).where(
+                CoachMessage.conversation_id == conversation_id,
+                CoachMessage.role == "assistant",
+            )
+        )
+        assert assistant is not None and assistant.artifacts_json == []
+
+
+def test_conversational_feedback_rejects_cross_user_targets(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+) -> None:
+    with session_factory() as session:
+        other = User(display_name="Andere Person")
+        session.add(other)
+        session.flush()
+        workout = Workout(
+            user_id=other.id,
+            name="Fremder Lauf",
+            sport="running",
+            definition_version=1,
+            definition={"blocks": []},
+            source_type="manual",
+        )
+        activity = Activity(
+            user_id=other.id,
+            garmin_activity_id="foreign-feedback-run",
+            name="Fremde Aktivität",
+            activity_type="running",
+            started_at=utcnow(),
+        )
+        session.add_all([workout, activity])
+        session.commit()
+        workout_id = workout.id
+        activity_id = activity.id
+
+    class CrossUserFeedbackAgent:
+        async def stream(
+            self,
+            messages: Sequence[CoachHistoryMessage],
+            runtime: CoachRuntimeContext,
+        ) -> AsyncIterator[CoachEvent]:
+            del messages
+            pre = json.loads(
+                coach_operations.record_pre_session_feedback(
+                    runtime,
+                    workout_id=workout_id,
+                    available_minutes=45,
+                )
+            )
+            post = json.loads(
+                coach_operations.record_post_session_feedback(
+                    runtime,
+                    activity_id=activity_id,
+                    session_rpe=7,
+                )
+            )
+            assert pre["error"]["code"] == "feedback.workout_not_found"
+            assert post["error"]["code"] == "feedback.activity_not_found"
+            yield CoachEvent("answer_text", text="Dieses Training wurde nicht gefunden.")
+            yield CoachEvent("completed")
+
+    app.dependency_overrides[get_coach_agent_factory] = lambda: lambda: CrossUserFeedbackAgent()
+    conversation_id = _new_chat(client)
+    response = client.post(
+        f"/coach/{conversation_id}/messages",
+        data={"message": "Speichere Feedback für fremde Daten."},
+    )
+
+    assert response.status_code == 200
+    assert "event: answer.completed" in response.text
+    assert "Dieses Training wurde nicht gefunden." in response.text
+    with session_factory() as session:
+        assert list(session.scalars(select(PreSessionFeedback))) == []
+        assert list(session.scalars(select(PostSessionFeedback))) == []
+        assistant = session.scalar(
+            select(CoachMessage).where(
+                CoachMessage.conversation_id == conversation_id,
+                CoachMessage.role == "assistant",
+            )
+        )
+        assert assistant is not None and assistant.artifacts_json == []
 
 
 def test_ambiguous_availability_returns_one_question_and_persists_nothing(
@@ -2253,6 +2731,42 @@ def test_agent_stream_uses_trusted_runtime_context(
 
 
 @pytest.mark.asyncio
+async def test_langchain_backend_continues_after_read_only_json_list_tool_result(
+    session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @tool("get_recent_activities")
+    def fake_recent_activities_tool() -> str:
+        """Return a deterministic list of recent activities for adapter testing."""
+        return '[{"id":42,"name":"Krafttraining"}]'
+
+    model = _ToolCallingFakeChatModel(
+        tool_name="get_recent_activities",
+        tool_args={},
+        answer="Die Aktivität wurde gefunden.",
+    )
+    monkeypatch.setattr(coach_provider_module, "ChatOpenRouter", lambda **_: model)
+    monkeypatch.setattr(
+        coach_provider_module, "coach_tools", lambda **_: [fake_recent_activities_tool]
+    )
+    agent = OpenRouterCoachProvider(api_key="test-key", model_id="fake/model", timeout_seconds=5)
+
+    events = [
+        event
+        async for event in agent.stream(
+            [CoachHistoryMessage("user", "Zeige meine letzte Aktivität.")],
+            CoachRuntimeContext(1, date(2026, 8, 24), session_factory),
+        )
+    ]
+
+    assert all(event.type != "artifact_available" for event in events)
+    assert events[-2:] == [
+        CoachEvent("answer_text", text="Die Aktivität wurde gefunden."),
+        CoachEvent("completed"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_langchain_backend_maps_only_valid_proposal_artifact(
     session_factory: sessionmaker[Session],
     monkeypatch: pytest.MonkeyPatch,
@@ -2325,6 +2839,82 @@ async def test_langchain_backend_maps_valid_planning_artifact(
 
 
 @pytest.mark.asyncio
+async def test_langchain_backend_maps_valid_feedback_artifact(
+    session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @tool("record_post_session_feedback")
+    def fake_feedback_tool() -> str:
+        """Store deterministic post-session feedback for adapter testing."""
+        return '{"status":"recorded","artifact":{"type":"feedback","resource":"post_session"}}'
+
+    model = _ToolCallingFakeChatModel(
+        tool_name="record_post_session_feedback",
+        tool_args={},
+        answer="Das Feedback ist gespeichert.",
+    )
+    monkeypatch.setattr(coach_provider_module, "ChatOpenRouter", lambda **_: model)
+    monkeypatch.setattr(coach_provider_module, "coach_tools", lambda **_: [fake_feedback_tool])
+    agent = OpenRouterCoachProvider(
+        api_key="test-key",
+        model_id="fake/model",
+        timeout_seconds=5,
+    )
+    events = [
+        event
+        async for event in agent.stream(
+            [CoachHistoryMessage("user", "Speichere mein Feedback.")],
+            CoachRuntimeContext(1, date(2026, 8, 29), session_factory),
+        )
+    ]
+
+    assert CoachEvent("artifact_available", artifact_type="feedback") in events
+    assert events[-1] == CoachEvent("completed")
+
+
+@pytest.mark.parametrize(
+    "first_answer",
+    [
+        "Ich schaue kurz deine letzte Aktivität raus.",
+        "Das Feedback ist gespeichert und fließt jetzt in deine Verlaufsbetrachtung ein.",
+    ],
+)
+@pytest.mark.asyncio
+async def test_langchain_backend_completes_promised_tool_action_in_same_turn(
+    first_answer: str,
+    session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @tool("record_post_session_feedback")
+    def fake_feedback_tool() -> str:
+        """Store deterministic post-session feedback for adapter testing."""
+        return '{"status":"recorded","artifact":{"type":"feedback","resource":"post_session"}}'
+
+    model = _DeferredThenToolCallingFakeChatModel(first_answer=first_answer)
+    monkeypatch.setattr(coach_provider_module, "ChatOpenRouter", lambda **_: model)
+    monkeypatch.setattr(coach_provider_module, "coach_tools", lambda **_: [fake_feedback_tool])
+    agent = OpenRouterCoachProvider(
+        api_key="test-key",
+        model_id="fake/model",
+        timeout_seconds=5,
+    )
+    events = [
+        event
+        async for event in agent.stream(
+            [CoachHistoryMessage("user", "Ja, vollständig; es war etwas schwer.")],
+            CoachRuntimeContext(1, date(2026, 8, 31), session_factory),
+        )
+    ]
+
+    assert model.invocation_count == 3
+    assert CoachEvent("artifact_available", artifact_type="feedback") in events
+    assert events[-2:] == [
+        CoachEvent("answer_text", text="Dein Feedback wurde gespeichert."),
+        CoachEvent("completed"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_provider_adapter_logs_and_maps_provider_errors(
     session_factory: sessionmaker[Session],
     monkeypatch: pytest.MonkeyPatch,
@@ -2350,6 +2940,8 @@ async def test_provider_adapter_logs_and_maps_provider_errors(
     log_call = logger.warning.call_args
     assert "AI coach agent failed" in log_call.args[0]
     assert "failure_category=provider_error" in log_call.args[0]
+    assert "error_type=%s error_source=%s" in log_call.args[0]
+    assert "RuntimeError" in log_call.args
     assert private_question not in repr(log_call)
 
 

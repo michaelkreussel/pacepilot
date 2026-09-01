@@ -94,12 +94,19 @@ def test_coach_tool_and_prompt_contracts_are_versioned_and_stable() -> None:
 
     assert fixture["contract_version"] == COACH_TOOL_CONTRACT_VERSION
     assert actual == fixture["tools"]
-    assert COACH_PROMPT_TEMPLATE_VERSION == "coach-prompt-v4"
+    assert COACH_PROMPT_TEMPLATE_VERSION == "coach-prompt-v6"
     assert "rufe immer zuerst get_progress auf" in PROGRESS_PROMPT
     assert "keine Verlaufsdaten" in PROGRESS_PROMPT
     assert {"user_id", "workout_id", "definition", "idempotency_key"}.isdisjoint(
         actual["create_running_workout_proposal"]
     )
+    for tool_name in ("record_pre_session_feedback", "record_post_session_feedback"):
+        assert {
+            "user_id",
+            "conversation_id",
+            "assistant_message_id",
+            "source",
+        }.isdisjoint(actual[tool_name])
 
 
 def test_prompt_injection_corpus_cannot_expand_coach_mutation_authority() -> None:
@@ -125,6 +132,8 @@ def test_prompt_injection_corpus_cannot_expand_coach_mutation_authority() -> Non
         "create_planning_anchor",
         "update_planning_anchor",
         "deactivate_planning_anchor",
+        "record_pre_session_feedback",
+        "record_post_session_feedback",
     }
     assert tool_names - allowed_mutations == {
         "get_current_recovery_state",

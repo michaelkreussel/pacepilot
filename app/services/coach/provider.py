@@ -8,15 +8,20 @@ from typing import Annotated, Any
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import (
+    AgentMiddleware,
+    AgentState,
     ModelCallLimitMiddleware,
     ToolCallLimitMiddleware,
+    hook_config,
 )
 from langchain.tools import ToolRuntime, tool
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, AIMessageChunk
+from langchain_core.messages import AIMessage, AIMessageChunk, SystemMessage, ToolMessage
 from langchain_core.outputs import ChatGenerationChunk, ChatResult
+from langchain_core.runnables import RunnableBinding
 from langchain_core.tools import BaseTool
 from langchain_openrouter import ChatOpenRouter
+from langgraph.runtime import Runtime
 from pydantic import Field
 
 from app.services.analytics.health_trends import HealthMetric
@@ -30,11 +35,23 @@ from app.services.planning.planning_commands import (
     PerformanceAnchorUpdateInput,
     PlanningProfileUpdateInput,
 )
+from app.services.planning.safety_triage import IllnessSignal, PainInput
 from app.services.planning.workout_proposals import RunningTemplateId
 
 logger = logging.getLogger(__name__)
-COACH_PROMPT_TEMPLATE_VERSION = "coach-prompt-v4"
-COACH_TOOL_CONTRACT_VERSION = "coach-tools-v4"
+COACH_PROMPT_TEMPLATE_VERSION = "coach-prompt-v6"
+COACH_TOOL_CONTRACT_VERSION = "coach-tools-v5"
+
+
+def _exception_source(exc: Exception) -> str:
+    traceback = exc.__traceback__
+    if traceback is None:
+        return "unknown"
+    while traceback.tb_next is not None:
+        traceback = traceback.tb_next
+    module = traceback.tb_frame.f_globals.get("__name__", "unknown")
+    return f"{module}.{traceback.tb_frame.f_code.co_name}:{traceback.tb_lineno}"
+
 
 SYSTEM_PROMPT = """Du bist der vorsichtige, präzise Gesundheits- und Trainingscoach von PacePilot.
 
@@ -60,6 +77,8 @@ Sicherheit und Datenqualität:
 - Nutze nur so viele Werkzeuge und Daten wie für die Frage erforderlich.
 - Beschreibe deine internen Überlegungen und Werkzeugnutzung nicht; die Oberfläche zeigt
   sichere Statusinformationen separat an.
+- Kündige keine spätere Datenprüfung oder Werkzeughandlung an. Wenn eine Prüfung oder Speicherung
+  nötig ist, führe das passende Werkzeug im selben Turn aus und antworte erst danach abschließend.
 """
 
 PROPOSAL_PROMPT = """
@@ -104,6 +123,20 @@ Fortschrittsauswertung:
   ausweist. Bitte den Nutzer nicht um Werte, die das Werkzeug bereits liefert.
 """
 
+FEEDBACK_PROMPT = """
+Feedback:
+- Ermittle vor dem Speichern das exakte eigene Workout mit get_upcoming_workouts oder die exakte
+  eigene Aktivität mit get_recent_activities. Übernimm keine ID aus fremden oder unklaren Daten.
+- Speichere nur ausdrücklich genannte Werte für Anstrengung, Gefühl, Abschluss, Schmerz,
+  Krankheit, Abbruchgrund, Verfügbarkeit oder Notizen mit record_pre_session_feedback oder
+  record_post_session_feedback. Erfinde insbesondere niemals Schmerzstärke oder Krankheitszeichen.
+- Frage bei mehrdeutigem Schmerz oder Krankheitsgefühl genau einmal gezielt nach. Bei status
+  needs_clarification stelle ausschließlich die zurückgegebene Frage; bei status not_recorded
+  behaupte keine Speicherung.
+- Verweise nach status recorded knapp auf das serverseitige Feedback-Artefakt. Gespeichertes
+  Feedback kann bei späteren Empfehlungen über get_subjective_context erneut gelesen werden.
+"""
+
 
 def _date_context_message(as_of: date) -> dict[str, str]:
     return {
@@ -123,6 +156,86 @@ _DSML_INVOKE_PATTERN = re.compile(
     re.DOTALL,
 )
 _DSML_TOOL_CALLS_TAG_PATTERN = re.compile(r"</?｜DSML｜tool_calls>")
+_DEFERRED_TOOL_ACTION_PATTERNS = (
+    re.compile(
+        r"\bich\s+(?:schaue|prüfe|checke)\s+(?:mir\s+)?(?:kurz\s+)?(?:dein|deine|die|das)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bich\s+werde\s+.{0,80}\b(?:prüfen|nachsehen|nachschauen|heraussuchen)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:i(?:'ll| will)|let me)\s+(?:check|look up|inspect)\b",
+        re.IGNORECASE,
+    ),
+)
+_FEEDBACK_STORED_CLAIM_PATTERNS = (
+    re.compile(r"\bfeedback\s+(?:ist|wurde)\s+gespeichert\b", re.IGNORECASE),
+    re.compile(r"\b(?:ich\s+speichere|speichere\s+ich)\b", re.IGNORECASE),
+    re.compile(r"\bfeedback\s+(?:has been|is)\s+(?:saved|recorded)\b", re.IGNORECASE),
+)
+_FEEDBACK_RECORD_TOOLS = {
+    "record_pre_session_feedback",
+    "record_post_session_feedback",
+}
+
+
+def _promises_deferred_tool_action(message: AIMessage) -> bool:
+    return not message.tool_calls and any(
+        pattern.search(message.text) for pattern in _DEFERRED_TOOL_ACTION_PATTERNS
+    )
+
+
+def _claims_feedback_was_stored(message: AIMessage) -> bool:
+    return not message.tool_calls and any(
+        pattern.search(message.text) for pattern in _FEEDBACK_STORED_CLAIM_PATTERNS
+    )
+
+
+def _has_successful_feedback_record(messages: Sequence[object]) -> bool:
+    return any(
+        isinstance(message, ToolMessage)
+        and message.name in _FEEDBACK_RECORD_TOOLS
+        and _artifact_type(message.content) == "feedback"
+        for message in messages
+    )
+
+
+class _CompletePromisedToolActionMiddleware(AgentMiddleware[AgentState[Any], CoachRuntimeContext]):
+    @hook_config(can_jump_to=["model"])
+    def after_model(
+        self,
+        state: AgentState[Any],
+        runtime: Runtime[CoachRuntimeContext],
+    ) -> dict[str, Any] | None:
+        del runtime
+        last_message = state["messages"][-1]
+        if not isinstance(last_message, AIMessage):
+            return None
+        if _claims_feedback_was_stored(last_message) and not _has_successful_feedback_record(
+            state["messages"]
+        ):
+            correction = (
+                "Du hast behauptet, Feedback sei gespeichert, aber in diesem Turn wurde kein "
+                "Feedback-Speicherwerkzeug erfolgreich ausgeführt. Ermittle bei Bedarf zuerst "
+                "die exakte eigene Aktivität oder das Workout und rufe dann "
+                "record_pre_session_feedback oder record_post_session_feedback auf. Bestätige "
+                "die Speicherung nur nach status recorded und dem Feedback-Artefakt."
+            )
+        elif _promises_deferred_tool_action(last_message):
+            correction = (
+                "Du hast eine Datenprüfung oder Speicherung angekündigt, aber kein Werkzeug "
+                "aufgerufen. Führe die angekündigte Handlung jetzt im selben Turn mit den "
+                "verfügbaren Werkzeugen aus. Antworte erst nach dem Werkzeugergebnis "
+                "abschließend."
+            )
+        else:
+            return None
+        return {
+            "messages": [SystemMessage(content=correction)],
+            "jump_to": "model",
+        }
 
 
 def _parse_dsml_tool_calls(content: str) -> list[dict[str, Any]] | None:
@@ -176,17 +289,28 @@ class _ToolMarkupAdapter(BaseChatModel):
     """
 
     inner: Any
+    # bind_tools wraps the inner model in a RunnableBinding whose merged kwargs
+    # (the serialized tools) are only applied through its public invoke API.
+    # The private _astream/_generate paths used below bypass that API, so the
+    # bound kwargs must be carried explicitly or the model silently receives
+    # no tools at all.
+    bound_kwargs: dict[str, Any] = {}
 
     @property
     def _llm_type(self) -> str:
         return "tool-markup-adapter"
 
     def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
-        return _ToolMarkupAdapter(inner=self.inner.bind_tools(tools, **kwargs))
+        bound = self.inner.bind_tools(tools, **kwargs)
+        if isinstance(bound, RunnableBinding):
+            return _ToolMarkupAdapter(inner=bound.bound, bound_kwargs=dict(bound.kwargs))
+        return _ToolMarkupAdapter(inner=bound)
 
     def _generate(self, *args: Any, **kwargs: Any) -> ChatResult:  # type: ignore[override]
         messages = args[0] if args else kwargs.get("input")
-        result = self.inner._generate(messages, stop=kwargs.get("stop"))
+        call_kwargs: dict[str, Any] = {**self.bound_kwargs, **kwargs}
+        stop = call_kwargs.pop("stop", None)
+        result = self.inner._generate(messages, stop=stop, **call_kwargs)
         for generation in result.generations:
             if isinstance(generation.message, AIMessage):
                 converted = _split_dsml_content(generation.message.content)
@@ -212,7 +336,10 @@ class _ToolMarkupAdapter(BaseChatModel):
         # astream API fires callback token events for the raw inner chunks,
         # which would leak unparsed markup into the visible answer stream.
         chunks: list[ChatGenerationChunk] = [
-            chunk async for chunk in self.inner._astream(messages, stop=stop, **kwargs)
+            chunk
+            async for chunk in self.inner._astream(
+                messages, stop=stop, **{**self.bound_kwargs, **kwargs}
+            )
         ]
         has_native_tool_calls = any(
             getattr(chunk.message, "tool_call_chunks", None) for chunk in chunks
@@ -469,6 +596,50 @@ def deactivate_planning_anchor(
 
 
 @tool
+def record_pre_session_feedback(
+    runtime: ToolRuntime[CoachRuntimeContext],
+    workout_id: Annotated[int, Field(gt=0)],
+    pain: PainInput | None = None,
+    illness_signal: IllnessSignal | None = None,
+    available_minutes: Annotated[int | None, Field(ge=0, le=1440)] = None,
+    notes: Annotated[str | None, Field(max_length=2000)] = None,
+) -> str:
+    """Record explicit pre-session feedback for one user-owned workout."""
+    return coach_operations.record_pre_session_feedback(
+        runtime.context,
+        workout_id=workout_id,
+        pain=pain,
+        illness_signal=illness_signal,
+        available_minutes=available_minutes,
+        notes=notes,
+    )
+
+
+@tool
+def record_post_session_feedback(
+    runtime: ToolRuntime[CoachRuntimeContext],
+    activity_id: Annotated[int, Field(gt=0)],
+    completion_percent: Annotated[int | None, Field(ge=0, le=100)] = None,
+    session_rpe: Annotated[int | None, Field(ge=1, le=10)] = None,
+    overall_feel: Annotated[int | None, Field(ge=1, le=5)] = None,
+    pain: PainInput | None = None,
+    stopped_reason: Annotated[str | None, Field(max_length=500)] = None,
+    notes: Annotated[str | None, Field(max_length=2000)] = None,
+) -> str:
+    """Record explicit post-session feedback for one user-owned activity."""
+    return coach_operations.record_post_session_feedback(
+        runtime.context,
+        activity_id=activity_id,
+        completion_percent=completion_percent,
+        session_rpe=session_rpe,
+        overall_feel=overall_feel,
+        pain=pain,
+        stopped_reason=stopped_reason,
+        notes=notes,
+    )
+
+
+@tool
 def create_running_workout_proposal(
     runtime: ToolRuntime[CoachRuntimeContext],
     suggested_for: date,
@@ -510,6 +681,8 @@ COACH_TOOLS = (
     create_planning_anchor,
     update_planning_anchor,
     deactivate_planning_anchor,
+    record_pre_session_feedback,
+    record_post_session_feedback,
 )
 
 
@@ -553,6 +726,7 @@ class OpenRouterCoachProvider:
         middleware: Any = (
             ModelCallLimitMiddleware(run_limit=4, exit_behavior="error"),
             ToolCallLimitMiddleware(run_limit=6, exit_behavior="error"),
+            _CompletePromisedToolActionMiddleware(),
         )
         return create_agent(
             model,
@@ -560,6 +734,7 @@ class OpenRouterCoachProvider:
             system_prompt=SYSTEM_PROMPT
             + PLANNING_INPUT_PROMPT
             + PROGRESS_PROMPT
+            + FEEDBACK_PROMPT
             + (PROPOSAL_PROMPT if self._workout_proposals_enabled else ""),
             context_schema=CoachRuntimeContext,
             middleware=middleware,
@@ -666,14 +841,16 @@ class OpenRouterCoachProvider:
                                     yield CoachEvent(
                                         "artifact_available", artifact_type=artifact_type
                                     )
-        except Exception:
+        except Exception as exc:
             logger.warning(
                 "AI coach agent failed model=%s user_id=%s failure_category=provider_error "
-                "duration_ms=%s tool_calls=%s",
+                "duration_ms=%s tool_calls=%s error_type=%s error_source=%s",
                 self._model_id,
                 runtime.user_id,
                 round((monotonic() - started_at) * 1000),
                 tool_calls,
+                type(exc).__name__,
+                _exception_source(exc),
             )
             yield CoachEvent("failed", failure_category="provider_error")
             return
@@ -740,11 +917,17 @@ def _artifact_type(content: object) -> str | None:
         payload = json.loads(content)
     except json.JSONDecodeError:
         return None
-    artifact = payload.get("artifact") if isinstance(payload, dict) else None
-    if payload.get("status") not in {"created", "updated"} or not isinstance(artifact, dict):
+    if not isinstance(payload, dict):
+        return None
+    artifact = payload.get("artifact")
+    if payload.get("status") not in {"created", "updated", "recorded"} or not isinstance(
+        artifact, dict
+    ):
         return None
     if artifact.get("type") == "workout_proposal":
         return "workout"
     if artifact.get("type") == "planning_input":
         return "planning_input"
+    if artifact.get("type") == "feedback":
+        return "feedback"
     return None

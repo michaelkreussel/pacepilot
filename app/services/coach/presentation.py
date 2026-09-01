@@ -110,6 +110,65 @@ ANCHOR_LABELS = {
     "time_trial": "Zeitlauf",
     "manual": "Manuell",
 }
+ILLNESS_LABELS = {
+    "none": "Keine Krankheitszeichen",
+    "mild_upper_respiratory": "Leichte Erkältungszeichen",
+    "fever": "Fieber",
+    "systemic": "Deutliches allgemeines Krankheitsgefühl",
+    "cardiopulmonary_warning": "Kardiopulmonales Warnzeichen",
+}
+
+
+def _feedback_artifact_presentation(
+    artifact: dict[str, object],
+) -> PlanningArtifactPresentation | None:
+    resource = artifact.get("resource")
+    request = artifact.get("request")
+    result = artifact.get("result")
+    if not isinstance(resource, str) or resource not in {"pre_session", "post_session"}:
+        return None
+    if not isinstance(request, dict) or not isinstance(result, dict):
+        return None
+    details: list[tuple[str, str]] = []
+    if resource == "pre_session":
+        workout_id = result.get("workout_id")
+        if not isinstance(workout_id, int):
+            return None
+        details.append(("Bezug", f"Workout #{workout_id}"))
+        if "available_minutes" in request and isinstance(
+            minutes := result.get("available_minutes"), int
+        ):
+            details.append(("Verfügbar", f"{minutes} Minuten"))
+        if "illness_signal" in request and isinstance(signal := result.get("illness_signal"), str):
+            details.append(("Krankheit", ILLNESS_LABELS.get(signal, signal)))
+        title = "Feedback vor dem Training gespeichert"
+    else:
+        activity_id = result.get("activity_id")
+        if not isinstance(activity_id, int):
+            return None
+        details.append(("Bezug", f"Aktivität #{activity_id}"))
+        if isinstance(completion := result.get("completion_percent"), int):
+            details.append(("Abgeschlossen", f"{completion} %"))
+        if isinstance(effort := result.get("session_rpe"), int | float):
+            details.append(("Anstrengung", f"{float(effort):g}/10"))
+        if isinstance(feel := result.get("overall_feel"), int):
+            details.append(("Gefühl", f"{feel}/5"))
+        if isinstance(reason := result.get("stopped_reason"), str):
+            details.append(("Abbruchgrund", reason))
+        title = "Feedback nach dem Training gespeichert"
+    if "pain" in request and isinstance(pain := result.get("pain"), dict):
+        if pain.get("present") is False:
+            details.append(("Schmerzen", "Keine"))
+        elif pain.get("present") is True:
+            location = pain.get("location")
+            severity = pain.get("severity")
+            label = str(location) if isinstance(location, str) else "Gemeldet"
+            if isinstance(severity, int):
+                label += f" · {severity}/10"
+            details.append(("Schmerzen", label))
+    if isinstance(notes := result.get("notes"), str):
+        details.append(("Notiz", notes))
+    return PlanningArtifactPresentation(resource=resource, title=title, details=tuple(details))
 
 
 def _planning_artifact_presentation(
@@ -118,7 +177,11 @@ def _planning_artifact_presentation(
     conversation_id: int,
     message_id: int,
 ) -> PlanningArtifactPresentation | None:
-    if not isinstance(artifact, dict) or artifact.get("type") != "planning_input":
+    if not isinstance(artifact, dict):
+        return None
+    if artifact.get("type") == "feedback":
+        return _feedback_artifact_presentation(artifact)
+    if artifact.get("type") != "planning_input":
         return None
     result = artifact.get("result")
     resource = artifact.get("resource")

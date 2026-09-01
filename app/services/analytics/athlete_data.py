@@ -2,8 +2,10 @@ from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.models import PostSessionFeedback, PreSessionFeedback
 from app.repositories.activities import list_activities_on_or_before
 from app.repositories.health import find_health_day
 from app.repositories.workouts import workouts_between
@@ -109,9 +111,42 @@ class ActivityFeedbackSummary:
 
 
 @dataclass(frozen=True)
+class PreSessionFeedbackSummary:
+    feedback_id: int
+    workout_id: int | None
+    recorded_at: datetime
+    pain_present: bool
+    pain_location: str | None
+    pain_severity: int | None
+    pain_alters_gait: bool | None
+    pain_worsens_with_activity: bool | None
+    illness_signal: str
+    available_minutes: int | None
+    notes: str | None
+
+
+@dataclass(frozen=True)
+class PostSessionFeedbackSummary:
+    feedback_id: int
+    activity_id: int | None
+    workout_id: int | None
+    recorded_at: datetime
+    completion_percent: int | None
+    pain_present: bool
+    pain_location: str | None
+    pain_severity: int | None
+    pain_alters_gait: bool | None
+    pain_worsens_with_activity: bool | None
+    stopped_reason: str | None
+    notes: str | None
+
+
+@dataclass(frozen=True)
 class SubjectiveContext:
     as_of: date
     recent_activity_feedback: tuple[ActivityFeedbackSummary, ...]
+    recent_pre_session_feedback: tuple[PreSessionFeedbackSummary, ...]
+    recent_post_session_feedback: tuple[PostSessionFeedbackSummary, ...]
 
 
 class AthleteDataService:
@@ -195,6 +230,7 @@ class AthleteDataService:
 
     def get_subjective_context(self, *, activity_limit: int = 5) -> SubjectiveContext:
         through = datetime.combine(self.as_of, datetime.max.time())
+        cutoff = datetime.combine(self.as_of - timedelta(days=7), datetime.min.time())
         activities = list_activities_on_or_before(
             self.session, self.user_id, through, activity_limit
         )
@@ -212,7 +248,60 @@ class AthleteDataService:
             for activity in activities
             if feedback[activity.id].effort is not None or feedback[activity.id].feel is not None
         )
-        return SubjectiveContext(self.as_of, recent)
+        pre_feedback = self.session.scalars(
+            select(PreSessionFeedback)
+            .where(
+                PreSessionFeedback.user_id == self.user_id,
+                PreSessionFeedback.recorded_at >= cutoff,
+                PreSessionFeedback.recorded_at <= through,
+            )
+            .order_by(PreSessionFeedback.recorded_at.desc(), PreSessionFeedback.id.desc())
+            .limit(activity_limit)
+        )
+        recent_pre = tuple(
+            PreSessionFeedbackSummary(
+                item.id,
+                item.workout_id,
+                item.recorded_at,
+                item.pain_present,
+                item.pain_location,
+                item.pain_severity,
+                item.pain_alters_gait,
+                item.pain_worsens_with_activity,
+                item.illness_signal,
+                item.available_minutes,
+                item.notes,
+            )
+            for item in pre_feedback
+        )
+        post_feedback = self.session.scalars(
+            select(PostSessionFeedback)
+            .where(
+                PostSessionFeedback.user_id == self.user_id,
+                PostSessionFeedback.recorded_at >= cutoff,
+                PostSessionFeedback.recorded_at <= through,
+            )
+            .order_by(PostSessionFeedback.recorded_at.desc(), PostSessionFeedback.id.desc())
+            .limit(activity_limit)
+        )
+        recent_post = tuple(
+            PostSessionFeedbackSummary(
+                item.id,
+                item.activity_id,
+                item.workout_id,
+                item.recorded_at,
+                item.completion_percent,
+                item.pain_present,
+                item.pain_location,
+                item.pain_severity,
+                item.pain_alters_gait,
+                item.pain_worsens_with_activity,
+                item.stopped_reason,
+                item.notes,
+            )
+            for item in post_feedback
+        )
+        return SubjectiveContext(self.as_of, recent, recent_pre, recent_post)
 
     def get_progress(self, *, days: int = 28, goal_id: int | None = None) -> ProgressResult:
         return get_progress(

@@ -5,12 +5,13 @@ from datetime import date, datetime, timedelta
 
 from pydantic import ValidationError
 
-from app.models import CoachMessage, User
+from app.models import CoachMessage, PostSessionFeedback, PreSessionFeedback, User
 from app.repositories.coach import find_assistant_message
 from app.services.analytics.athlete_data import AthleteDataService
 from app.services.analytics.health_trends import HealthMetric
 from app.services.analytics.progress import ProgressReferenceError
 from app.services.coach.conversation import CoachRuntimeContext
+from app.services.planning.feedback_service import FeedbackCommands, FeedbackNotFoundError
 from app.services.planning.planning_commands import (
     AnchorKind,
     AvailabilityInput,
@@ -32,6 +33,12 @@ from app.services.planning.planning_queries import (
 )
 from app.services.planning.planning_queries import (
     get_planning_inputs as planning_inputs,
+)
+from app.services.planning.safety_triage import (
+    IllnessSignal,
+    PainInput,
+    PostSessionFeedbackInput,
+    PreSessionFeedbackInput,
 )
 from app.services.planning.workout_proposals import (
     RunningProposalRequest,
@@ -63,6 +70,7 @@ WEEKDAY_LABELS = (
     "Sonntag",
 )
 PlanningArtifactFact = GoalFact | PlanningProfileFact | AvailabilityFact | PerformanceAnchorFact
+FeedbackRecord = PreSessionFeedback | PostSessionFeedback
 
 
 def get_current_recovery_state(runtime: CoachRuntimeContext) -> str:
@@ -212,6 +220,238 @@ def get_planning_inputs(runtime: CoachRuntimeContext) -> str:
     with runtime.session_factory() as session:
         result = planning_inputs(session, runtime.user_id, as_of=runtime.as_of)
     return _json(asdict(result))
+
+
+def _feedback_result(feedback: FeedbackRecord) -> dict[str, object]:
+    result: dict[str, object] = {
+        "feedback_id": feedback.id,
+        "workout_id": feedback.workout_id,
+        "pain": {
+            "present": feedback.pain_present,
+            "location": feedback.pain_location,
+            "severity": feedback.pain_severity,
+            "alters_gait": feedback.pain_alters_gait,
+            "worsens_with_activity": feedback.pain_worsens_with_activity,
+        },
+        "notes": feedback.notes,
+        "recorded_at": feedback.recorded_at.isoformat(),
+    }
+    if isinstance(feedback, PreSessionFeedback):
+        result.update(
+            illness_signal=feedback.illness_signal,
+            available_minutes=feedback.available_minutes,
+        )
+    else:
+        result.update(
+            activity_id=feedback.activity_id,
+            completion_percent=feedback.completion_percent,
+            session_rpe=feedback.session_rpe,
+            overall_feel=feedback.overall_feel,
+            stopped_reason=feedback.stopped_reason,
+        )
+    return result
+
+
+def _run_feedback_mutation(
+    runtime: CoachRuntimeContext,
+    *,
+    operation: str,
+    resource: str,
+    request: dict[str, object],
+    not_found_code: str,
+    command: Callable[[FeedbackCommands], FeedbackRecord],
+) -> str:
+    if (
+        runtime.conversation_id is None
+        or runtime.user_message_id is None
+        or runtime.assistant_message_id is None
+    ):
+        raise ValueError("Coach feedback runtime is incomplete")
+    with runtime.session_factory() as session:
+        user_message = session.get(CoachMessage, runtime.user_message_id)
+        assistant_message = find_assistant_message(
+            session,
+            runtime.user_id,
+            runtime.conversation_id,
+            runtime.assistant_message_id,
+        )
+        user = session.get(User, runtime.user_id)
+        if (
+            user is None
+            or user_message is None
+            or user_message.conversation_id != runtime.conversation_id
+            or user_message.role != "user"
+            or assistant_message is None
+        ):
+            raise ValueError("Coach feedback runtime is invalid")
+        for artifact in assistant_message.artifacts_json:
+            if artifact.get("operation") == operation and artifact.get("request") == request:
+                return _json(
+                    {
+                        "status": "recorded",
+                        "artifact": {"type": "feedback", "resource": resource},
+                    }
+                )
+        try:
+            feedback = command(FeedbackCommands(session, user))
+            session.flush()
+            artifact: dict[str, object] = {
+                "type": "feedback",
+                "resource": resource,
+                "operation": operation,
+                "request": request,
+                "result": _feedback_result(feedback),
+            }
+            assistant_message.artifacts_json = [
+                *assistant_message.artifacts_json,
+                artifact,
+            ]
+            session.commit()
+        except FeedbackNotFoundError as exc:
+            session.rollback()
+            return _json(
+                {
+                    "status": "not_recorded",
+                    "error": {"code": not_found_code, "message": str(exc)},
+                }
+            )
+        except Exception:
+            session.rollback()
+            raise
+    return _json(
+        {
+            "status": "recorded",
+            "artifact": {"type": "feedback", "resource": resource},
+        }
+    )
+
+
+def _pain_clarification(pain: PainInput | None) -> str | None:
+    if pain is None or not pain.present or pain.alters_gait is True:
+        return None
+    if not pain.location or pain.severity is None or pain.alters_gait is None:
+        return (
+            "Wo hast du Schmerzen, wie stark sind sie von 0 bis 10 und verändern sie dein Gangbild?"
+        )
+    return None
+
+
+def record_pre_session_feedback(
+    runtime: CoachRuntimeContext,
+    *,
+    workout_id: int,
+    pain: PainInput | None = None,
+    illness_signal: IllnessSignal | None = None,
+    available_minutes: int | None = None,
+    notes: str | None = None,
+) -> str:
+    """Record explicit feedback for one exact user-owned workout."""
+    if question := _pain_clarification(pain):
+        return _json({"status": "needs_clarification", "question": question})
+    if illness_signal == IllnessSignal.UNKNOWN:
+        return _json(
+            {
+                "status": "needs_clarification",
+                "question": "Welche konkreten Krankheitszeichen hast du?",
+            }
+        )
+    if pain is None and illness_signal is None and available_minutes is None and not notes:
+        return _json(
+            {
+                "status": "needs_clarification",
+                "question": "Welche konkrete Rückmeldung soll ich vor dem Training speichern?",
+            }
+        )
+    try:
+        data = PreSessionFeedbackInput(
+            pain=pain or PainInput(),
+            illness_signal=illness_signal or IllnessSignal.NONE,
+            available_minutes=available_minutes,
+            notes=notes,
+        )
+    except ValidationError:
+        return _json({"status": "not_recorded", "error": {"code": "feedback.invalid_input"}})
+    request: dict[str, object] = {"workout_id": workout_id}
+    if pain is not None:
+        request["pain"] = pain.model_dump(mode="json")
+    if illness_signal is not None:
+        request["illness_signal"] = illness_signal.value
+    if available_minutes is not None:
+        request["available_minutes"] = available_minutes
+    if data.notes:
+        request["notes"] = data.notes
+    return _run_feedback_mutation(
+        runtime,
+        operation="record_pre_session_feedback",
+        resource="pre_session",
+        request=request,
+        not_found_code="feedback.workout_not_found",
+        command=lambda commands: commands.record_pre_session(workout_id, data),
+    )
+
+
+def record_post_session_feedback(
+    runtime: CoachRuntimeContext,
+    *,
+    activity_id: int,
+    completion_percent: int | None = None,
+    session_rpe: int | None = None,
+    overall_feel: int | None = None,
+    pain: PainInput | None = None,
+    stopped_reason: str | None = None,
+    notes: str | None = None,
+) -> str:
+    """Record explicit feedback for one exact user-owned activity."""
+    if question := _pain_clarification(pain):
+        return _json({"status": "needs_clarification", "question": question})
+    if all(
+        value is None
+        for value in (
+            completion_percent,
+            session_rpe,
+            overall_feel,
+            pain,
+            stopped_reason,
+            notes,
+        )
+    ):
+        return _json(
+            {
+                "status": "needs_clarification",
+                "question": "Welche konkrete Rückmeldung soll ich zur Aktivität speichern?",
+            }
+        )
+    try:
+        data = PostSessionFeedbackInput(
+            completion_percent=completion_percent,
+            session_rpe=session_rpe,
+            overall_feel=overall_feel,
+            pain=pain or PainInput(),
+            stopped_reason=stopped_reason,
+            notes=notes,
+        )
+    except ValidationError:
+        return _json({"status": "not_recorded", "error": {"code": "feedback.invalid_input"}})
+    request: dict[str, object] = {"activity_id": activity_id}
+    for key, value in (
+        ("completion_percent", data.completion_percent),
+        ("session_rpe", data.session_rpe),
+        ("overall_feel", data.overall_feel),
+        ("stopped_reason", data.stopped_reason),
+        ("notes", data.notes),
+    ):
+        if value is not None:
+            request[key] = value
+    if pain is not None:
+        request["pain"] = pain.model_dump(mode="json")
+    return _run_feedback_mutation(
+        runtime,
+        operation="record_post_session_feedback",
+        resource="post_session",
+        request=request,
+        not_found_code="feedback.activity_not_found",
+        command=lambda commands: commands.record_post_session(activity_id, data),
+    )
 
 
 def _run_planning_mutation(
