@@ -79,6 +79,7 @@ def test_active_rules_are_grounded_and_runtime_safety_ids_are_registered() -> No
         "SAFE-PAIN-003",
         "READY-SUBJECTIVE-001",
         "TIME-BUDGET-001",
+        "TRAINING-FIT-001",
         "RECOVERY-SESSION-001",
     }
 
@@ -88,6 +89,16 @@ def test_active_rules_are_grounded_and_runtime_safety_ids_are_registered() -> No
         for rule in registry.constraints.values()
         if rule.status == "active"
     )
+    assert registry.constraints["TRAINING-FIT-001"].parameters == {
+        "evidence_window_days": 2,
+        "minimum_baseline_samples": 14,
+        "required_severe_signals": 2,
+        "low_readiness_threshold": 40,
+        "severe_resting_hr_ratio": 1.15,
+        "severe_hrv_ratio": 0.70,
+        "severe_sleep_duration_ratio": 0.65,
+        "severe_stress_ratio": 1.50,
+    }
 
 
 def test_yaml_loader_rejects_python_constructors(tmp_path: Path) -> None:

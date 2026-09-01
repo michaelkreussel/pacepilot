@@ -1,6 +1,25 @@
 id: safety
-version: 1.0.0
+version: 1.1.0
 rules:
+  - id: TRAINING-FIT-001
+    status: active
+    enforcement: soft_constraint
+    implementation: training_fit.personal_baseline
+    description: Dated personal evidence produces advisory training-fit outcomes.
+    parameters:
+      evidence_window_days: 2
+      minimum_baseline_samples: 14
+      required_severe_signals: 2
+      low_readiness_threshold: 40
+      severe_resting_hr_ratio: 1.15
+      severe_hrv_ratio: 0.70
+      severe_sleep_duration_ratio: 0.65
+      severe_stress_ratio: 1.50
+    product_heuristic:
+      product_default: true
+      rationale: Thresholds are conservative product defaults for non-diagnostic personal-baseline advice.
+      status: initial_product_default
+      reviewed_on: 2026-09-01
   - id: SAFE-CARDIO-001
     status: active
     enforcement: hard_constraint

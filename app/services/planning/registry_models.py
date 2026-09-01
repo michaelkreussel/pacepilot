@@ -40,6 +40,7 @@ SUPPORTED_CONSTRAINT_IMPLEMENTATIONS = {
     "safety.pain_alters_gait",
     "safety.pain_unclear",
     "safety.pain_warning",
+    "training_fit.personal_baseline",
 }
 
 
