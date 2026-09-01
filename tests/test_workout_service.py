@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 import pytest
@@ -17,7 +17,10 @@ from app.models import (
 )
 from app.models.user import utcnow
 from app.services.garmin.client import GarminUnavailableError
-from app.services.garmin.workout_operations import GarminWorkoutOperations
+from app.services.garmin.workout_operations import (
+    GarminTrainingFitAuthorization,
+    GarminWorkoutOperations,
+)
 from app.services.planning.validator import WorkoutInput, WorkoutValidationError
 from app.services.planning.workout_definition import default_definition
 from app.services.planning.workout_revision import (
@@ -160,6 +163,86 @@ def test_garmin_operations_own_durable_upload_and_outcome_mapping(
         assert workout.garmin_workout_id == "remote-boundary"
         operation = session.scalar(select(WorkoutGarminOperation))
         assert operation is not None and operation.status == "succeeded"
+
+
+def test_garmin_training_fit_authorization_precedes_and_survives_network_call(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(get_settings(), "garmin_call_delay_seconds", 0)
+    acknowledged_at = datetime(2026, 8, 23, 7, 30)
+    user_id = 0
+    revision_id = 0
+
+    class AmbiguousGarmin:
+        def upload_workout(self, _payload: dict[str, Any]) -> dict[str, str]:
+            with session_factory() as observer:
+                operation = observer.scalar(select(WorkoutGarminOperation))
+                assert operation is not None and operation.status == "pending"
+                assert operation.training_fit_policy_version == "training-fit-v1"
+                assert operation.training_fit_assessment_fingerprint == "f" * 64
+                assert operation.training_fit_effective_date == date(2026, 8, 23)
+                assert operation.training_fit_acknowledged_by_user_id == user_id
+                assert operation.training_fit_acknowledged_at == acknowledged_at
+                assert operation.training_fit_authorized_revision_id == revision_id
+            raise TimeoutError("response lost")
+
+    with session_factory() as session:
+        user = User(display_name="Athlete")
+        session.add(user)
+        session.flush()
+        user_id = user.id
+        account = GarminAccount(user_id=user.id, connected_at=utcnow())
+        session.add(account)
+        session.commit()
+        service = WorkoutService(session, user)
+        workout = service.create(_input())
+        service.confirm(workout.id, _accept_command(session, workout))
+        assert workout.accepted_revision_id is not None
+        revision = session.get(WorkoutRevision, workout.accepted_revision_id)
+        binding = session.scalar(
+            select(WorkoutGarminBinding).where(WorkoutGarminBinding.workout_id == workout.id)
+        )
+        assert revision is not None and binding is not None
+        revision_id = revision.id
+        execution = AcceptedWorkoutExecution(
+            workout_id=workout.id,
+            revision_id=revision.id,
+            revision_number=revision.revision_number,
+            name=revision.name,
+            sport=revision.sport,
+            description=revision.description,
+            definition_version=revision.definition_version,
+            definition=revision.definition,
+            scheduled_for=None,
+            garmin_workout_id=None,
+        )
+        authorization = GarminTrainingFitAuthorization(
+            policy_version="training-fit-v1",
+            assessment_fingerprint="f" * 64,
+            effective_date=date(2026, 8, 23),
+            acknowledged_by_user_id=user.id,
+            acknowledged_at=acknowledged_at,
+            revision_id=revision.id,
+        )
+
+        with pytest.raises(GarminUnavailableError):
+            GarminWorkoutOperations(
+                session,
+                account,
+                connect_garmin=lambda *_args: AmbiguousGarmin(),
+                training_fit_authorization=authorization,
+            ).upload(workout, binding, revision, execution)
+
+        operation = session.scalar(select(WorkoutGarminOperation))
+        assert operation is not None and operation.status == "unknown"
+        assert operation.training_fit_policy_version == authorization.policy_version
+        assert operation.training_fit_assessment_fingerprint == authorization.assessment_fingerprint
+        assert operation.training_fit_effective_date == authorization.effective_date
+        assert (
+            operation.training_fit_acknowledged_by_user_id == authorization.acknowledged_by_user_id
+        )
+        assert operation.training_fit_acknowledged_at == authorization.acknowledged_at
+        assert operation.training_fit_authorized_revision_id == authorization.revision_id
 
 
 def test_service_owns_manual_lifecycle_and_garmin_orchestration(

@@ -2,7 +2,8 @@ import hashlib
 import json
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from datetime import date, timedelta
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from garminconnect.exceptions import GarminConnectTooManyRequestsError
@@ -49,6 +50,16 @@ RECONCILIATION_CAPABILITIES = {
     "push": False,
     "delete": False,
 }
+
+
+@dataclass(frozen=True)
+class GarminTrainingFitAuthorization:
+    policy_version: str
+    assessment_fingerprint: str
+    effective_date: date
+    acknowledged_by_user_id: int
+    acknowledged_at: datetime
+    revision_id: int
 
 
 def operation_idempotency_key(
@@ -114,10 +125,12 @@ class GarminWorkoutOperations:
         account: GarminAccount,
         *,
         connect_garmin: GarminConnector = connect_garmin_account,
+        training_fit_authorization: GarminTrainingFitAuthorization | None = None,
     ) -> None:
         self.session = session
         self.account = account
         self.connect_garmin = connect_garmin
+        self.training_fit_authorization = training_fit_authorization
 
     def upload(
         self,
@@ -391,6 +404,7 @@ class GarminWorkoutOperations:
         )
         created = operation is None
         if operation is None:
+            authorization = self.training_fit_authorization
             operation = WorkoutGarminOperation(
                 workout_id=workout.id,
                 binding_id=binding.id,
@@ -400,6 +414,24 @@ class GarminWorkoutOperations:
                 scheduled_for=scheduled_for,
                 idempotency_key=key,
                 status="pending",
+                training_fit_policy_version=(
+                    authorization.policy_version if authorization is not None else None
+                ),
+                training_fit_assessment_fingerprint=(
+                    authorization.assessment_fingerprint if authorization is not None else None
+                ),
+                training_fit_effective_date=(
+                    authorization.effective_date if authorization is not None else None
+                ),
+                training_fit_acknowledged_by_user_id=(
+                    authorization.acknowledged_by_user_id if authorization is not None else None
+                ),
+                training_fit_acknowledged_at=(
+                    authorization.acknowledged_at if authorization is not None else None
+                ),
+                training_fit_authorized_revision_id=(
+                    authorization.revision_id if authorization is not None else None
+                ),
             )
             self.session.add(operation)
             setattr(binding, _axis(operation_type), "pending")

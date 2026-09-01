@@ -196,7 +196,7 @@ def test_feedback_owner_migration_upgrades_applied_revision_22(tmp_path: Path) -
         ).one() == (1, 1)
         assert connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
-        ).scalar_one() == ("20260829_36")
+        ).scalar_one() == ("20260901_37")
 
 
 def test_application_migration_uses_absolute_project_paths(tmp_path: Path, monkeypatch) -> None:
@@ -256,7 +256,7 @@ def test_workout_revision_migration_resumes_after_added_columns(tmp_path: Path) 
             "SELECT version_num FROM alembic_version"
         ).scalar_one()
         integrity = connection.exec_driver_sql("PRAGMA integrity_check").scalar_one()
-    assert revision == "20260829_36"
+    assert revision == "20260901_37"
     assert integrity == "ok"
     assert "workout_revisions" in inspector.get_table_names()
 
@@ -285,7 +285,7 @@ def test_reverted_athlete_profile_revision_upgrades_to_head(tmp_path: Path) -> N
         revision = connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
         ).scalar_one()
-    assert revision == "20260829_36"
+    assert revision == "20260901_37"
 
 
 def test_principal_fingerprint_migration_upgrades_applied_phase_4_schema(
@@ -733,7 +733,7 @@ def test_athlete_planning_inputs_fresh_and_filled_upgrade(tmp_path: Path) -> Non
         legacy = connection.exec_driver_sql("SELECT name FROM workouts WHERE id = 1").scalar()
     engine.dispose()
 
-    assert version == "20260829_36"
+    assert version == "20260901_37"
     assert {
         "athlete_planning_profiles",
         "athlete_goals",
@@ -1024,7 +1024,7 @@ def test_coach_message_lineage_migration_preserves_runs_and_workouts(tmp_path: P
         )
         assert (
             connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one()
-            == "20260829_36"
+            == "20260901_37"
         )
         assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
     source_key = next(
@@ -1303,7 +1303,7 @@ def test_plan_message_lineage_migration_preserves_artifacts_and_enforces_ownersh
         assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
         assert connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
-        ).scalar_one() == ("20260829_36")
+        ).scalar_one() == ("20260901_37")
 
     for table in ("training_plan_revisions", "training_cycle_revisions"):
         source_key = next(
@@ -1555,7 +1555,7 @@ def test_single_active_coach_response_migration_repairs_duplicates_and_enforces_
         ).all() == [(1, 3), (2, 6)]
         assert (
             connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one()
-            == "20260829_36"
+            == "20260901_37"
         )
         assert connection.exec_driver_sql(
             "SELECT DISTINCT artifacts_json FROM coach_messages"
@@ -1608,3 +1608,194 @@ def test_upgrade_database_preserves_application_logging(tmp_path: Path) -> None:
         file_handler.close()
         root_logger.setLevel(previous_level)
         probe_logger.disabled = previously_disabled
+
+
+def test_garmin_fit_authorization_upgrade_preserves_operations_and_constraints(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "garmin-fit-authorization.db"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    config = Config("alembic.ini")
+    config.attributes["database_url"] = database_url
+    command.upgrade(config, "20260829_36")
+    engine = create_engine(database_url)
+
+    with engine.begin() as connection:
+        connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+        connection.exec_driver_sql(
+            "INSERT INTO users (id, display_name, created_at) VALUES "
+            "(1, 'Runner', '2026-09-01'), (2, 'Other', '2026-09-01')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO workouts "
+            "(id, user_id, name, sport, status, definition_version, definition, source_type, "
+            "approval_status, local_schedule_status, lock_version, created_at, updated_at) VALUES "
+            "(1, 1, 'Run', 'running', 'confirmed', 1, '{\"blocks\": []}', 'manual', "
+            "'accepted', 'unscheduled', 0, '2026-09-01', '2026-09-01'), "
+            "(2, 2, 'Other Run', 'running', 'confirmed', 1, '{\"blocks\": []}', 'manual', "
+            "'accepted', 'unscheduled', 0, '2026-09-01', '2026-09-01')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO workout_revisions "
+            "(id, workout_id, revision_number, name, sport, definition_version, definition, "
+            "source_type, content_hash, edit_source, created_at) VALUES "
+            "(1, 1, 1, 'Run', 'running', 1, '{\"blocks\": []}', 'manual', ?, 'manual', "
+            "'2026-09-01'), "
+            "(3, 1, 2, 'Run v2', 'running', 1, '{\"blocks\": []}', 'manual', ?, 'manual', "
+            "'2026-09-01'), "
+            "(2, 2, 1, 'Other Run', 'running', 1, '{\"blocks\": []}', 'manual', ?, 'manual', "
+            "'2026-09-01')",
+            ("a" * 64, "c" * 64, "b" * 64),
+        )
+        connection.exec_driver_sql(
+            "UPDATE workouts SET current_revision_id = id, accepted_revision_id = id, "
+            "materialized_revision_id = id, accepted_at = '2026-09-01'"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO workout_garmin_bindings "
+            "(id, workout_id, content_status, calendar_status, device_status) VALUES "
+            "(1, 1, 'unknown', 'not_requested', 'not_requested'), "
+            "(2, 2, 'not_requested', 'not_requested', 'not_requested')"
+        )
+        operation_id = connection.exec_driver_sql(
+            "INSERT INTO workout_garmin_operations "
+            "(workout_id, binding_id, operation_type, revision_id, remote_identity_id, "
+            "idempotency_key, status, remote_reference, completed_at, error_code, created_at) "
+            "VALUES (1, 1, 'upload', 1, NULL, ?, 'unknown', 'remote-1', '2026-09-01', "
+            "'garmin.remote_outcome_unknown', '2026-09-01')",
+            ("c" * 64,),
+        ).lastrowid
+        connection.exec_driver_sql(
+            "INSERT INTO workout_garmin_attempts "
+            "(operation_id, attempt_number, attempt_kind, status, started_at, completed_at, "
+            "error_code, error_message) VALUES "
+            "(?, 1, 'execute', 'unknown', '2026-09-01', '2026-09-01', "
+            "'garmin.remote_outcome_unknown', 'response lost')",
+            (operation_id,),
+        )
+    engine.dispose()
+
+    command.upgrade(config, "head")
+    command.check(config)
+    engine = create_engine(database_url)
+    authorization_columns = {
+        "training_fit_policy_version",
+        "training_fit_assessment_fingerprint",
+        "training_fit_effective_date",
+        "training_fit_acknowledged_by_user_id",
+        "training_fit_acknowledged_at",
+        "training_fit_authorized_revision_id",
+    }
+    columns = {
+        column["name"]: column
+        for column in inspect(engine).get_columns("workout_garmin_operations")
+    }
+    assert authorization_columns <= columns.keys()
+    assert all(columns[name]["nullable"] for name in authorization_columns)
+
+    with engine.connect() as connection:
+        assert connection.exec_driver_sql(
+            "SELECT operation_type, revision_id, idempotency_key, status, remote_reference, "
+            "completed_at, error_code, training_fit_policy_version, "
+            "training_fit_assessment_fingerprint, training_fit_effective_date, "
+            "training_fit_acknowledged_by_user_id, training_fit_acknowledged_at, "
+            "training_fit_authorized_revision_id FROM workout_garmin_operations WHERE id = 1"
+        ).one() == (
+            "upload",
+            1,
+            "c" * 64,
+            "unknown",
+            "remote-1",
+            "2026-09-01",
+            "garmin.remote_outcome_unknown",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        assert connection.exec_driver_sql(
+            "SELECT attempt_number, attempt_kind, status, error_code, error_message "
+            "FROM workout_garmin_attempts WHERE operation_id = 1"
+        ).one() == (
+            1,
+            "execute",
+            "unknown",
+            "garmin.remote_outcome_unknown",
+            "response lost",
+        )
+        assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
+
+    authorization_values = (
+        "training-fit-v1",
+        "d" * 64,
+        "2026-09-01",
+        1,
+        "2026-09-01 07:30:00",
+        1,
+    )
+    with engine.begin() as connection:
+        connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+        authorized_operation_id = connection.exec_driver_sql(
+            "INSERT INTO workout_garmin_operations "
+            "(workout_id, binding_id, operation_type, revision_id, remote_identity_id, "
+            "idempotency_key, status, created_at, training_fit_policy_version, "
+            "training_fit_assessment_fingerprint, training_fit_effective_date, "
+            "training_fit_acknowledged_by_user_id, training_fit_acknowledged_at, "
+            "training_fit_authorized_revision_id) VALUES "
+            "(1, 1, 'upload', 1, NULL, ?, 'pending', '2026-09-01', ?, ?, ?, ?, ?, ?)",
+            ("e" * 64, *authorization_values),
+        ).lastrowid
+
+    with pytest.raises(IntegrityError), engine.begin() as connection:
+        connection.exec_driver_sql(
+            "UPDATE workout_garmin_operations SET revision_id = 3 WHERE id = ?",
+            (authorized_operation_id,),
+        )
+
+    with pytest.raises(IntegrityError), engine.begin() as connection:
+        connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+        connection.exec_driver_sql(
+            "INSERT INTO workout_garmin_operations "
+            "(workout_id, binding_id, operation_type, revision_id, remote_identity_id, "
+            "idempotency_key, status, created_at, training_fit_policy_version) VALUES "
+            "(1, 1, 'upload', 1, NULL, ?, 'pending', '2026-09-01', 'training-fit-v1')",
+            ("f" * 64,),
+        )
+
+    with pytest.raises(IntegrityError), engine.begin() as connection:
+        connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+        connection.exec_driver_sql(
+            "INSERT INTO workout_garmin_operations "
+            "(workout_id, binding_id, operation_type, revision_id, remote_identity_id, "
+            "idempotency_key, status, created_at, training_fit_policy_version, "
+            "training_fit_assessment_fingerprint, training_fit_effective_date, "
+            "training_fit_acknowledged_by_user_id, training_fit_acknowledged_at, "
+            "training_fit_authorized_revision_id) VALUES "
+            "(1, 1, 'upload', 1, NULL, ?, 'pending', '2026-09-01', ?, ?, ?, 2, ?, ?)",
+            ("g" * 64, *authorization_values[:3], *authorization_values[4:]),
+        )
+
+    with pytest.raises(IntegrityError), engine.begin() as connection:
+        connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+        connection.exec_driver_sql(
+            "INSERT INTO workout_garmin_operations "
+            "(workout_id, binding_id, operation_type, revision_id, remote_identity_id, "
+            "idempotency_key, status, created_at, training_fit_policy_version, "
+            "training_fit_assessment_fingerprint, training_fit_effective_date, "
+            "training_fit_acknowledged_by_user_id, training_fit_acknowledged_at, "
+            "training_fit_authorized_revision_id) VALUES "
+            "(1, 1, 'upload', 1, NULL, ?, 'pending', '2026-09-01', ?, ?, ?, ?, ?, 2)",
+            ("h" * 64, *authorization_values[:-1]),
+        )
+
+    with pytest.raises(IntegrityError), engine.begin() as connection:
+        connection.exec_driver_sql(
+            "INSERT INTO workout_garmin_operations "
+            "(workout_id, binding_id, operation_type, revision_id, remote_identity_id, "
+            "idempotency_key, status, created_at) VALUES "
+            "(1, 1, 'upload', 1, NULL, ?, 'invalid', '2026-09-01')",
+            ("i" * 64,),
+        )
+    engine.dispose()

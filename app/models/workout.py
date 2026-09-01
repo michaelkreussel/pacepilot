@@ -454,6 +454,12 @@ class WorkoutGarminOperation(Base):
     remote_reference: Mapped[str | None] = mapped_column(String(200))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime)
     error_code: Mapped[str | None] = mapped_column(String(100))
+    training_fit_policy_version: Mapped[str | None] = mapped_column(String(100))
+    training_fit_assessment_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    training_fit_effective_date: Mapped[date | None] = mapped_column(Date)
+    training_fit_acknowledged_by_user_id: Mapped[int | None] = mapped_column(Integer)
+    training_fit_acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime)
+    training_fit_authorized_revision_id: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
     binding: Mapped[WorkoutGarminBinding] = relationship(back_populates="operations")
@@ -462,6 +468,51 @@ class WorkoutGarminOperation(Base):
         cascade="all, delete-orphan",
         order_by="WorkoutGarminAttempt.attempt_number",
     )
+
+
+_TRAINING_FIT_AUTHORIZATION_VALID = (
+    "(NEW.training_fit_policy_version IS NULL AND "
+    "NEW.training_fit_assessment_fingerprint IS NULL AND "
+    "NEW.training_fit_effective_date IS NULL AND "
+    "NEW.training_fit_acknowledged_by_user_id IS NULL AND "
+    "NEW.training_fit_acknowledged_at IS NULL AND "
+    "NEW.training_fit_authorized_revision_id IS NULL) OR "
+    "(NEW.training_fit_policy_version IS NOT NULL AND "
+    "length(NEW.training_fit_policy_version) > 0 AND "
+    "NEW.training_fit_assessment_fingerprint IS NOT NULL AND "
+    "length(NEW.training_fit_assessment_fingerprint) = 64 AND "
+    "NEW.training_fit_effective_date IS NOT NULL AND "
+    "NEW.training_fit_acknowledged_by_user_id IS NOT NULL AND "
+    "NEW.training_fit_acknowledged_at IS NOT NULL AND "
+    "NEW.training_fit_authorized_revision_id = NEW.revision_id AND "
+    "EXISTS (SELECT 1 FROM workouts WHERE id = NEW.workout_id "
+    "AND user_id = NEW.training_fit_acknowledged_by_user_id))"
+)
+
+event.listen(
+    WorkoutGarminOperation.__table__,
+    "after_create",
+    DDL(
+        "CREATE TRIGGER validate_workout_garmin_operation_training_fit_insert "
+        "BEFORE INSERT ON workout_garmin_operations "
+        f"WHEN NOT ({_TRAINING_FIT_AUTHORIZATION_VALID}) "
+        "BEGIN SELECT RAISE(ABORT, 'Invalid Garmin training-fit authorization'); END"
+    ).execute_if(dialect="sqlite"),
+)
+
+event.listen(
+    WorkoutGarminOperation.__table__,
+    "after_create",
+    DDL(
+        "CREATE TRIGGER validate_workout_garmin_operation_training_fit_update "
+        "BEFORE UPDATE OF workout_id, revision_id, training_fit_policy_version, "
+        "training_fit_assessment_fingerprint, training_fit_effective_date, "
+        "training_fit_acknowledged_by_user_id, training_fit_acknowledged_at, "
+        "training_fit_authorized_revision_id ON workout_garmin_operations "
+        f"WHEN NOT ({_TRAINING_FIT_AUTHORIZATION_VALID}) "
+        "BEGIN SELECT RAISE(ABORT, 'Invalid Garmin training-fit authorization'); END"
+    ).execute_if(dialect="sqlite"),
+)
 
 
 class WorkoutGarminAttempt(Base):
