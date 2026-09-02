@@ -17,6 +17,11 @@ from app.models import (
 from app.models.user import utcnow
 from app.services.planning.validator import WorkoutInput
 from app.services.planning.workout_definition import default_definition
+from app.services.planning.workout_proposals import (
+    RunningProposalRequest,
+    RunningProposalService,
+    RunningRevisionRequest,
+)
 from app.services.planning.workout_revision import (
     AcceptRevisionCommand,
     RevisionIdentity,
@@ -169,6 +174,51 @@ def test_edit_after_acceptance_keeps_previous_execution(
         assert workout.materialized_revision_id == accepted_revision_id
         assert workout.name == "Accepted name"
         assert workout.scheduled_for == date(2026, 8, 23)
+        assert workout.approval_status == "proposed"
+
+
+def test_bounded_revision_of_accepted_proposal_requires_explicit_replacement(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
+    as_of = date(2026, 8, 20)
+    with session_factory() as session:
+        service, user = _service(session)
+        workout = RunningProposalService(session, user, as_of=as_of).create(
+            RunningProposalRequest(
+                template_id="easy_run",
+                suggested_for=date(2026, 8, 21),
+                available_minutes=40,
+                idempotency_key="bc11-accepted-create",
+            )
+        )
+        service.accept(workout.id, _accept_command(session, workout.id))
+        accepted_revision_id = workout.accepted_revision_id
+        assert accepted_revision_id is not None
+        accepted = session.get(WorkoutRevision, accepted_revision_id)
+        assert accepted is not None
+
+        RunningProposalService(session, user, as_of=as_of).revise(
+            RunningRevisionRequest(
+                workout_id=workout.id,
+                revision_id=accepted.id,
+                suggested_for=date(2026, 8, 22),
+                available_minutes=30,
+                idempotency_key="bc11-accepted-revise",
+            )
+        )
+
+        session.refresh(workout)
+        candidate = session.get(WorkoutRevision, workout.current_revision_id)
+        assert candidate is not None
+        assert candidate.id != accepted.id
+        assert candidate.parent_revision_id == accepted.id
+        assert workout.accepted_revision_id == accepted.id
+        assert workout.materialized_revision_id == accepted.id
+        assert workout.name == accepted.name
+        assert workout.definition == accepted.definition
         assert workout.approval_status == "proposed"
 
 

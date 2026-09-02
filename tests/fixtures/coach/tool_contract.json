@@ -1,6 +1,6 @@
 {
   "source": "synthetic",
-  "contract_version": "coach-tools-v6",
+  "contract_version": "coach-tools-v7",
   "tools": {
     "get_adaptive_context": ["days", "focus", "goal_id"],
     "get_current_recovery_state": [],
@@ -24,6 +24,8 @@
     "deactivate_planning_anchor": ["anchor_id"],
     "record_pre_session_feedback": ["available_minutes", "illness_signal", "notes", "pain", "workout_id"],
     "record_post_session_feedback": ["activity_id", "completion_percent", "notes", "overall_feel", "pain", "session_rpe", "stopped_reason"],
-    "create_running_workout_proposal": ["available_minutes", "suggested_for", "template_id"]
+    "create_running_workout_proposal": ["available_minutes", "suggested_for", "template_id"],
+    "get_revisable_running_workouts": ["limit"],
+    "revise_running_workout_proposal": ["available_minutes", "edit_scope", "revision_id", "suggested_for", "workout_id"]
   }
 }

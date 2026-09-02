@@ -28,11 +28,13 @@ from app.services.planning.workout_definition import (
     RpeRangeTarget,
     StepBlockV2,
     TimeEnd,
+    default_definition,
 )
 from app.services.planning.workout_proposals import (
     EasyRunProposalRequest,
     RunningProposalRequest,
     RunningProposalService,
+    RunningRevisionRequest,
     RunningTemplateId,
     _easy_run_device_target,
 )
@@ -684,6 +686,103 @@ def test_proposal_edit_accept_schedule_and_reject_lifecycle(
                 ),
             )
         assert rejected.value.code == "workout.proposal_rejected"
+
+
+def test_bounded_revision_reexpands_the_same_registered_format(
+    session_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
+    as_of = date(2026, 8, 20)
+    with session_factory() as session:
+        user = _user(session)
+        workout = RunningProposalService(session, user, as_of=as_of).create(
+            RunningProposalRequest(
+                template_id="recovery_run",
+                suggested_for=date(2026, 8, 21),
+                available_minutes=35,
+                idempotency_key="bc11-create-recovery",
+            )
+        )
+        original = session.get(WorkoutRevision, workout.current_revision_id)
+        assert original is not None
+        service = RunningProposalService(session, user, as_of=as_of)
+        request = RunningRevisionRequest(
+            workout_id=workout.id,
+            revision_id=original.id,
+            suggested_for=date(2026, 8, 22),
+            available_minutes=45,
+            idempotency_key="bc11-revise-recovery",
+        )
+
+        revised_workout = service.revise(request)
+        replay = service.revise(request)
+
+        revised = session.get(WorkoutRevision, revised_workout.current_revision_id)
+        assert revised is not None
+        assert replay.current_revision_id == revised.id
+        assert revised.revision_number == 2
+        assert revised.parent_revision_id == original.id
+        assert revised_workout.accepted_revision_id is None
+        assert revised_workout.materialized_revision_id == revised.id
+        assert revised.template_id == "recovery_run"
+        assert revised.suggested_for == date(2026, 8, 22)
+        revised_step = revised.definition_model.blocks[0]
+        assert isinstance(revised_step, StepBlockV2)
+        assert isinstance(revised_step.end, TimeEnd)
+        assert revised_step.end.seconds == 45 * 60
+        assert revised.edit_source == "user"
+        assert revised.validation_report_json is not None
+        assert revised.validation_report_json["valid"] is True
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(WorkoutRevision)
+                .where(WorkoutRevision.workout_id == workout.id)
+            )
+            == 2
+        )
+
+
+def test_bounded_revision_rejects_non_deterministic_workout_without_persisting(
+    session_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
+    as_of = date(2026, 8, 20)
+    with session_factory() as session:
+        user = _user(session)
+        workout = WorkoutService(session, user).create(
+            WorkoutInput(
+                name="Manual",
+                sport="running",
+                scheduled_for=date(2026, 8, 21),
+                description="Manual",
+                definition=default_definition(),
+            )
+        )
+        revision_id = workout.current_revision_id
+        assert revision_id is not None
+
+        with pytest.raises(WorkoutTransitionError) as error:
+            RunningProposalService(session, user, as_of=as_of).revise(
+                RunningRevisionRequest(
+                    workout_id=workout.id,
+                    revision_id=revision_id,
+                    suggested_for=date(2026, 8, 22),
+                    available_minutes=45,
+                    idempotency_key="bc11-revise-manual",
+                )
+            )
+
+        assert error.value.code == "proposal.revision_unsupported"
+        assert "neuen deterministischen Vorschlag" in str(error.value)
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(WorkoutRevision)
+                .where(WorkoutRevision.workout_id == workout.id)
+            )
+            == 1
+        )
 
 
 def test_generated_edit_and_schedule_enforce_proposal_contract(

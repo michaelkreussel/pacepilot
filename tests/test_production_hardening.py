@@ -94,7 +94,7 @@ def test_coach_tool_and_prompt_contracts_are_versioned_and_stable() -> None:
 
     assert fixture["contract_version"] == COACH_TOOL_CONTRACT_VERSION
     assert actual == fixture["tools"]
-    assert COACH_PROMPT_TEMPLATE_VERSION == "coach-prompt-v7"
+    assert COACH_PROMPT_TEMPLATE_VERSION == "coach-prompt-v8"
     assert "get_adaptive_context" in PROGRESS_PROMPT
     assert "keine Verlaufsdaten" in PROGRESS_PROMPT
     assert {"user_id", "workout_id", "definition", "idempotency_key"}.isdisjoint(
@@ -134,6 +134,7 @@ def test_prompt_injection_corpus_cannot_expand_coach_mutation_authority() -> Non
         "deactivate_planning_anchor",
         "record_pre_session_feedback",
         "record_post_session_feedback",
+        "revise_running_workout_proposal",
     }
     assert tool_names - allowed_mutations == {
         "get_adaptive_context",
@@ -146,6 +147,7 @@ def test_prompt_injection_corpus_cannot_expand_coach_mutation_authority() -> Non
         "get_activity_details",
         "get_health_day",
         "get_upcoming_workouts",
+        "get_revisable_running_workouts",
         "get_planning_inputs",
     }
 

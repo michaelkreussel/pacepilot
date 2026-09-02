@@ -15,7 +15,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from langchain_core.tools import tool
 from langchain_core.utils.function_calling import convert_to_openai_tool
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import get_settings
@@ -62,7 +62,9 @@ from app.services.coach.tools import (
     get_health_day,
     get_planning_inputs,
     get_progress,
+    get_revisable_running_workouts,
     get_subjective_context,
+    revise_running_workout_proposal,
     set_planning_availability,
     update_planning_profile,
 )
@@ -74,6 +76,9 @@ from app.services.planning.planning_commands import (
 )
 from app.services.planning.registry import WORKOUT_FORMAT_IDS
 from app.services.planning.safety_triage import IllnessSignal, PainInput
+from app.services.planning.workout_proposals import RunningProposalRequest, RunningProposalService
+from app.services.planning.workout_revision import AcceptRevisionCommand, RevisionIdentity
+from app.services.planning.workout_service import WorkoutService
 from app.services.planning.workout_views import workout_lifecycle_projection
 
 
@@ -2112,6 +2117,250 @@ def test_proposal_tool_schema_exposes_no_runtime_or_workout_definition() -> None
     assert "WorkoutDefinition" not in serialized
     assert schema["properties"]["template_id"]["enum"] == list(WORKOUT_FORMAT_IDS)
 
+    revision_tool = next(
+        tool
+        for tool in coach_tools(workout_proposals_enabled=True)
+        if tool.name == "revise_running_workout_proposal"
+    )
+    revision_schema_model: Any = revision_tool.tool_call_schema
+    revision_schema = revision_schema_model.model_json_schema()
+    assert set(revision_schema["properties"]) == {
+        "workout_id",
+        "revision_id",
+        "suggested_for",
+        "available_minutes",
+        "edit_scope",
+    }
+    serialized_revision = json.dumps(revision_schema)
+    assert "user_id" not in serialized_revision
+    assert "idempotency" not in serialized_revision
+    assert "lock_version" not in serialized_revision
+    assert "content_hash" not in serialized_revision
+    assert "WorkoutDefinition" not in serialized_revision
+
+
+def test_conversation_revises_accepted_workout_without_replacing_it(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
+    coaching_date = date.today()
+    with session_factory() as session:
+        user = session.scalar(select(User))
+        assert user is not None
+        workout = RunningProposalService(session, user, as_of=coaching_date).create(
+            RunningProposalRequest(
+                template_id="easy_run",
+                suggested_for=coaching_date + timedelta(days=1),
+                available_minutes=40,
+                idempotency_key="bc11-agent-create",
+            )
+        )
+        revision = session.get(WorkoutRevision, workout.current_revision_id)
+        assert revision is not None
+        service = WorkoutService(session, user)
+        context_fingerprint = service.acceptance_context(workout.id).fingerprint
+        service.accept(
+            workout.id,
+            AcceptRevisionCommand(
+                identity=RevisionIdentity(
+                    revision_id=revision.id,
+                    revision_number=revision.revision_number,
+                    content_hash=revision.content_hash,
+                    lock_version=workout.lock_version,
+                ),
+                context_fingerprint=context_fingerprint,
+            ),
+        )
+        workout_id = workout.id
+        accepted_revision_id = revision.id
+
+    class RevisionAgent:
+        runtime: CoachRuntimeContext | None = None
+        revision_result: dict[str, object] | None = None
+
+        async def stream(
+            self,
+            messages: Sequence[CoachHistoryMessage],
+            runtime: CoachRuntimeContext,
+        ) -> AsyncIterator[CoachEvent]:
+            del messages
+            self.runtime = runtime
+            references = json.loads(get_revisable_running_workouts(runtime))
+            assert references[0]["workout_id"] == workout_id
+            assert references[0]["revision_id"] == accepted_revision_id
+            unsupported = json.loads(
+                revise_running_workout_proposal(
+                    runtime,
+                    workout_id=workout_id,
+                    revision_id=accepted_revision_id,
+                    edit_scope="unsupported",
+                )
+            )
+            assert unsupported["status"] == "not_revised"
+            assert unsupported["supported_alternative"]["command"] == (
+                "create_running_workout_proposal"
+            )
+            revised = json.loads(
+                revise_running_workout_proposal(
+                    runtime,
+                    workout_id=workout_id,
+                    revision_id=accepted_revision_id,
+                    suggested_for=coaching_date + timedelta(days=2),
+                    available_minutes=30,
+                )
+            )
+            self.revision_result = revised
+            replay = json.loads(
+                revise_running_workout_proposal(
+                    runtime,
+                    workout_id=workout_id,
+                    revision_id=accepted_revision_id,
+                    suggested_for=coaching_date + timedelta(days=2),
+                    available_minutes=30,
+                )
+            )
+            assert replay == revised
+            if revised.get("status") == "revised":
+                yield CoachEvent("artifact_available", artifact_type="workout")
+            yield CoachEvent("answer_text", text="Die neue Revision ist bereit.")
+            yield CoachEvent("completed")
+
+    fake = RevisionAgent()
+    app.dependency_overrides[get_coach_agent_factory] = lambda: lambda: fake
+    conversation_id = _new_chat(client)
+
+    response = client.post(
+        f"/coach/{conversation_id}/messages",
+        data={"message": "Verschiebe den Lauf auf den 22. August und kürze ihn auf 30 Minuten."},
+    )
+
+    assert response.status_code == 200
+    assert fake.revision_result == {
+        "status": "revised",
+        "artifact": {"type": "workout_proposal"},
+    }
+    assert response.text.count("event: proposal.created") == 1
+    assert fake.runtime is not None
+    assistant_message_id = fake.runtime.assistant_message_id
+    assert assistant_message_id is not None
+    with session_factory() as session:
+        workout = session.get(Workout, workout_id)
+        assert workout is not None
+        assert workout.accepted_revision_id == accepted_revision_id
+        assert workout.current_revision_id != accepted_revision_id
+        assert workout.materialized_revision_id == accepted_revision_id
+        assert workout.source_assistant_message_id == assistant_message_id
+        revisions = list(
+            session.scalars(
+                select(WorkoutRevision)
+                .where(WorkoutRevision.workout_id == workout_id)
+                .order_by(WorkoutRevision.revision_number)
+            )
+        )
+        assert len(revisions) == 2
+        artifact = workout_artifact_presentation(
+            session,
+            workout.user_id,
+            conversation_id,
+            assistant_message_id,
+        )
+        assert artifact is not None
+        assert artifact.revision_id == revisions[1].id
+        assert artifact.accepted_revision_id == accepted_revision_id
+        assert artifact.lifecycle_actions[0].key == "accept"
+        assert artifact.lifecycle_actions[0].label == "Angenommenes Workout ersetzen"
+    detail = client.get(f"/workouts/{workout_id}")
+    assert detail.status_code == 200
+    assert "Angenommenes Workout ersetzen" in detail.text
+
+
+def test_conversational_revision_rejects_foreign_workout_and_incomplete_runtime(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
+    as_of = date(2026, 8, 20)
+    with session_factory() as session:
+        user = User(display_name="Owner")
+        other = User(display_name="Other")
+        session.add_all([user, other])
+        session.flush()
+        workout = RunningProposalService(session, other, as_of=as_of).create(
+            RunningProposalRequest(
+                template_id="easy_run",
+                suggested_for=date(2026, 8, 21),
+                available_minutes=40,
+                idempotency_key="bc11-foreign-create",
+            )
+        )
+        revision_id = workout.current_revision_id
+        assert revision_id is not None
+        conversation = CoachConversation(user_id=user.id, title="BC11")
+        session.add(conversation)
+        session.flush()
+        user_message = CoachMessage(
+            conversation_id=conversation.id,
+            role="user",
+            content="Ändere das Workout.",
+            status="completed",
+        )
+        assistant_message = CoachMessage(
+            conversation_id=conversation.id,
+            role="assistant",
+            content="",
+            status="streaming",
+        )
+        session.add_all([user_message, assistant_message])
+        session.commit()
+        user_id = user.id
+        workout_id = workout.id
+        conversation_id = conversation.id
+        user_message_id = user_message.id
+        assistant_message_id = assistant_message.id
+
+    incomplete = CoachRuntimeContext(
+        user_id=user_id,
+        as_of=as_of,
+        session_factory=session_factory,
+    )
+    with pytest.raises(ValueError, match="runtime is incomplete"):
+        revise_running_workout_proposal(
+            incomplete,
+            workout_id=workout_id,
+            revision_id=revision_id,
+            available_minutes=30,
+        )
+
+    runtime = CoachRuntimeContext(
+        user_id=user_id,
+        as_of=as_of,
+        session_factory=session_factory,
+        conversation_id=conversation_id,
+        user_message_id=user_message_id,
+        assistant_message_id=assistant_message_id,
+    )
+    assert json.loads(get_revisable_running_workouts(runtime)) == []
+    foreign = json.loads(
+        revise_running_workout_proposal(
+            runtime,
+            workout_id=workout_id,
+            revision_id=revision_id,
+            available_minutes=30,
+        )
+    )
+    assert foreign["status"] == "not_revised"
+    assert foreign["error"]["code"] == "workout.not_found"
+    with session_factory() as session:
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(WorkoutRevision)
+                .where(WorkoutRevision.workout_id == workout_id)
+            )
+            == 1
+        )
+
 
 def test_health_trend_tool_schema_uses_analytics_metric_choices() -> None:
     health_trends_tool = next(
@@ -2139,7 +2388,11 @@ def test_agent_registers_only_bounded_conversational_mutation_tools() -> None:
         "update_planning_anchor",
         "deactivate_planning_anchor",
     } <= read_only
-    assert enabled - read_only == {"create_running_workout_proposal"}
+    assert enabled - read_only == {
+        "create_running_workout_proposal",
+        "get_revisable_running_workouts",
+        "revise_running_workout_proposal",
+    }
     assert (
         not {
             "accept_workout",
@@ -2893,6 +3146,45 @@ async def test_langchain_backend_maps_only_valid_proposal_artifact(
     assert [event.type for event in events].count("artifact_available") == 1
     assert events[-2:] == [
         CoachEvent("answer_text", text="Der Vorschlag ist bereit."),
+        CoachEvent("completed"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_langchain_backend_maps_revised_workout_artifact(
+    session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @tool("revise_running_workout_proposal")
+    def fake_revision_tool() -> str:
+        """Create a deterministic workout revision for adapter testing."""
+        return '{"status":"revised","artifact":{"type":"workout_proposal"}}'
+
+    model = _ToolCallingFakeChatModel(
+        tool_name="revise_running_workout_proposal",
+        tool_args={},
+        answer="Die neue Revision ist bereit.",
+    )
+    monkeypatch.setattr(coach_provider_module, "ChatOpenRouter", lambda **_: model)
+    monkeypatch.setattr(coach_provider_module, "coach_tools", lambda **_: [fake_revision_tool])
+    agent = OpenRouterCoachProvider(
+        api_key="test-key",
+        model_id="fake/model",
+        timeout_seconds=5,
+        workout_proposals_enabled=True,
+    )
+
+    events = [
+        event
+        async for event in agent.stream(
+            [CoachHistoryMessage("user", "Kürze den Entwurf.")],
+            CoachRuntimeContext(1, date(2026, 8, 24), session_factory),
+        )
+    ]
+
+    assert CoachEvent("artifact_available", artifact_type="workout") in events
+    assert events[-2:] == [
+        CoachEvent("answer_text", text="Die neue Revision ist bereit."),
         CoachEvent("completed"),
     ]
 

@@ -2,10 +2,20 @@ import json
 from collections.abc import Callable
 from dataclasses import asdict
 from datetime import date, datetime, timedelta
+from typing import Literal
 
 from pydantic import ValidationError
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
-from app.models import CoachMessage, PostSessionFeedback, PreSessionFeedback, User
+from app.models import (
+    CoachMessage,
+    PostSessionFeedback,
+    PreSessionFeedback,
+    User,
+    Workout,
+    WorkoutRevision,
+)
 from app.repositories.coach import find_assistant_message
 from app.services.analytics.athlete_data import AdaptiveContextFocus, AthleteDataService
 from app.services.analytics.health_trends import HealthMetric
@@ -43,10 +53,15 @@ from app.services.planning.safety_triage import (
 from app.services.planning.workout_proposals import (
     RunningProposalRequest,
     RunningProposalService,
+    RunningRevisionRequest,
     RunningTemplateId,
     WorkoutProposalError,
 )
-from app.services.planning.workout_service import ProposalOrigin, WorkoutServiceError
+from app.services.planning.workout_service import (
+    ProposalOrigin,
+    WorkoutService,
+    WorkoutServiceError,
+)
 from app.services.planning.workout_templates import TemplateExpansionError
 
 
@@ -71,6 +86,7 @@ WEEKDAY_LABELS = (
 )
 PlanningArtifactFact = GoalFact | PlanningProfileFact | AvailabilityFact | PerformanceAnchorFact
 FeedbackRecord = PreSessionFeedback | PostSessionFeedback
+RevisionEditScope = Literal["supported_parameters", "unsupported"]
 
 
 def get_current_recovery_state(runtime: CoachRuntimeContext) -> str:
@@ -230,6 +246,48 @@ def get_upcoming_workouts(
             session, runtime.user_id, as_of=runtime.as_of
         ).get_upcoming_workouts(days)
     return _json(tuple(asdict(workout) for workout in workouts))
+
+
+def get_revisable_running_workouts(runtime: CoachRuntimeContext, limit: int = 10) -> str:
+    """List user-owned deterministic workouts with their exact current revision identity."""
+    bounded_limit = min(max(limit, 1), 20)
+    with runtime.session_factory() as session:
+        rows = session.execute(
+            select(Workout, WorkoutRevision)
+            .join(
+                WorkoutRevision,
+                WorkoutRevision.id == Workout.current_revision_id,
+            )
+            .where(
+                Workout.user_id == runtime.user_id,
+                Workout.deleted_at.is_(None),
+                Workout.source_type == "coach_single",
+                Workout.approval_status != "rejected",
+            )
+            .order_by(Workout.updated_at.desc(), Workout.id.desc())
+            .limit(bounded_limit)
+        ).all()
+    return _json(
+        [
+            {
+                "workout_id": workout.id,
+                "revision_id": revision.id,
+                "revision_number": revision.revision_number,
+                "accepted_revision_id": workout.accepted_revision_id,
+                "name": revision.name,
+                "suggested_for": revision.suggested_for,
+                "template_id": revision.template_id,
+                "available_minutes": (
+                    (revision.generation_context_json or {})
+                    .get("request", {})
+                    .get("available_minutes")
+                    if isinstance((revision.generation_context_json or {}).get("request"), dict)
+                    else None
+                ),
+            }
+            for workout, revision in rows
+        ]
+    )
 
 
 def get_planning_inputs(runtime: CoachRuntimeContext) -> str:
@@ -831,6 +889,32 @@ def deactivate_planning_anchor(runtime: CoachRuntimeContext, anchor_id: int) -> 
     )
 
 
+def _proposal_runtime(session: Session, runtime: CoachRuntimeContext) -> tuple[User, CoachMessage]:
+    if (
+        runtime.conversation_id is None
+        or runtime.user_message_id is None
+        or runtime.assistant_message_id is None
+    ):
+        raise ValueError("Coach proposal runtime is incomplete")
+    user_message = session.get(CoachMessage, runtime.user_message_id)
+    assistant_message = find_assistant_message(
+        session,
+        runtime.user_id,
+        runtime.conversation_id,
+        runtime.assistant_message_id,
+    )
+    user = session.get(User, runtime.user_id)
+    if (
+        user is None
+        or user_message is None
+        or user_message.conversation_id != runtime.conversation_id
+        or user_message.role != "user"
+        or assistant_message is None
+    ):
+        raise ValueError("Coach proposal runtime is invalid")
+    return user, assistant_message
+
+
 def create_running_workout_proposal(
     runtime: CoachRuntimeContext,
     suggested_for: date,
@@ -845,29 +929,13 @@ def create_running_workout_proposal(
     unaccepted. This tool cannot accept, schedule, upload, push, or synchronize a workout.
     """
     context = runtime
-    if (
-        context.conversation_id is None
-        or context.user_message_id is None
-        or context.assistant_message_id is None
-    ):
+    if context.conversation_id is None or context.user_message_id is None:
         raise ValueError("Coach proposal runtime is incomplete")
     conversation_id = context.conversation_id
     user_message_id = context.user_message_id
-    assistant_message_id = context.assistant_message_id
     with context.session_factory() as session:
-        user_message = session.get(CoachMessage, user_message_id)
-        assistant_message = find_assistant_message(
-            session, context.user_id, conversation_id, assistant_message_id
-        )
-        user = session.get(User, context.user_id)
-        if (
-            user is None
-            or user_message is None
-            or user_message.conversation_id != conversation_id
-            or user_message.role != "user"
-            or assistant_message is None
-        ):
-            raise ValueError("Coach proposal runtime is invalid")
+        user, assistant_message = _proposal_runtime(session, context)
+        assistant_message_id = assistant_message.id
         request = RunningProposalRequest(
             template_id=template_id,
             suggested_for=suggested_for,
@@ -909,3 +977,127 @@ def create_running_workout_proposal(
                 "artifact": {"type": "workout_proposal"},
             }
         )
+
+
+def revise_running_workout_proposal(
+    runtime: CoachRuntimeContext,
+    *,
+    workout_id: int,
+    revision_id: int,
+    suggested_for: date | None = None,
+    available_minutes: int | None = None,
+    edit_scope: RevisionEditScope = "supported_parameters",
+) -> str:
+    """Revise only the date or time budget of an exact deterministic workout revision."""
+    if runtime.conversation_id is None or runtime.user_message_id is None:
+        raise ValueError("Coach proposal runtime is incomplete")
+    with runtime.session_factory() as session:
+        user, assistant_message = _proposal_runtime(session, runtime)
+        service = WorkoutService(session, user, request_id=assistant_message.request_id)
+        try:
+            workout = service.get(workout_id)
+            current = session.get(WorkoutRevision, revision_id)
+            if current is None or current.workout_id != workout.id:
+                raise WorkoutServiceError(
+                    "Workout nicht gefunden",
+                    code="workout.not_found",
+                )
+            alternative = {
+                "command": "create_running_workout_proposal",
+                "description": (
+                    "Erstelle einen neuen deterministischen Vorschlag in einem registrierten "
+                    "Format oder ändere nur Datum beziehungsweise Zeitbudget dieses Formats."
+                ),
+            }
+            if edit_scope == "unsupported":
+                return _json(
+                    {
+                        "status": "not_revised",
+                        "error": {
+                            "code": "proposal.revision_edit_unsupported",
+                            "message": (
+                                "Eigene Schritte, Ziele und Formatwechsel werden nicht übernommen."
+                            ),
+                        },
+                        "supported_alternative": alternative,
+                    }
+                )
+            if suggested_for is None and available_minutes is None:
+                return _json(
+                    {
+                        "status": "needs_clarification",
+                        "question": (
+                            "Soll das Datum oder das verfügbare Zeitbudget geändert werden?"
+                        ),
+                    }
+                )
+            request_context = (current.generation_context_json or {}).get("request")
+            if not isinstance(request_context, dict):
+                return _json(
+                    {
+                        "status": "not_revised",
+                        "error": {
+                            "code": "proposal.context_invalid",
+                            "message": "Der gebundene Parameterkontext dieser Revision fehlt.",
+                        },
+                        "supported_alternative": alternative,
+                    }
+                )
+            effective_date = suggested_for or current.suggested_for
+            prior_minutes = request_context.get("available_minutes")
+            effective_minutes = available_minutes or prior_minutes
+            if effective_date is None or not isinstance(effective_minutes, int):
+                return _json(
+                    {
+                        "status": "not_revised",
+                        "error": {
+                            "code": "proposal.context_invalid",
+                            "message": "Datum oder Zeitbudget dieser Revision fehlt.",
+                        },
+                        "supported_alternative": alternative,
+                    }
+                )
+            RunningProposalService(
+                session,
+                user,
+                as_of=runtime.as_of,
+                request_id=assistant_message.request_id,
+            ).revise(
+                RunningRevisionRequest(
+                    workout_id=workout_id,
+                    revision_id=revision_id,
+                    suggested_for=effective_date,
+                    available_minutes=effective_minutes,
+                    idempotency_key=(
+                        f"coach-message:{assistant_message.id}:"
+                        f"{assistant_message.created_at.isoformat()}:"
+                        f"revise_running_workout_proposal:v1:{workout_id}:{revision_id}"
+                    ),
+                ),
+                origin=ProposalOrigin(
+                    conversation_id=runtime.conversation_id,
+                    user_message_id=runtime.user_message_id,
+                    assistant_message_id=assistant_message.id,
+                    model_provider="openrouter",
+                    model_id=assistant_message.model_id,
+                    prompt_template_version=assistant_message.prompt_template_version,
+                ),
+            )
+        except (WorkoutProposalError, TemplateExpansionError, WorkoutServiceError) as exc:
+            return _json(
+                {
+                    "status": "not_revised",
+                    "error": {"code": exc.code, "message": str(exc)},
+                    **(
+                        {"supported_alternative": alternative}
+                        if exc.code == "proposal.revision_unsupported"
+                        else {}
+                    ),
+                }
+            )
+    return _json(
+        {
+            "status": "revised",
+            "artifact": {"type": "workout_proposal"},
+        }
+    )

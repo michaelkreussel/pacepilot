@@ -4,7 +4,7 @@ import re
 from collections.abc import AsyncIterator, Sequence
 from datetime import date, timedelta
 from time import monotonic
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import (
@@ -40,8 +40,8 @@ from app.services.planning.safety_triage import IllnessSignal, PainInput
 from app.services.planning.workout_proposals import RunningTemplateId
 
 logger = logging.getLogger(__name__)
-COACH_PROMPT_TEMPLATE_VERSION = "coach-prompt-v7"
-COACH_TOOL_CONTRACT_VERSION = "coach-tools-v6"
+COACH_PROMPT_TEMPLATE_VERSION = "coach-prompt-v8"
+COACH_TOOL_CONTRACT_VERSION = "coach-tools-v7"
 
 
 def _exception_source(exc: Exception) -> str:
@@ -98,6 +98,13 @@ Workout-Vorschläge:
   sicheren Fehlertext knapp und frage nach der konkret fehlenden oder korrigierten Angabe.
 - Verweise nach erfolgreicher Erstellung auf die serverseitige Vorschlagskarte. Eine Chat-Aussage
   wie "passt" ist niemals Annahme, Planung oder Garmin-Freigabe.
+- Ermittle vor einer Änderung das exakte eigene Workout und seine aktuelle Revision mit
+  get_revisable_running_workouts. Rufe revise_running_workout_proposal nur für diese IDs auf.
+- Revisionen dürfen ausschließlich Datum oder Zeitbudget desselben registrierten Formats ändern.
+  Übergib bei gewünschten eigenen Schritten, Intensitätszielen oder Formatwechseln
+  edit_scope=unsupported und erkläre die zurückgegebene unterstützte Alternative.
+- Eine Revision eines angenommenen Workouts ersetzt die angenommene Revision nicht. Verweise auf
+  die separate Aktion "Angenommenes Workout ersetzen" der serverseitigen Karte.
 """
 
 PLANNING_INPUT_PROMPT = """
@@ -695,6 +702,35 @@ def create_running_workout_proposal(
     )
 
 
+@tool
+def get_revisable_running_workouts(
+    runtime: ToolRuntime[CoachRuntimeContext],
+    limit: Annotated[int, Field(ge=1, le=20)] = 10,
+) -> str:
+    """List deterministic user-owned workouts and their exact current revision IDs."""
+    return coach_operations.get_revisable_running_workouts(runtime.context, limit)
+
+
+@tool
+def revise_running_workout_proposal(
+    runtime: ToolRuntime[CoachRuntimeContext],
+    workout_id: Annotated[int, Field(gt=0)],
+    revision_id: Annotated[int, Field(gt=0)],
+    suggested_for: date | None = None,
+    available_minutes: Annotated[int | None, Field(ge=20, le=1440)] = None,
+    edit_scope: Literal["supported_parameters", "unsupported"] = "supported_parameters",
+) -> str:
+    """Deterministically revise date or time budget without accepting the replacement."""
+    return coach_operations.revise_running_workout_proposal(
+        runtime.context,
+        workout_id=workout_id,
+        revision_id=revision_id,
+        suggested_for=suggested_for,
+        available_minutes=available_minutes,
+        edit_scope=edit_scope,
+    )
+
+
 COACH_TOOLS = (
     get_adaptive_context,
     get_current_recovery_state,
@@ -723,7 +759,12 @@ COACH_TOOLS = (
 
 def coach_tools(*, workout_proposals_enabled: bool) -> tuple[BaseTool, ...]:
     if workout_proposals_enabled:
-        return (*COACH_TOOLS, create_running_workout_proposal)
+        return (
+            *COACH_TOOLS,
+            create_running_workout_proposal,
+            get_revisable_running_workouts,
+            revise_running_workout_proposal,
+        )
     return COACH_TOOLS
 
 
@@ -956,7 +997,7 @@ def _artifact_type(content: object) -> str | None:
     if not isinstance(payload, dict):
         return None
     artifact = payload.get("artifact")
-    if payload.get("status") not in {"created", "updated", "recorded"} or not isinstance(
+    if payload.get("status") not in {"created", "revised", "updated", "recorded"} or not isinstance(
         artifact, dict
     ):
         return None

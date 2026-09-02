@@ -438,7 +438,7 @@ def _available_actions(
             _action(
                 workout.id,
                 "accept",
-                "Vorschlag annehmen",
+                ("Angenommenes Workout ersetzen" if accepted is not None else "Vorschlag annehmen"),
                 current,
                 current.suggested_for,
             )

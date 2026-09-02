@@ -37,7 +37,11 @@ from app.services.planning.workout_definition import (
     TimeEnd,
     WorkoutDefinitionV2,
 )
-from app.services.planning.workout_revision import RevisionMetadata, workout_content_hash
+from app.services.planning.workout_revision import (
+    RevisionIdentity,
+    RevisionMetadata,
+    workout_content_hash,
+)
 from app.services.planning.workout_service import (
     ProposalOrigin,
     WorkoutService,
@@ -66,6 +70,16 @@ class EasyRunProposalRequest(BaseModel):
 
 class RunningProposalRequest(EasyRunProposalRequest):
     template_id: RunningTemplateId = "easy_run"
+
+
+class RunningRevisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    workout_id: int = Field(gt=0)
+    revision_id: int = Field(gt=0)
+    suggested_for: date
+    available_minutes: int = Field(ge=20, le=1440)
+    idempotency_key: str = Field(min_length=8, max_length=200)
 
 
 class WorkoutProposalError(ValueError):
@@ -509,32 +523,99 @@ class RunningProposalService:
                 "Trainingsvorschläge sind noch nicht freigeschaltet.",
                 code="proposal.feature_disabled",
             )
+        data, metadata = self._build_candidate(
+            template_id=request.template_id,
+            suggested_for=request.suggested_for,
+            available_minutes=request.available_minutes,
+            edit_source="generator",
+        )
+        return workout_service.create_proposal(
+            data,
+            metadata,
+            idempotency_key=request.idempotency_key,
+            request_fingerprint=request_fingerprint,
+            origin=origin,
+        )
+
+    def revise(
+        self, request: RunningRevisionRequest, *, origin: ProposalOrigin | None = None
+    ) -> Workout:
+        workout_service = WorkoutService(self.session, self.user, request_id=self.request_id)
+        workout = workout_service.get(request.workout_id)
+        current = self.session.get(WorkoutRevision, request.revision_id)
+        if (
+            current is None
+            or current.workout_id != workout.id
+            or current.source_type != PROPOSAL_SOURCE
+            or current.template_id not in get_knowledge_registry().workouts
+        ):
+            raise WorkoutTransitionError(
+                "Dieses Workout kann nicht mit gebundenen Parametern revidiert werden. "
+                "Erstelle stattdessen einen neuen deterministischen Vorschlag in einem "
+                "registrierten Format.",
+                code="proposal.revision_unsupported",
+            )
+        data, metadata = self._build_candidate(
+            template_id=current.template_id,
+            suggested_for=request.suggested_for,
+            available_minutes=request.available_minutes,
+            edit_source="user",
+            current=current,
+            exclude_workout_id=workout.id,
+        )
+        return workout_service.update(
+            workout.id,
+            data,
+            expected_identity=RevisionIdentity(
+                revision_id=current.id,
+                revision_number=current.revision_number,
+                content_hash=current.content_hash,
+                lock_version=workout.lock_version,
+            ),
+            idempotency_key=request.idempotency_key,
+            proposal_metadata=metadata,
+            origin=origin,
+        )
+
+    def _build_candidate(
+        self,
+        *,
+        template_id: RunningTemplateId,
+        suggested_for: date,
+        available_minutes: int,
+        edit_source: str,
+        current: WorkoutRevision | None = None,
+        exclude_workout_id: int | None = None,
+    ) -> tuple[WorkoutInput, RevisionMetadata]:
         shadow = _candidate_inputs(
             self.session,
             self.user,
             as_of=self.as_of,
-            suggested_for=request.suggested_for,
+            suggested_for=suggested_for,
         )
         quality_conflicts: tuple[int, ...] = ()
-        if request.template_id in QUALITY_TEMPLATE_IDS:
+        if template_id in QUALITY_TEMPLATE_IDS:
             quality_conflicts = quality_density_conflicts(
-                self.session, self.user.id, request.suggested_for
+                self.session,
+                self.user.id,
+                suggested_for,
+                exclude_workout_id=exclude_workout_id,
             )
         registry = get_knowledge_registry()
-        template = registry.workouts[request.template_id]
+        template = registry.workouts[template_id]
         template_context = _template_context(
             self.session,
             self.user.id,
             shadow,
-            request.available_minutes,
+            available_minutes,
             self.as_of,
         )
         parameters: TemplateParameters | None = None
         if isinstance(template.structure, ContinuousStructure):
             selected_minutes = min(
-                request.available_minutes,
+                available_minutes,
                 template.structure.duration_minutes.maximum,
-                90 if request.template_id == "easy_run" else request.available_minutes,
+                90 if template_id == "easy_run" else available_minutes,
             )
             parameters = TemplateParameters(duration_minutes=selected_minutes)
         elif isinstance(template.structure, StridesStructure):
@@ -545,7 +626,7 @@ class RunningProposalService:
             )
             easy_minutes = min(
                 template.structure.easy_duration_minutes.maximum,
-                (request.available_minutes * 60 - overhead_seconds) // 60,
+                (available_minutes * 60 - overhead_seconds) // 60,
             )
             parameters = TemplateParameters(
                 duration_minutes=max(easy_minutes, 1),
@@ -571,21 +652,41 @@ class RunningProposalService:
                     template.structure.total_work_minutes.minimum
                     <= total_work
                     <= template.structure.total_work_minutes.maximum
-                    and duration <= request.available_minutes
+                    and duration <= available_minutes
                 ):
                     parameters = TemplateParameters(repetitions=repetitions)
                     break
         expanded = expand_workout_template(
-            request.template_id,
+            template_id,
             parameters,
             eligibility=template_context,
         )
         selected_minutes = ceil(expanded.load_estimate.duration_seconds / 60)
-        device_target = (
-            _easy_run_device_target(self.session, self.user.id)
-            if request.template_id == "easy_run"
-            else None
-        )
+        device_target = None
+        if template_id == "easy_run":
+            if current is None:
+                device_target = _easy_run_device_target(self.session, self.user.id)
+            else:
+                ensure_easy_run_device_target_current(self.session, self.user.id, current)
+                current_definition = current.definition_model
+                current_step = (
+                    current_definition.blocks[0] if len(current_definition.blocks) == 1 else None
+                )
+                current_provenance = (
+                    current.guidance_json.get("device_target") if current.guidance_json else None
+                )
+                if isinstance(current_step, StepBlockV2) and isinstance(
+                    current_step.target, HeartRateRangeTarget
+                ):
+                    if not isinstance(current_provenance, dict):
+                        raise WorkoutTransitionError(
+                            "Der persönliche Geräte-Zielkontext dieser Revision fehlt.",
+                            code="proposal.context_invalid",
+                        )
+                    device_target = EasyRunDeviceTarget(
+                        target=current_step.target,
+                        provenance=current_provenance,
+                    )
         if device_target is not None:
             definition = expanded.definition.model_copy(deep=True)
             step = definition.blocks[0]
@@ -606,7 +707,7 @@ class RunningProposalService:
         data = WorkoutInput(
             name=expanded.name,
             sport="running",
-            scheduled_for=request.suggested_for,
+            scheduled_for=suggested_for,
             description=f"Deterministischer {expanded.name}-Vorschlag von PacePilot.",
             definition=expanded.definition,
             definition_version=expanded.definition_version,
@@ -614,7 +715,7 @@ class RunningProposalService:
         assessment = assess_training_fit(
             self.session,
             self.user.id,
-            effective_workout_date=request.suggested_for,
+            effective_workout_date=suggested_for,
             revision_fingerprint=workout_content_hash(data),
             evaluated_at=datetime.combine(self.as_of, time.max),
         )
@@ -623,20 +724,19 @@ class RunningProposalService:
             shadow,
             assessment,
             template_context,
-            suggested_for=request.suggested_for,
-            available_minutes=request.available_minutes,
+            suggested_for=suggested_for,
+            available_minutes=available_minutes,
             selected_minutes=selected_minutes,
-            edit_source="generator",
+            edit_source=edit_source,
             as_of=self.as_of,
             quality_conflicts=quality_conflicts,
         )
-        return workout_service.create_proposal(
-            data,
-            metadata,
-            idempotency_key=request.idempotency_key,
-            request_fingerprint=request_fingerprint,
-            origin=origin,
-        )
+        if current is not None:
+            generation_context = deepcopy(metadata.generation_context_json)
+            assert generation_context is not None
+            generation_context["parent_revision_id"] = current.id
+            metadata = replace(metadata, generation_context_json=generation_context)
+        return data, metadata
 
 
 def edited_easy_run_metadata(

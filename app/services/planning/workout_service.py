@@ -818,6 +818,8 @@ class WorkoutService:
         *,
         expected_identity: RevisionIdentity | None = None,
         idempotency_key: str | None = None,
+        proposal_metadata: RevisionMetadata | None = None,
+        origin: ProposalOrigin | None = None,
     ) -> Workout:
         workout = self.get(workout_id)
         self._ensure_generated_proposals_enabled(workout)
@@ -867,9 +869,27 @@ class WorkoutService:
                     code="workout.revision_stale",
                 )
             expected_lock_version = expected_identity.lock_version
-            from app.services.planning.workout_proposals import edited_easy_run_metadata
+            if proposal_metadata is None:
+                from app.services.planning.workout_proposals import edited_easy_run_metadata
 
-            metadata = edited_easy_run_metadata(self.session, self.user, current, data)
+                metadata = edited_easy_run_metadata(self.session, self.user, current, data)
+            elif (
+                proposal_metadata.source_type != current.source_type
+                or proposal_metadata.template_id != current.template_id
+            ):
+                raise WorkoutTransitionError(
+                    "Die gebundene Revision muss Format und Quelle beibehalten.",
+                    code="proposal.revision_metadata_invalid",
+                )
+            else:
+                metadata = proposal_metadata
+            if origin is not None:
+                metadata = replace(
+                    metadata,
+                    model_provider=origin.model_provider,
+                    model_id=origin.model_id,
+                    prompt_template_version=origin.prompt_template_version,
+                )
         revision = self._create_revision(
             workout,
             data,
@@ -900,6 +920,11 @@ class WorkoutService:
                             else workout.materialized_revision_id
                         ),
                         approval_status="proposed",
+                        source_assistant_message_id=(
+                            origin.assistant_message_id
+                            if origin is not None
+                            else workout.source_assistant_message_id
+                        ),
                         lock_version=Workout.lock_version + 1,
                         **(
                             {
@@ -941,6 +966,11 @@ class WorkoutService:
                     "parent_revision_id": current.id,
                     "changed_fields": list(change_labels),
                     "request_hash": request_hash,
+                    **(
+                        {"source_assistant_message_id": origin.assistant_message_id}
+                        if origin is not None
+                        else {}
+                    ),
                 },
                 idempotency_key=idempotency_key,
             )
