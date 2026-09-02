@@ -989,18 +989,13 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
             ("reject", f"/workouts/{workout.id}/reject", revision.id, revision.suggested_for),
         ]
         assert artifact.warning is not None
-        assert artifact.warning.outcome == "warn"
+        assert artifact.warning.outcome == "caution"
         assert artifact.warning.evidence is not None
         assert artifact.warning.evidence.assessed_on == coaching_date
         assert artifact.warning.coverage_percent is not None
         assert artifact.warning.recommendation
-        assert artifact.warning_acknowledgement is not None
-        assert (
-            artifact.warning_acknowledgement.revision_id,
-            artifact.warning_acknowledgement.scheduled_for,
-        ) == (revision.id, revision.suggested_for)
-        assert artifact.warning_acknowledgement.key == "acknowledge_warning"
-        assert artifact.warning_acknowledgement not in artifact.lifecycle_actions
+        assert artifact.warning.safer_alternative
+        assert artifact.warning_acknowledgement is None
 
         other_user = User(display_name="Andere Person")
         session.add(other_user)

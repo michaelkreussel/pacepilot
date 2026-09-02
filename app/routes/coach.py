@@ -14,12 +14,7 @@ from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from app.auth import CurrentUser
-from app.config import (
-    DEFERRED_QUALITY_TEMPLATE_IDS,
-    coach_feature_enabled,
-    deferred_quality_templates_enabled,
-    get_settings,
-)
+from app.config import coach_feature_enabled, get_settings
 from app.database import SessionDep
 from app.models import CoachMessage
 from app.onboarding import require_data_access
@@ -175,8 +170,6 @@ def _render_coach(
             proposal_templates=[
                 {"id": template.id, "label": template.name}
                 for template in registered_workout_formats()
-                if template.id not in DEFERRED_QUALITY_TEMPLATE_IDS
-                or deferred_quality_templates_enabled()
             ],
             proposal_idempotency_key=str(uuid4()),
         ),

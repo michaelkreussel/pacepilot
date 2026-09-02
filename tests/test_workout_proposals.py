@@ -21,6 +21,7 @@ from app.models import (
 from app.models.user import utcnow
 from app.repositories.workouts import workouts_between
 from app.services.garmin.workout_export import compile_workout_with_report
+from app.services.planning.registry import registered_workout_formats
 from app.services.planning.validator import WorkoutInput
 from app.services.planning.workout_definition import (
     HeartRateRangeTarget,
@@ -33,7 +34,6 @@ from app.services.planning.workout_proposals import (
     RunningProposalRequest,
     RunningProposalService,
     RunningTemplateId,
-    WorkoutProposalError,
     _easy_run_device_target,
 )
 from app.services.planning.workout_revision import (
@@ -264,32 +264,17 @@ def test_easy_run_proposal_uses_requested_60_minutes(
 
 @pytest.mark.parametrize(
     "template_id",
-    [
-        "easy_run",
-        "recovery_run",
-        "long_run",
-        "strides",
-        "threshold_cruise",
-        "vo2_intervals",
-    ],
+    [template.id for template in registered_workout_formats()],
 )
-def test_running_proposal_service_supports_all_templates_in_development(
+def test_every_registered_format_produces_an_advisory_draft_with_sparse_history(
     template_id: RunningTemplateId,
     session_factory,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = get_settings()
     monkeypatch.setattr(settings, "coach_workout_proposals_enabled", True)
-    monkeypatch.setattr(settings, "coach_planner_history_gates_enabled", False)
-    monkeypatch.setattr(settings, "coach_deferred_quality_templates_enabled", True)
     with session_factory() as session:
         user = _user(session)
-        _history(session, user.id, date.today())
-        activities = list(session.scalars(select(Activity).order_by(Activity.id)))
-        for activity in activities:
-            activity.duration_s = 5400
-        activities[0].workout_rpe = 8
-        session.flush()
 
         workout = RunningProposalService(session, user, as_of=date.today()).create(
             RunningProposalRequest(
@@ -304,6 +289,24 @@ def test_running_proposal_service_supports_all_templates_in_development(
         assert revision is not None
         assert revision.template_id == template_id
         assert workout.approval_status == "proposed"
+        assert workout.accepted_revision_id is None
+        assert workout.scheduled_for is None
+        assert workout.local_schedule_status == "unscheduled"
+        assert revision.validation_report_json is not None
+        assert revision.validation_report_json["valid"] is True
+        assert revision.validation_report_json["issues"] == []
+        assert revision.guidance_json is not None
+        training_fit = revision.guidance_json["training_fit"]
+        assert isinstance(training_fit, dict)
+        assert (
+            training_fit["effective_workout_date"] == (date.today() + timedelta(days=1)).isoformat()
+        )
+        assert "proposal.running_history_sparse" in training_fit["warning_codes"]
+        assert training_fit["evidence"]
+        assert all("observed_on" in item for item in training_fit["evidence"])
+        assert training_fit["coverage"]
+        assert training_fit["recommendation"]
+        assert training_fit["alternative"]
         assert revision.generation_context_json is not None
         request_context = revision.generation_context_json["request"]
         assert isinstance(request_context, dict)
@@ -355,7 +358,7 @@ def test_stale_idempotency_precheck_rolls_back_duplicate_proposal(
         )
 
 
-def test_proposal_requires_recent_history_and_respects_safety_stop(
+def test_missing_history_and_safety_stop_are_persisted_as_advisory_warnings(
     session_factory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
@@ -363,11 +366,13 @@ def test_proposal_requires_recent_history_and_respects_safety_stop(
         user = _user(session)
         service = RunningProposalService(session, user, as_of=date.today())
 
-        with pytest.raises(WorkoutProposalError) as missing_history:
-            service.create_easy_run(_request(key="phase8-no-history"))
-        assert missing_history.value.code == "proposal.running_history_required"
+        sparse = service.create_easy_run(_request(key="phase8-no-history"))
+        sparse_revision = session.get(WorkoutRevision, sparse.current_revision_id)
+        assert sparse_revision is not None and sparse_revision.guidance_json is not None
+        sparse_fit = sparse_revision.guidance_json["training_fit"]
+        assert isinstance(sparse_fit, dict)
+        assert "proposal.running_history_sparse" in sparse_fit["warning_codes"]
 
-        _history(session, user.id, date.today())
         session.add(
             PreSessionFeedback(
                 user_id=user.id,
@@ -378,10 +383,23 @@ def test_proposal_requires_recent_history_and_respects_safety_stop(
         )
         session.flush()
 
-        with pytest.raises(WorkoutProposalError) as safety_stop:
-            service.create_easy_run(_request(key="phase8-safety-stop"))
-        assert safety_stop.value.code == "proposal.safety_blocked"
-        assert session.scalar(select(func.count()).select_from(Workout)) == 0
+        warned = service.create(
+            RunningProposalRequest(
+                template_id="easy_run",
+                suggested_for=date.today(),
+                available_minutes=45,
+                idempotency_key="phase8-safety-stop",
+            )
+        )
+        warned_revision = session.get(WorkoutRevision, warned.current_revision_id)
+        assert warned_revision is not None and warned_revision.guidance_json is not None
+        warned_fit = warned_revision.guidance_json["training_fit"]
+        assert isinstance(warned_fit, dict)
+        assert warned_fit["outcome"] == "elevated"
+        assert "safety.fever_or_systemic_illness" in warned_fit["warning_codes"]
+        assert warned_fit["alternative"]
+        assert warned.accepted_revision_id is None
+        assert session.scalar(select(func.count()).select_from(Workout)) == 2
 
 
 def test_easy_run_uses_personal_garmin_hr_range_as_device_target(
@@ -749,8 +767,6 @@ def test_proposal_route_is_feature_gated_and_renders_detail(
     assert "noch nicht freigeschaltet" in blocked.text
 
     monkeypatch.setattr(settings, "coach_workout_proposals_enabled", True)
-    monkeypatch.setattr(settings, "coach_planner_history_gates_enabled", False)
-    monkeypatch.setattr(settings, "coach_deferred_quality_templates_enabled", True)
     with session_factory() as session:
         user = session.scalar(select(User))
         assert user is not None
@@ -856,8 +872,6 @@ def test_quality_proposal_route_creates_non_editable_interval_workout(
 ) -> None:
     settings = get_settings()
     monkeypatch.setattr(settings, "coach_workout_proposals_enabled", True)
-    monkeypatch.setattr(settings, "coach_planner_history_gates_enabled", False)
-    monkeypatch.setattr(settings, "coach_deferred_quality_templates_enabled", True)
     with session_factory() as session:
         user = session.scalar(select(User))
         assert user is not None
@@ -882,7 +896,7 @@ def test_quality_proposal_route_creates_non_editable_interval_workout(
     assert "/edit" not in detail.text
 
 
-def test_quality_proposal_requires_spacing_from_accepted_quality(
+def test_quality_spacing_warns_without_hiding_the_requested_draft(
     session_factory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     settings = get_settings()
@@ -912,16 +926,27 @@ def test_quality_proposal_requires_spacing_from_accepted_quality(
             ),
         )
 
-        with pytest.raises(WorkoutProposalError) as conflict:
-            service.create(
-                RunningProposalRequest(
-                    template_id="vo2_intervals",
-                    suggested_for=date.today() + timedelta(days=2),
-                    available_minutes=60,
-                    idempotency_key="quality-spacing-second",
-                )
+        second = service.create(
+            RunningProposalRequest(
+                template_id="vo2_intervals",
+                suggested_for=date.today() + timedelta(days=2),
+                available_minutes=60,
+                idempotency_key="quality-spacing-second",
             )
-        assert conflict.value.code == "proposal.quality_spacing_violation"
+        )
+        second_revision = session.get(WorkoutRevision, second.current_revision_id)
+
+        assert second_revision is not None
+        assert second_revision.template_id == "vo2_intervals"
+        assert second.accepted_revision_id is None
+        assert second_revision.guidance_json is not None
+        training_fit = second_revision.guidance_json["training_fit"]
+        assert isinstance(training_fit, dict)
+        assert "proposal.quality_spacing_close" in training_fit["warning_codes"]
+        assert second_revision.generation_context_json is not None
+        quality_density = second_revision.generation_context_json["quality_density"]
+        assert isinstance(quality_density, dict)
+        assert quality_density["conflicting_workout_ids"] == [first.id]
 
 
 def test_generated_proposal_uses_shared_idempotent_garmin_service(

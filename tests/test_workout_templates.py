@@ -6,7 +6,6 @@ from hypothesis import given
 from hypothesis import strategies as st
 from pydantic import ValidationError
 
-from app.config import get_settings
 from app.models import Workout
 from app.services.garmin.workout_export import compile_workout_with_report
 from app.services.planning.constraints import (
@@ -16,6 +15,7 @@ from app.services.planning.constraints import (
     changes_at_most_one_progression_axis,
     has_single_session_distance_spike,
 )
+from app.services.planning.registry import registered_workout_formats
 from app.services.planning.validator import WorkoutInput, WorkoutValidationError, validate_workout
 from app.services.planning.workout_definition import (
     DefinitionValidationError,
@@ -61,9 +61,7 @@ def test_active_templates_expand_deterministically(template_id: str) -> None:
     assert workout_metrics(first.definition).duration_seconds > 0
 
 
-def test_deferred_and_out_of_range_templates_fail_explicitly() -> None:
-    with pytest.raises(TemplateExpansionError) as deferred:
-        expand_workout_template("threshold_cruise", eligibility=_eligibility())
+def test_out_of_range_template_parameter_fails_explicitly() -> None:
     with pytest.raises(TemplateExpansionError) as out_of_range:
         expand_workout_template(
             "easy_run",
@@ -71,7 +69,6 @@ def test_deferred_and_out_of_range_templates_fail_explicitly() -> None:
             eligibility=_eligibility(),
         )
 
-    assert deferred.value.code == "template.not_active"
     assert out_of_range.value.code == "template.parameter_out_of_range"
 
 
@@ -82,13 +79,11 @@ def test_deferred_and_out_of_range_templates_fail_explicitly() -> None:
         ("vo2_intervals", 60 * 60, "high"),
     ],
 )
-def test_deferred_quality_templates_expand_in_development_test_mode(
+def test_registered_quality_templates_expand_without_development_opt_in(
     template_id: str,
     expected_seconds: int,
     work_domain: str,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_deferred_quality_templates_enabled", True)
     expanded = expand_workout_template(
         template_id,
         eligibility=_eligibility(
@@ -96,7 +91,6 @@ def test_deferred_quality_templates_expand_in_development_test_mode(
             "reliable_current_performance_model",
             "quality_density_validation",
         ),
-        allow_deferred_quality=True,
     )
 
     assert expanded.load_estimate.duration_seconds == expected_seconds
@@ -107,16 +101,24 @@ def test_deferred_quality_templates_expand_in_development_test_mode(
     assert domains.low + domains.moderate + domains.high == expected_seconds
 
 
-def test_deferred_quality_expansion_requires_explicit_opt_in(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(get_settings(), "coach_deferred_quality_templates_enabled", True)
-    with pytest.raises(TemplateExpansionError) as blocked:
-        expand_workout_template(
-            "threshold_cruise",
-            eligibility=_eligibility("reliable_intensity_model", "quality_density_validation"),
-        )
-    assert blocked.value.code == "template.not_active"
+@pytest.mark.parametrize(
+    "template_id",
+    [template.id for template in registered_workout_formats()],
+)
+def test_every_registered_template_expands_with_sparse_advisory_context(template_id: str) -> None:
+    expanded = expand_workout_template(
+        template_id,
+        eligibility=TemplateEligibilityContext(
+            consistent_running_weeks=0,
+            runs_per_week=0,
+            available_minutes=240,
+            safety_stop=True,
+            active_contraindications={"insufficient_baseline", "fever_or_systemic_illness"},
+        ),
+    )
+
+    assert expanded.template_id == template_id
+    assert workout_metrics(expanded.definition).duration_seconds > 0
 
 
 def test_v1_v2_parsing_and_hash_include_local_guidance() -> None:
@@ -204,25 +206,21 @@ def test_progression_helpers_keep_risk_markers_conservative() -> None:
     assert not engine.catchup_stacking_is_allowed(True)
 
 
-def test_template_eligibility_and_time_budget_are_enforced() -> None:
-    with pytest.raises(TemplateExpansionError) as missing_baseline:
-        expand_workout_template("long_run", eligibility=_eligibility())
-    with pytest.raises(TemplateExpansionError) as safety_stop:
-        expand_workout_template(
-            "easy_run",
-            eligibility=TemplateEligibilityContext(
-                consistent_running_weeks=52,
-                runs_per_week=7,
-                available_minutes=60,
-                safety_stop=True,
-            ),
-        )
+def test_template_advisory_context_does_not_replace_positive_time_budget_gate() -> None:
+    expanded = expand_workout_template(
+        "long_run",
+        eligibility=TemplateEligibilityContext(
+            consistent_running_weeks=0,
+            runs_per_week=0,
+            available_minutes=120,
+            safety_stop=True,
+        ),
+    )
     with pytest.raises(TemplateExpansionError) as time_budget:
         expand_workout_template(
             "easy_run",
             eligibility=_eligibility(available_minutes=30),
         )
 
-    assert missing_baseline.value.code == "template.requirements_missing"
-    assert safety_stop.value.code == "template.safety_stop"
+    assert expanded.template_id == "long_run"
     assert time_budget.value.code == "template.available_time_exceeded"

@@ -361,6 +361,30 @@ def _warning_presentation(
     revision: WorkoutRevisionView,
 ) -> ArtifactWarningPresentation | None:
     context = revision.generation_context
+    guidance = revision.guidance or {}
+    training_fit = guidance.get("training_fit")
+    if isinstance(training_fit, dict):
+        outcome = training_fit.get("outcome")
+        if not isinstance(outcome, str):
+            return None
+        evaluated_at = training_fit.get("evaluated_at")
+        assessed_on = _date_value(evaluated_at[:10]) if isinstance(evaluated_at, str) else None
+        alternative = training_fit.get("alternative")
+        alternative_code = alternative.get("code") if isinstance(alternative, dict) else None
+        summary = revision.proposal_summary or {}
+        runs = summary.get("runs_28_days")
+        return ArtifactWarningPresentation(
+            outcome=outcome,
+            evidence=PersonalEvidencePresentation(
+                assessed_on=assessed_on,
+                runs_28_days=runs if isinstance(runs, int) and not isinstance(runs, bool) else None,
+                baseline_confidence=_string_value(summary.get("baseline_confidence")),
+                intensity_confidence=_string_value(summary.get("intensity_confidence")),
+            ),
+            coverage_percent=_number_value(summary.get("history_coverage_percent")),
+            recommendation=_string_value(training_fit.get("recommendation")),
+            safer_alternative=_string_value(alternative_code),
+        )
     if not context or not isinstance(safety := context.get("safety"), dict):
         return None
     outcome = safety.get("outcome")
@@ -374,7 +398,6 @@ def _warning_presentation(
         baseline_confidence=_string_value(summary.get("baseline_confidence")),
         intensity_confidence=_string_value(summary.get("intensity_confidence")),
     )
-    guidance = revision.guidance or {}
     return ArtifactWarningPresentation(
         outcome=outcome,
         evidence=evidence,
@@ -602,7 +625,9 @@ def _workout_artifact_presentation(
             revision_id=current.id,
             scheduled_for=current.suggested_for,
         )
-        if warning is not None and warning.outcome == "warn" and current.suggested_for is not None
+        if warning is not None
+        and warning.outcome in {"warn", "elevated"}
+        and current.suggested_for is not None
         else None
     )
     return WorkoutArtifactPresentation(

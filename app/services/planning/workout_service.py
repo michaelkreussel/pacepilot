@@ -209,7 +209,7 @@ class WorkoutService:
             validation = self._validate_context(
                 workout, revision, self._safety_context(workout, revision)
             )
-            if not validation.valid:
+            if metadata.source_type != "coach_single" and not validation.valid:
                 outcome = str(validation.report_json.get("outcome", "clarify"))
                 self.session.rollback()
                 raise WorkoutTransitionError(

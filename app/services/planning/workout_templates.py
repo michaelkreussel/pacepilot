@@ -4,7 +4,6 @@ from uuid import NAMESPACE_URL, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.config import DEFERRED_QUALITY_TEMPLATE_IDS, deferred_quality_templates_enabled
 from app.services.planning.load_estimate import IntensityDomainTime, LoadEstimate
 from app.services.planning.registry import KnowledgeRegistry, get_knowledge_registry
 from app.services.planning.registry_models import (
@@ -312,23 +311,11 @@ def expand_workout_template(
     *,
     eligibility: TemplateEligibilityContext,
     registry: KnowledgeRegistry | None = None,
-    allow_deferred_quality: bool = False,
 ) -> ExpandedWorkoutTemplate:
     knowledge = registry or get_knowledge_registry()
     template = knowledge.workouts.get(template_id)
     if template is None:
         raise TemplateExpansionError("Workout-Template nicht gefunden.", code="template.not_found")
-    deferred_allowed = (
-        allow_deferred_quality
-        and template.id in DEFERRED_QUALITY_TEMPLATE_IDS
-        and deferred_quality_templates_enabled()
-    )
-    if template.status != "active" and not deferred_allowed:
-        raise TemplateExpansionError(
-            "Dieses Workout-Template ist noch nicht freigegeben.",
-            code="template.not_active",
-        )
-    _validate_eligibility(template, eligibility)
     selected = parameters or TemplateParameters()
     if isinstance(template.structure, ContinuousStructure):
         definition, estimate = _continuous(template, template.structure, selected)
@@ -363,34 +350,3 @@ def expand_workout_template(
         load_estimate=estimate,
         evidence_refs=tuple(template.evidence_refs),
     )
-
-
-def _validate_eligibility(template: WorkoutTemplate, context: TemplateEligibilityContext) -> None:
-    if context.safety_stop:
-        raise TemplateExpansionError(
-            "Ein aktueller Sicherheitshinweis blockiert dieses Lauf-Template.",
-            code="template.safety_stop",
-        )
-    if context.consistent_running_weeks < template.eligibility.min_consistent_running_weeks:
-        raise TemplateExpansionError(
-            "Für dieses Template fehlt eine ausreichend lange konsistente Laufbasis.",
-            code="template.consistent_weeks_required",
-        )
-    if context.runs_per_week < template.eligibility.min_runs_per_week:
-        raise TemplateExpansionError(
-            "Für dieses Template fehlen regelmäßige Laufeinheiten pro Woche.",
-            code="template.weekly_runs_required",
-        )
-    built_in_requirements = {"available_time", "no_active_safety_stop"}
-    missing = set(template.eligibility.requirements) - built_in_requirements - context.facts
-    if missing:
-        raise TemplateExpansionError(
-            f"Voraussetzungen fehlen: {', '.join(sorted(missing))}.",
-            code="template.requirements_missing",
-        )
-    contraindications = set(template.contraindications) & context.active_contraindications
-    if contraindications:
-        raise TemplateExpansionError(
-            f"Gegenanzeigen aktiv: {', '.join(sorted(contraindications))}.",
-            code="template.contraindicated",
-        )

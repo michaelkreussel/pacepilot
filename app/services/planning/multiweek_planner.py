@@ -250,7 +250,6 @@ def _insert_deferred_quality(
                             "quality_density_validation",
                         },
                     ),
-                    allow_deferred_quality=True,
                 )
             except TemplateExpansionError:
                 continue

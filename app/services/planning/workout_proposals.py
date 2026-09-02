@@ -9,12 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.config import (
-    DEFERRED_QUALITY_TEMPLATE_IDS,
-    coach_feature_enabled,
-    deferred_quality_templates_enabled,
-    get_settings,
-)
+from app.config import coach_feature_enabled, get_settings
 from app.models import GarminAccount, User, Workout, WorkoutRevision
 from app.services.analytics.athlete_data import AthleteDataService
 from app.services.analytics.running_intensity import RunningShadowAnalysis
@@ -26,12 +21,12 @@ from app.services.planning.registry_models import (
     IntervalStructure,
     RpeRange,
     StridesStructure,
+    WorkoutTemplate,
 )
-from app.services.planning.safety_triage import (
-    SAFETY_RULE_SET_VERSION,
-    SafetyContext,
-    TriageOutcome,
-    build_proposal_safety_context,
+from app.services.planning.training_fit import (
+    TrainingFitAssessment,
+    TrainingFitOutcome,
+    assess_training_fit,
 )
 from app.services.planning.validator import WorkoutInput
 from app.services.planning.weekly_planner import _count_consistent_weeks
@@ -42,7 +37,7 @@ from app.services.planning.workout_definition import (
     TimeEnd,
     WorkoutDefinitionV2,
 )
-from app.services.planning.workout_revision import RevisionMetadata
+from app.services.planning.workout_revision import RevisionMetadata, workout_content_hash
 from app.services.planning.workout_service import (
     ProposalOrigin,
     WorkoutService,
@@ -56,9 +51,9 @@ from app.services.planning.workout_templates import (
 )
 
 PROPOSAL_SOURCE = "coach_single"
-PROPOSAL_RULE_SET_VERSION = f"running-workout-candidate-v3+{SAFETY_RULE_SET_VERSION}"
+PROPOSAL_RULE_SET_VERSION = "running-workout-candidate-v4"
 RunningTemplateId = WorkoutFormatId
-QUALITY_TEMPLATE_IDS = frozenset({"strides", *DEFERRED_QUALITY_TEMPLATE_IDS})
+QUALITY_TEMPLATE_IDS = frozenset({"strides", "threshold_cruise", "vo2_intervals"})
 
 
 class EasyRunProposalRequest(BaseModel):
@@ -169,33 +164,14 @@ def _candidate_inputs(
     *,
     as_of: date,
     suggested_for: date,
-) -> tuple[RunningShadowAnalysis, SafetyContext]:
+) -> RunningShadowAnalysis:
     if suggested_for < as_of:
         raise WorkoutProposalError(
             "Das vorgeschlagene Datum darf nicht in der Vergangenheit liegen.",
             code="proposal.date_in_past",
         )
     shadow = AthleteDataService(session, user.id, as_of=as_of).get_running_shadow_analysis()
-    recent = shadow.baseline.window(56)
-    if recent.runs == 0 or recent.quality.latest_run_age_days is None:
-        raise WorkoutProposalError(
-            "Für einen sicheren Vorschlag fehlt ein beobachteter Lauf aus den letzten 56 Tagen.",
-            code="proposal.running_history_required",
-        )
-    safety = build_proposal_safety_context(
-        session,
-        user.id,
-        suggested_for=suggested_for,
-        now=datetime.combine(as_of, time.max),
-    )
-    if not safety.report.valid:
-        message = (
-            "Ein aktueller Sicherheitshinweis blockiert einen Laufvorschlag."
-            if safety.report.outcome == TriageOutcome.SAFETY_STOP
-            else "Bitte kläre zuerst die offenen Sicherheitsangaben."
-        )
-        raise WorkoutProposalError(message, code="proposal.safety_blocked")
-    return shadow, safety
+    return shadow
 
 
 def quality_density_conflicts(
@@ -225,55 +201,149 @@ def quality_density_conflicts(
     return tuple(sorted(conflicts))
 
 
-def _eligibility(
+def _template_context(
     session: Session,
     user_id: int,
     shadow: RunningShadowAnalysis,
-    safety: SafetyContext,
     available_minutes: int,
-    template_id: RunningTemplateId,
     as_of: date,
 ) -> TemplateEligibilityContext:
     recent = shadow.baseline.window(28)
-    contraindications: set[str] = set()
-    issue_codes = {issue.code for issue in safety.report.issues}
-    if "safety.pain_alters_gait" in issue_codes:
-        contraindications.add("active_pain_affecting_gait")
-    if "safety.fever_or_systemic_illness" in issue_codes:
-        contraindications.add("fever_or_systemic_illness")
-    settings = get_settings()
     consistent_weeks = _count_consistent_weeks(session, user_id, as_of)
-    runs_per_week = max(round(recent.frequency_per_week), 1)
-    if not settings.coach_planner_history_gates_enabled:
-        required_weeks = 8 if template_id in DEFERRED_QUALITY_TEMPLATE_IDS else 4
-        required_runs = 3 if template_id in DEFERRED_QUALITY_TEMPLATE_IDS else 2
-        consistent_weeks = max(consistent_weeks, required_weeks)
-        runs_per_week = max(runs_per_week, required_runs)
-    facts: set[str] = set()
-    if recent.runs:
-        facts.add("easy_running_is_habitual_and_recovery_supportive")
-    if recent.longest_duration.value is not None:
-        facts.add("sufficient_recent_long_run_baseline")
-    if recent.hard_runs > 0:
-        facts.add("familiar_with_relaxed_fast_running")
-    if template_id in DEFERRED_QUALITY_TEMPLATE_IDS and deferred_quality_templates_enabled():
-        facts.update(
-            {
-                "reliable_intensity_model",
-                "reliable_current_performance_model",
-                "quality_density_validation",
-            }
-        )
-    if shadow.baseline.window(56).quality.confidence == "insufficient":
-        contraindications.add("insufficient_baseline")
     return TemplateEligibilityContext(
         consistent_running_weeks=consistent_weeks,
-        runs_per_week=runs_per_week,
+        runs_per_week=round(recent.frequency_per_week),
         available_minutes=available_minutes,
-        safety_stop=safety.report.outcome == TriageOutcome.SAFETY_STOP,
-        facts=facts,
-        active_contraindications=contraindications,
     )
+
+
+def _training_fit_artifact(
+    assessment: TrainingFitAssessment,
+    shadow: RunningShadowAnalysis,
+    template: WorkoutTemplate,
+    context: TemplateEligibilityContext,
+    *,
+    as_of: date,
+    quality_conflicts: tuple[int, ...],
+) -> dict[str, object]:
+    recent = shadow.baseline.window(56)
+    advisories: list[dict[str, object]] = []
+    if recent.runs == 0:
+        advisories.append(
+            {
+                "code": "proposal.running_history_sparse",
+                "source": "running.history",
+                "observed_on": as_of.isoformat(),
+                "value": 0,
+                "unit": "runs_56_days",
+                "severe": False,
+            }
+        )
+    if context.runs_per_week < max(template.eligibility.min_runs_per_week, 2):
+        advisories.append(
+            {
+                "code": "proposal.weekly_frequency_low",
+                "source": "running.frequency",
+                "observed_on": as_of.isoformat(),
+                "value": context.runs_per_week,
+                "unit": "runs_per_week",
+                "severe": False,
+            }
+        )
+    if context.consistent_running_weeks < max(template.eligibility.min_consistent_running_weeks, 4):
+        advisories.append(
+            {
+                "code": "proposal.consistent_weeks_sparse",
+                "source": "running.consistency",
+                "observed_on": as_of.isoformat(),
+                "value": context.consistent_running_weeks,
+                "unit": "weeks",
+                "severe": False,
+            }
+        )
+    if quality_conflicts:
+        advisories.append(
+            {
+                "code": "proposal.quality_spacing_close",
+                "source": "workout.accepted_quality",
+                "observed_on": assessment.effective_workout_date.isoformat(),
+                "value": list(quality_conflicts),
+                "unit": "workout_ids",
+                "severe": False,
+            }
+        )
+
+    warning_codes = list(
+        dict.fromkeys([*assessment.warning_codes, *(str(item["code"]) for item in advisories)])
+    )
+    outcome = assessment.outcome
+    if advisories and outcome == TrainingFitOutcome.NORMAL:
+        outcome = TrainingFitOutcome.CAUTION
+    if outcome == TrainingFitOutcome.ELEVATED:
+        recommendation = (
+            "Der angeforderte Entwurf bleibt verfügbar; für heute wird Auslassen oder eine "
+            "konservativere Alternative empfohlen."
+        )
+    elif warning_codes:
+        recommendation = (
+            "Der angeforderte Entwurf bleibt verfügbar; prüfe vor der Annahme die "
+            "konservativere Alternative."
+        )
+    else:
+        recommendation = "Der angeforderte Entwurf passt zu den aktuell verfügbaren Daten."
+
+    return {
+        "outcome": outcome.value,
+        "policy_version": assessment.policy_version,
+        "evaluated_at": assessment.evaluated_at.isoformat(),
+        "effective_workout_date": assessment.effective_workout_date.isoformat(),
+        "warning_codes": warning_codes,
+        "evidence": [
+            {
+                "code": item.code,
+                "source": item.source,
+                "observed_on": item.observed_on.isoformat(),
+                "value": item.value,
+                "unit": item.unit,
+                "personal_baseline": item.personal_baseline,
+                "ratio_from_baseline": item.ratio_from_baseline,
+                "severe": item.severe,
+                "feedback_id": item.feedback_id,
+            }
+            for item in assessment.evidence
+        ]
+        + advisories,
+        "coverage": [
+            {
+                "metric": item.metric,
+                "current_day": item.current_day.isoformat() if item.current_day else None,
+                "baseline_sample_count": item.baseline_sample_count,
+                "minimum_baseline_samples": item.minimum_baseline_samples,
+                "sufficient_for_elevation": item.sufficient_for_elevation,
+            }
+            for item in assessment.coverage
+        ]
+        + [
+            {
+                "metric": "running_history_56_days",
+                "current_day": (
+                    recent.quality.latest_run_day.isoformat()
+                    if recent.quality.latest_run_day
+                    else None
+                ),
+                "baseline_sample_count": recent.runs,
+                "minimum_baseline_samples": 1,
+                "sufficient_for_elevation": False,
+            }
+        ],
+        "feedback_ids": list(assessment.feedback_ids),
+        "authoritative_input_fingerprint": assessment.authoritative_input_fingerprint,
+        "recommendation": recommendation,
+        "alternative": {
+            "type": "registry_fallback",
+            "code": template.fallback_targets[0],
+        },
+    }
 
 
 def _validation_report(template_id: str, duration_minutes: int) -> dict[str, object]:
@@ -285,21 +355,20 @@ def _validation_report(template_id: str, duration_minutes: int) -> dict[str, obj
             {"code": "structure.valid", "result": "pass"},
             {"code": "template.duration", "result": "pass", "value": duration_minutes},
             {"code": "template.selected", "result": "pass", "value": template_id},
-            {"code": "athlete.recent_running_history", "result": "pass"},
-            {"code": "safety.current_context", "result": "pass"},
         ],
     }
 
 
 def _generation_context(
     shadow: RunningShadowAnalysis,
-    safety: SafetyContext,
+    training_fit: dict[str, object],
     *,
     suggested_for: date,
     available_minutes: int,
     selected_minutes: int,
     template_id: str,
     as_of: date,
+    quality_conflicts: tuple[int, ...],
 ) -> dict[str, object]:
     return {
         "schema_version": "running_workout_proposal_context.v2",
@@ -312,17 +381,16 @@ def _generation_context(
         },
         "athlete": shadow.generation_context,
         "athlete_context_fingerprint": shadow.context_fingerprint,
-        "safety": {
-            "outcome": safety.report.outcome.value,
-            "feedback_ids": list(safety.feedback_ids),
-            "rule_set_version": SAFETY_RULE_SET_VERSION,
+        "training_fit": {
+            "outcome": training_fit["outcome"],
+            "policy_version": training_fit["policy_version"],
+            "authoritative_input_fingerprint": training_fit["authoritative_input_fingerprint"],
         },
         "performance_model_version": shadow.intensity.intensity_version,
-        "deferred_quality_development_override": (template_id in DEFERRED_QUALITY_TEMPLATE_IDS),
         "quality_density": {
             "checked": template_id in QUALITY_TEMPLATE_IDS,
             "minimum_spacing_hours": 48,
-            "conflicting_workout_ids": [],
+            "conflicting_workout_ids": list(quality_conflicts),
         },
         "units": {"duration": "seconds", "distance": "meters", "rpe": "1-10"},
     }
@@ -331,13 +399,15 @@ def _generation_context(
 def _metadata(
     expanded: ExpandedWorkoutTemplate,
     shadow: RunningShadowAnalysis,
-    safety: SafetyContext,
+    assessment: TrainingFitAssessment,
+    template_context: TemplateEligibilityContext,
     *,
     suggested_for: date,
     available_minutes: int,
     selected_minutes: int,
     edit_source: str,
     as_of: date,
+    quality_conflicts: tuple[int, ...],
 ) -> RevisionMetadata:
     device_target = expanded.guidance.get("device_target")
     rationales = {
@@ -353,19 +423,29 @@ def _metadata(
     rationale = rationales.get(expanded.template_id, expanded.purpose)
     if isinstance(device_target, dict):
         rationale += " Dein persönlicher Garmin-HF-Bereich dient als zusätzliches Geräte-Ziel."
+    training_fit = _training_fit_artifact(
+        assessment,
+        shadow,
+        get_knowledge_registry().workouts[expanded.template_id],
+        template_context,
+        as_of=as_of,
+        quality_conflicts=quality_conflicts,
+    )
     guidance = {
         **expanded.guidance,
         "rationale": rationale,
         "evidence_refs": list(expanded.evidence_refs),
+        "training_fit": training_fit,
     }
     generation_context = _generation_context(
         shadow,
-        safety,
+        training_fit,
         suggested_for=suggested_for,
         available_minutes=available_minutes,
         selected_minutes=selected_minutes,
         template_id=expanded.template_id,
         as_of=as_of,
+        quality_conflicts=quality_conflicts,
     )
     if isinstance(device_target := guidance.get("device_target"), dict):
         generation_context["device_target"] = device_target
@@ -429,22 +509,26 @@ class RunningProposalService:
                 "Trainingsvorschläge sind noch nicht freigeschaltet.",
                 code="proposal.feature_disabled",
             )
-        shadow, safety = _candidate_inputs(
+        shadow = _candidate_inputs(
             self.session,
             self.user,
             as_of=self.as_of,
             suggested_for=request.suggested_for,
         )
+        quality_conflicts: tuple[int, ...] = ()
         if request.template_id in QUALITY_TEMPLATE_IDS:
-            conflicts = quality_density_conflicts(self.session, self.user.id, request.suggested_for)
-            if conflicts:
-                raise WorkoutProposalError(
-                    "Zu einer bereits angenommenen Qualitätseinheit fehlen mindestens "
-                    "48 Stunden Abstand.",
-                    code="proposal.quality_spacing_violation",
-                )
+            quality_conflicts = quality_density_conflicts(
+                self.session, self.user.id, request.suggested_for
+            )
         registry = get_knowledge_registry()
         template = registry.workouts[request.template_id]
+        template_context = _template_context(
+            self.session,
+            self.user.id,
+            shadow,
+            request.available_minutes,
+            self.as_of,
+        )
         parameters: TemplateParameters | None = None
         if isinstance(template.structure, ContinuousStructure):
             selected_minutes = min(
@@ -452,11 +536,6 @@ class RunningProposalService:
                 template.structure.duration_minutes.maximum,
                 90 if request.template_id == "easy_run" else request.available_minutes,
             )
-            if request.template_id == "long_run":
-                longest = shadow.baseline.window(28).longest_duration.value
-                if longest is not None:
-                    history_bound = int(float(longest) * 1.1 / 60) // 5 * 5
-                    selected_minutes = min(selected_minutes, history_bound)
             parameters = TemplateParameters(duration_minutes=selected_minutes)
         elif isinstance(template.structure, StridesStructure):
             repetitions = template.structure.repetitions.default
@@ -499,16 +578,7 @@ class RunningProposalService:
         expanded = expand_workout_template(
             request.template_id,
             parameters,
-            eligibility=_eligibility(
-                self.session,
-                self.user.id,
-                shadow,
-                safety,
-                request.available_minutes,
-                request.template_id,
-                self.as_of,
-            ),
-            allow_deferred_quality=request.template_id in DEFERRED_QUALITY_TEMPLATE_IDS,
+            eligibility=template_context,
         )
         selected_minutes = ceil(expanded.load_estimate.duration_seconds / 60)
         device_target = (
@@ -541,15 +611,24 @@ class RunningProposalService:
             definition=expanded.definition,
             definition_version=expanded.definition_version,
         )
+        assessment = assess_training_fit(
+            self.session,
+            self.user.id,
+            effective_workout_date=request.suggested_for,
+            revision_fingerprint=workout_content_hash(data),
+            evaluated_at=datetime.combine(self.as_of, time.max),
+        )
         metadata = _metadata(
             expanded,
             shadow,
-            safety,
+            assessment,
+            template_context,
             suggested_for=request.suggested_for,
             available_minutes=request.available_minutes,
             selected_minutes=selected_minutes,
             edit_source="generator",
             as_of=self.as_of,
+            quality_conflicts=quality_conflicts,
         )
         return workout_service.create_proposal(
             data,
@@ -628,7 +707,7 @@ def edited_easy_run_metadata(
             "Der Easy Run muss zwischen 20 Minuten und deinem Zeitbudget liegen.",
             code="proposal.easy_run_duration_invalid",
         )
-    shadow, safety = _candidate_inputs(session, user, as_of=as_of, suggested_for=data.scheduled_for)
+    shadow = _candidate_inputs(session, user, as_of=as_of, suggested_for=data.scheduled_for)
     estimate = LoadEstimate(
         duration_seconds=selected_minutes * 60,
         distance_meters=None,
@@ -643,12 +722,11 @@ def edited_easy_run_metadata(
             "individual_response_requires_baseline_validation",
         ],
     )
+    template_context = _template_context(session, user.id, shadow, available_minutes, as_of)
     expanded = expand_workout_template(
         "easy_run",
         TemplateParameters(duration_minutes=selected_minutes),
-        eligibility=_eligibility(
-            session, user.id, shadow, safety, available_minutes, "easy_run", as_of
-        ),
+        eligibility=template_context,
     )
     current_device_target = (
         current.guidance_json.get("device_target") if current.guidance_json else None
@@ -658,15 +736,24 @@ def edited_easy_run_metadata(
             expanded,
             guidance={**expanded.guidance, "device_target": current_device_target},
         )
+    assessment = assess_training_fit(
+        session,
+        user.id,
+        effective_workout_date=data.scheduled_for,
+        revision_fingerprint=workout_content_hash(data),
+        evaluated_at=datetime.combine(as_of, time.max),
+    )
     metadata = _metadata(
         expanded,
         shadow,
-        safety,
+        assessment,
+        template_context,
         suggested_for=data.scheduled_for,
         available_minutes=available_minutes,
         selected_minutes=selected_minutes,
         edit_source="user",
         as_of=as_of,
+        quality_conflicts=(),
     )
     generation_context = deepcopy(metadata.generation_context_json)
     assert generation_context is not None

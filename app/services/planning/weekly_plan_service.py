@@ -5,7 +5,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.config import DEFERRED_QUALITY_TEMPLATE_IDS, deferred_quality_templates_enabled
+from app.config import DEFERRED_QUALITY_TEMPLATE_IDS
 from app.models import (
     TrainingPlan,
     TrainingPlanRevision,
@@ -169,10 +169,6 @@ def _persist_week_candidate(
             history_gates.get("effective_consistent_running_weeks", consistent_weeks)
         )
         observed_runs = int(history_gates.get("effective_runs_per_week", observed_runs))
-    deferred_quality = candidate.generation_context.get("deferred_quality")
-    deferred_quality_recorded = (
-        isinstance(deferred_quality, dict) and deferred_quality.get("development_override") is True
-    )
     try:
         for position, item in enumerate(candidate.sessions):
             facts: set[str] = set()
@@ -199,11 +195,6 @@ def _persist_week_candidate(
                     runs_per_week=max(observed_runs, 1),
                     available_minutes=item.planned_minutes,
                     facts=facts,
-                ),
-                allow_deferred_quality=(
-                    is_deferred_quality
-                    and deferred_quality_recorded
-                    and deferred_quality_templates_enabled()
                 ),
             )
             data = WorkoutInput(
