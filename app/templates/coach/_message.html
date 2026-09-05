@@ -53,6 +53,7 @@
       </section>
       {% endfor %}
       <div data-proposal-artifacts>{% if card %}{% include "workouts/_coach_proposal_card.html" %}{% endif %}</div>
+      <div data-plan-artifacts>{% for artifact in plan_artifacts %}{% if artifact.artifact_type == 'weekly_plan' %}{% include "coach/_week_plan_card.html" %}{% elif artifact.artifact_type == 'training_cycle' %}{% include "coach/_cycle_card.html" %}{% endif %}{% endfor %}</div>
       {% if state in ['failed', 'interrupted'] %}<p class="mt-2 text-xs text-danger-emphasis" data-coach-error role="status">Diese Antwort konnte nicht abgeschlossen werden. Bitte versuche es erneut.</p>{% endif %}
     </div>
   </div>

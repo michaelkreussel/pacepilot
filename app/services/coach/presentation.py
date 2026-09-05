@@ -1,14 +1,29 @@
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
-from datetime import date
+from datetime import date, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import CoachConversation, CoachMessage, User, Workout, WorkoutRevision
+from app.models import (
+    CoachConversation,
+    CoachMessage,
+    TrainingCycle,
+    TrainingCycleRevision,
+    TrainingPlan,
+    TrainingPlanRevision,
+    TrainingPlanWorkout,
+    User,
+    Workout,
+    WorkoutRevision,
+)
 from app.repositories.coach import find_assistant_message
+from app.services.planning.planning_queries import list_training_cycle_week_details
+from app.services.planning.workout_definition import workout_metrics
 from app.services.planning.workout_service import WorkoutService
 from app.services.planning.workout_views import (
+    GOAL_TYPE_LABELS,
+    PLAN_ROLE_LABELS,
     WorkoutLifecycleProjection,
     WorkoutRevisionView,
     revision_view,
@@ -147,6 +162,123 @@ TRAINING_FIT_LABELS = {
     "caution": "Hinweis",
     "elevated": "Erhöht",
 }
+PLAN_CONFIDENCE_LABELS = {
+    "high": "Hoch",
+    "medium": "Mittel",
+    "low": "Niedrig",
+    "insufficient": "Unzureichend",
+}
+PLAN_PHASE_LABELS = {
+    "reentry": "Wiedereinstieg",
+    "base": "Basis",
+    "build": "Aufbau",
+    "specific": "Spezifisch",
+    "taper": "Tapering",
+    "recovery": "Regeneration",
+}
+PLAN_ALTERNATIVE_LABELS = {
+    "reduced_volume": "Reduzierter Umfang",
+    "reduced_frequency": "Reduzierte Häufigkeit",
+}
+PLAN_WARNING_LABELS = {
+    "planner.long_run_above_typical_weekly_longest": (
+        "Länger als dein typisch längster Wochenlauf"
+    ),
+    "planner.strides_adjacent_to_long_run": "Steigerungen direkt neben dem Langen Lauf",
+    "planner.deferred_quality_development_override": (
+        "Development-Testvorlage: vor Annahme besonders sorgfältig prüfen"
+    ),
+    "planner.weekly_frequency_low": "Geringe wöchentliche Laufhäufigkeit in der Historie",
+    "planner.baseline_confidence_insufficient": "Unzureichende Datengrundlage für die Basis",
+    "planner.baseline_confidence_low": "Unsichere Datengrundlage für die Basis",
+    "planner.reentry_conservative": "Konservativer Wiedereinstieg",
+    "planner.consistent_weeks_sparse": "Wenige konsistente Laufwochen",
+    "cycle.goal_horizon_short": "Kurzer Zielhorizont für das gewählte Ziel",
+    "cycle.goal_horizon_long": "Langer Zielhorizont für das gewählte Ziel",
+    "cycle.quality_density_elevated": "Erhöhte Dichte an Qualitätsreizen",
+    "cycle.long_run_progression_elevated": "Erhöhte Long-Run-Steigerung",
+    "cycle.existing_quality_spacing": "Geringer Abstand zu bestehenden Qualitätsreizen",
+    "cycle.history_limited": "Eingeschränkte Verlaufshistorie in einzelnen Wochen",
+}
+
+
+@dataclass(frozen=True)
+class PlanSessionPresentation:
+    scheduled_for: date
+    weekday_label: str
+    role_label: str
+    name: str
+    minutes: int | None
+
+
+@dataclass(frozen=True)
+class PlanEvidencePresentation:
+    assessed_on: date | None
+    coverage_percent: float | None
+    baseline_confidence: str | None
+    intensity_confidence: str | None
+
+
+@dataclass(frozen=True)
+class PlanWarningPresentation:
+    code: str
+    label: str
+
+
+@dataclass(frozen=True)
+class CycleWeekPresentation:
+    position: int
+    week_start: date
+    phase_label: str
+    minutes: int
+
+
+@dataclass(frozen=True)
+class WeekPlanArtifactPresentation:
+    artifact_type: str
+    plan_id: int
+    revision_id: int
+    revision_number: int
+    source_assistant_message_id: int
+    week_start: date
+    week_end: date
+    accepted_revision_id: int | None
+    is_current: bool
+    status_label: str
+    sessions: tuple[PlanSessionPresentation, ...]
+    confidence_label: str
+    evidence: PlanEvidencePresentation | None
+    warnings: tuple[PlanWarningPresentation, ...]
+    recommendation: str | None
+    alternative: str | None
+    accept_endpoint: str | None
+    details_url: str
+
+
+@dataclass(frozen=True)
+class TrainingCycleArtifactPresentation:
+    artifact_type: str
+    cycle_id: int
+    revision_id: int
+    revision_number: int
+    source_assistant_message_id: int
+    event_label: str
+    start_date: date
+    target_date: date
+    accepted_revision_id: int | None
+    is_current: bool
+    status_label: str
+    weeks: tuple[CycleWeekPresentation, ...]
+    confidence_label: str
+    assumptions: tuple[tuple[str, str], ...]
+    evidence: PlanEvidencePresentation | None
+    warnings: tuple[PlanWarningPresentation, ...]
+    alternative: str | None
+    accept_endpoint: str | None
+    details_url: str
+
+
+PlanArtifactCard = WeekPlanArtifactPresentation | TrainingCycleArtifactPresentation
 
 
 def _daily_adaptation_artifact_presentation(
@@ -803,3 +935,337 @@ def _workout_artifact_presentation(
         warning_acknowledgement=acknowledgement,
         lifecycle_actions=_available_actions(workout, current, accepted, lifecycle),
     )
+
+
+def _plan_warning(code: str) -> PlanWarningPresentation:
+    return PlanWarningPresentation(code=code, label=PLAN_WARNING_LABELS.get(code, code))
+
+
+def _plan_evidence(
+    advisory: dict[str, object],
+    baseline: dict[str, object],
+    intensity: dict[str, object],
+) -> PlanEvidencePresentation | None:
+    assessed: date | None = None
+    for section in (advisory.get("evidence"), advisory.get("coverage")):
+        if not isinstance(section, list):
+            continue
+        for item in section:
+            if not isinstance(item, dict):
+                continue
+            observed = _date_value(item.get("observed_on")) or _date_value(item.get("current_day"))
+            if observed is not None and (assessed is None or observed > assessed):
+                assessed = observed
+    coverage_percent: float | None = None
+    coverage = advisory.get("coverage")
+    if isinstance(coverage, list):
+        ratios: list[float] = []
+        for item in coverage:
+            if not isinstance(item, dict):
+                continue
+            samples = item.get("baseline_sample_count")
+            minimum = item.get("minimum_baseline_samples")
+            if (
+                isinstance(samples, int | float)
+                and not isinstance(samples, bool)
+                and isinstance(minimum, int | float)
+                and not isinstance(minimum, bool)
+                and minimum > 0
+            ):
+                ratios.append(min(float(samples) / float(minimum), 1.0))
+        if ratios:
+            coverage_percent = round(min(ratios) * 100.0, 1)
+    baseline_confidence = baseline.get("confidence")
+    intensity_confidence = intensity.get("confidence")
+    if (
+        assessed is None
+        and coverage_percent is None
+        and not isinstance(baseline_confidence, str)
+        and not isinstance(intensity_confidence, str)
+    ):
+        return None
+    return PlanEvidencePresentation(
+        assessed_on=assessed,
+        coverage_percent=coverage_percent,
+        baseline_confidence=(baseline_confidence if isinstance(baseline_confidence, str) else None),
+        intensity_confidence=(
+            intensity_confidence if isinstance(intensity_confidence, str) else None
+        ),
+    )
+
+
+def _advisory_section(context: dict[str, object], name: str) -> dict[str, object]:
+    value = context.get(name)
+    return value if isinstance(value, dict) else {}
+
+
+def _week_plan_sessions(
+    session: Session, user_id: int, revision_id: int
+) -> tuple[PlanSessionPresentation, ...]:
+    rows = session.execute(
+        select(TrainingPlanWorkout, Workout)
+        .join(Workout, Workout.id == TrainingPlanWorkout.workout_id)
+        .where(
+            TrainingPlanWorkout.plan_revision_id == revision_id,
+            TrainingPlanWorkout.owner_user_id == user_id,
+            Workout.user_id == user_id,
+            Workout.deleted_at.is_(None),
+        )
+        .order_by(TrainingPlanWorkout.position)
+    ).all()
+    sessions: list[PlanSessionPresentation] = []
+    for membership, workout in rows:
+        metrics = workout_metrics(workout.definition_model)
+        minutes = round(metrics.duration_seconds / 60) if metrics.duration_seconds > 0 else None
+        sessions.append(
+            PlanSessionPresentation(
+                scheduled_for=membership.scheduled_for,
+                weekday_label=WEEKDAY_LABELS[membership.scheduled_for.weekday()],
+                role_label=PLAN_ROLE_LABELS.get(membership.role, membership.role),
+                name=workout.name,
+                minutes=minutes,
+            )
+        )
+    return tuple(sessions)
+
+
+def _week_plan_card(
+    session: Session,
+    revision: TrainingPlanRevision,
+    plan: TrainingPlan,
+) -> WeekPlanArtifactPresentation:
+    context = (
+        revision.generation_context_json
+        if isinstance(revision.generation_context_json, dict)
+        else {}
+    )
+    advisory = _advisory_section(context, "advisory")
+    raw_warnings = advisory.get("warnings")
+    warnings = tuple(
+        _plan_warning(code)
+        for code in (raw_warnings if isinstance(raw_warnings, list) else [])
+        if isinstance(code, str)
+    )
+    recommendation = advisory.get("recommendation")
+    alternative = advisory.get("alternative")
+    alternative_label = None
+    if isinstance(alternative, dict):
+        alternative_code = alternative.get("code")
+        if isinstance(alternative_code, str):
+            alternative_label = PLAN_ALTERNATIVE_LABELS.get(alternative_code, alternative_code)
+    is_accepted = plan.accepted_revision_id == revision.id
+    is_current = plan.current_revision_id == revision.id
+    status_label = "Angenommen" if is_accepted else "Entwurf" if is_current else "Überholt"
+    today = date.today()
+    current_monday = today - timedelta(days=today.weekday())
+    week_offset = (revision.week_start - current_monday).days // 7
+    return WeekPlanArtifactPresentation(
+        artifact_type="weekly_plan",
+        plan_id=plan.id,
+        revision_id=revision.id,
+        revision_number=revision.revision_number,
+        source_assistant_message_id=revision.source_assistant_message_id or 0,
+        week_start=revision.week_start,
+        week_end=revision.week_end,
+        accepted_revision_id=plan.accepted_revision_id,
+        is_current=is_current,
+        status_label=status_label,
+        sessions=_week_plan_sessions(session, plan.user_id, revision.id),
+        confidence_label=PLAN_CONFIDENCE_LABELS.get(
+            str(advisory.get("confidence")), str(advisory.get("confidence", "–"))
+        ),
+        evidence=_plan_evidence(
+            advisory,
+            _advisory_section(context, "baseline"),
+            _advisory_section(context, "intensity"),
+        ),
+        warnings=warnings,
+        recommendation=recommendation if isinstance(recommendation, str) else None,
+        alternative=alternative_label,
+        accept_endpoint=(
+            f"/plans/weeks/{plan.id}/revisions/{revision.id}/accept"
+            if is_current and not is_accepted
+            else None
+        ),
+        details_url=f"/plans?view=week&week={week_offset}",
+    )
+
+
+def _cycle_card(
+    session: Session,
+    revision: TrainingCycleRevision,
+    cycle: TrainingCycle,
+) -> TrainingCycleArtifactPresentation:
+    assumptions = revision.assumptions_json if isinstance(revision.assumptions_json, dict) else {}
+    validation = (
+        revision.validation_report_json if isinstance(revision.validation_report_json, dict) else {}
+    )
+    raw_warnings = validation.get("warnings")
+    warnings = tuple(
+        _plan_warning(code)
+        for code in (raw_warnings if isinstance(raw_warnings, list) else [])
+        if isinstance(code, str)
+    )
+    alternative = validation.get("alternative")
+    alternative_label = None
+    if isinstance(alternative, dict):
+        alternative_code = alternative.get("code")
+        if isinstance(alternative_code, str):
+            alternative_label = PLAN_ALTERNATIVE_LABELS.get(alternative_code, alternative_code)
+    details = list_training_cycle_week_details(session, cycle.user_id, revision.id)
+    weeks: list[CycleWeekPresentation] = []
+    for detail in details:
+        minutes = sum(
+            round((fact.workout.duration_seconds or 0) / 60)
+            for fact in detail.workouts
+            if (fact.workout.duration_seconds or 0) > 0
+        )
+        weeks.append(
+            CycleWeekPresentation(
+                position=detail.membership.position,
+                week_start=detail.membership.week_start,
+                phase_label=PLAN_PHASE_LABELS.get(detail.membership.phase, detail.membership.phase),
+                minutes=minutes,
+            )
+        )
+    purpose = assumptions.get("purpose")
+    assumption_rows: list[tuple[str, str]] = [
+        ("Zieltyp", GOAL_TYPE_LABELS.get(revision.event_type, revision.event_type))
+    ]
+    if isinstance(purpose, str) and purpose:
+        assumption_rows.append(("Zweck", purpose))
+    effective_reentry = assumptions.get("effective_reentry")
+    if isinstance(effective_reentry, bool):
+        assumption_rows.append(("Wiedereinstieg", "Ja" if effective_reentry else "Nein"))
+    evidence_parts: list[PlanEvidencePresentation] = []
+    for detail in details:
+        member_revision = session.get(
+            TrainingPlanRevision, detail.membership.training_plan_revision_id
+        )
+        if member_revision is None:
+            continue
+        member_context = (
+            member_revision.generation_context_json
+            if isinstance(member_revision.generation_context_json, dict)
+            else {}
+        )
+        member_evidence = _plan_evidence(
+            _advisory_section(member_context, "advisory"),
+            _advisory_section(member_context, "baseline"),
+            _advisory_section(member_context, "intensity"),
+        )
+        if member_evidence is not None:
+            evidence_parts.append(member_evidence)
+    evidence = None
+    if evidence_parts:
+        assessed_dates = [
+            part.assessed_on for part in evidence_parts if part.assessed_on is not None
+        ]
+        coverages = [
+            part.coverage_percent for part in evidence_parts if part.coverage_percent is not None
+        ]
+        evidence = PlanEvidencePresentation(
+            assessed_on=max(assessed_dates) if assessed_dates else None,
+            coverage_percent=min(coverages) if coverages else None,
+            baseline_confidence=None,
+            intensity_confidence=None,
+        )
+    is_accepted = cycle.accepted_revision_id == revision.id
+    is_current = cycle.current_revision_id == revision.id
+    status_label = "Angenommen" if is_accepted else "Entwurf" if is_current else "Überholt"
+    return TrainingCycleArtifactPresentation(
+        artifact_type="training_cycle",
+        cycle_id=cycle.id,
+        revision_id=revision.id,
+        revision_number=revision.revision_number,
+        source_assistant_message_id=revision.source_assistant_message_id or 0,
+        event_label=GOAL_TYPE_LABELS.get(revision.event_type, revision.event_type),
+        start_date=revision.start_date,
+        target_date=revision.target_date,
+        accepted_revision_id=cycle.accepted_revision_id,
+        is_current=is_current,
+        status_label=status_label,
+        weeks=tuple(weeks),
+        confidence_label=PLAN_CONFIDENCE_LABELS.get(revision.confidence, revision.confidence),
+        assumptions=tuple(assumption_rows),
+        evidence=evidence,
+        warnings=warnings,
+        alternative=alternative_label,
+        accept_endpoint=(
+            f"/plans/cycles/{cycle.id}/revisions/{revision.id}/accept"
+            if is_current and not is_accepted
+            else None
+        ),
+        details_url=f"/plans/cycles/{cycle.id}",
+    )
+
+
+def plan_artifact_presentations(
+    session: Session,
+    user_id: int,
+    messages: Sequence[CoachMessage],
+) -> dict[int, tuple[PlanArtifactCard, ...]]:
+    message_ids = [message.id for message in messages if message.role == "assistant"]
+    if not message_ids:
+        return {}
+    owned_ids = set(
+        session.scalars(
+            select(CoachMessage.id)
+            .join(CoachConversation)
+            .where(
+                CoachConversation.user_id == user_id,
+                CoachMessage.id.in_(message_ids),
+                CoachMessage.role == "assistant",
+            )
+        )
+    )
+    if not owned_ids:
+        return {}
+    weekly_revisions = session.scalars(
+        select(TrainingPlanRevision)
+        .where(
+            TrainingPlanRevision.owner_user_id == user_id,
+            TrainingPlanRevision.source_assistant_message_id.in_(owned_ids),
+        )
+        .order_by(TrainingPlanRevision.id)
+    ).all()
+    cycle_revisions = session.scalars(
+        select(TrainingCycleRevision)
+        .where(
+            TrainingCycleRevision.owner_user_id == user_id,
+            TrainingCycleRevision.source_assistant_message_id.in_(owned_ids),
+        )
+        .order_by(TrainingCycleRevision.id)
+    ).all()
+    plan_ids = {revision.plan_id for revision in weekly_revisions}
+    cycle_ids = {revision.cycle_id for revision in cycle_revisions}
+    plans = {
+        plan.id: plan
+        for plan in session.scalars(
+            select(TrainingPlan).where(
+                TrainingPlan.user_id == user_id, TrainingPlan.id.in_(plan_ids)
+            )
+        )
+    }
+    cycles = {
+        cycle.id: cycle
+        for cycle in session.scalars(
+            select(TrainingCycle).where(
+                TrainingCycle.user_id == user_id, TrainingCycle.id.in_(cycle_ids)
+            )
+        )
+    }
+    presentations: dict[int, list[PlanArtifactCard]] = {}
+    for revision in weekly_revisions:
+        plan = plans.get(revision.plan_id)
+        message_id = revision.source_assistant_message_id
+        if plan is None or message_id not in owned_ids:
+            continue
+        presentations.setdefault(message_id, []).append(_week_plan_card(session, revision, plan))
+    for revision in cycle_revisions:
+        cycle = cycles.get(revision.cycle_id)
+        message_id = revision.source_assistant_message_id
+        if cycle is None or message_id not in owned_ids:
+            continue
+        presentations.setdefault(message_id, []).append(_cycle_card(session, revision, cycle))
+    return {message_id: tuple(cards) for message_id, cards in presentations.items() if cards}

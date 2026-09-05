@@ -31,6 +31,7 @@ from app.services.coach.agent import CoachEvent
 from app.services.coach.conversation import CoachHistoryMessage, CoachRuntimeContext
 from app.services.planning.planning_commands import (
     AnchorKind,
+    AvailabilityInput,
     GoalEventType,
     GoalUpdateInput,
     PerformanceAnchorUpdateInput,
@@ -40,8 +41,8 @@ from app.services.planning.safety_triage import IllnessSignal, PainInput
 from app.services.planning.workout_proposals import RunningTemplateId
 
 logger = logging.getLogger(__name__)
-COACH_PROMPT_TEMPLATE_VERSION = "coach-prompt-v9"
-COACH_TOOL_CONTRACT_VERSION = "coach-tools-v8"
+COACH_PROMPT_TEMPLATE_VERSION = "coach-prompt-v10"
+COACH_TOOL_CONTRACT_VERSION = "coach-tools-v9"
 
 
 def _exception_source(exc: Exception) -> str:
@@ -172,6 +173,25 @@ Tägliche Anpassung:
 - Verweise nach status assessed auf das serverseitige Artefakt. Wende keine Auswahl aus Chattext an;
   nur die ausdrücklich betätigten Artefakt-Schaltflächen dürfen beibehalten, reduzieren, ersetzen
   oder einen Ruhetag eintragen.
+"""
+
+PLANS_PROMPT = """
+Wochen- und Mehrwochenpläne:
+- Wenn der Nutzer ausdrücklich einen Wochenplan oder Mehrwochenplan möchte, kläre bei Bedarf
+  gezielt den Wochenbeginn (Montag), Start und Ziel sowie Ziel oder Zweck und verfügbare Zeit.
+- Rufe danach create_weekly_plan_draft oder create_training_cycle_draft auf. Konstruiere niemals
+  selbst Sitzungen, Umfänge, Phasen oder Trainingswerte.
+- Die Werkzeuge erzeugen ausschließlich unbestätigte Entwürfe ohne angenommene Inhalte. Verweise
+  nach erfolgreicher Erstellung auf die serverseitige Plankarte. Eine Chat-Aussage wie "passt"
+  ist niemals Annahme.
+- Ermittle vor einer Änderung den exakten eigenen Plan oder Zyklus mit
+  get_revisable_training_plans. Rufe revise_weekly_plan_draft oder revise_training_cycle_draft
+  nur für diese IDs auf.
+- Revisionen dürfen ausschließlich die unterstützten Parameter ändern. Übergib bei gewünschten
+  eigenen Sitzungen oder Strukturänderungen edit_scope=unsupported und erkläre die
+  zurückgegebene unterstützte Alternative.
+- Eine Revision eines angenommenen Plans ersetzt die angenommene Revision nicht. Verweise auf
+  die separate Annahme-Aktion der serverseitigen Karte.
 """
 
 
@@ -732,6 +752,101 @@ def get_revisable_running_workouts(
 
 
 @tool
+def get_revisable_training_plans(
+    runtime: ToolRuntime[CoachRuntimeContext],
+    limit: Annotated[int, Field(ge=1, le=20)] = 10,
+) -> str:
+    """List user-owned weekly plans and training cycles with exact current revision IDs."""
+    return coach_operations.get_revisable_training_plans(runtime.context, limit)
+
+
+@tool
+def create_weekly_plan_draft(
+    runtime: ToolRuntime[CoachRuntimeContext],
+    week_start: date,
+    availability: list[AvailabilityInput] | None = None,
+) -> str:
+    """Create one unaccepted weekly plan draft through the deterministic weekly planner.
+
+    Use this only when the athlete explicitly wants a weekly plan and the week start
+    plus available time are known. The result remains unaccepted. This tool cannot
+    accept a plan.
+    """
+    return coach_operations.create_weekly_plan_draft(
+        runtime.context,
+        week_start=week_start,
+        availability=availability,
+    )
+
+
+@tool
+def revise_weekly_plan_draft(
+    runtime: ToolRuntime[CoachRuntimeContext],
+    plan_id: Annotated[int, Field(gt=0)],
+    week_start: date | None = None,
+    availability: list[AvailabilityInput] | None = None,
+    edit_scope: Literal["supported_parameters", "unsupported"] = "supported_parameters",
+) -> str:
+    """Deterministically revise week or availability without accepting the replacement."""
+    return coach_operations.revise_weekly_plan_draft(
+        runtime.context,
+        plan_id=plan_id,
+        week_start=week_start,
+        availability=availability,
+        edit_scope=edit_scope,
+    )
+
+
+@tool
+def create_training_cycle_draft(
+    runtime: ToolRuntime[CoachRuntimeContext],
+    start_date: date,
+    target_date: date,
+    goal_id: Annotated[int | None, Field(gt=0)] = None,
+    event_type: GoalEventType | None = None,
+    purpose: Annotated[str | None, Field(max_length=200)] = None,
+) -> str:
+    """Create one unaccepted multiweek cycle draft through the deterministic cycle planner.
+
+    Use this only when the athlete explicitly wants a multiweek plan and the start,
+    target, and either an active goal or an explicit purpose are known. The result
+    remains unaccepted. This tool cannot accept a cycle.
+    """
+    return coach_operations.create_training_cycle_draft(
+        runtime.context,
+        start_date=start_date,
+        target_date=target_date,
+        goal_id=goal_id,
+        event_type=event_type,
+        purpose=purpose,
+    )
+
+
+@tool
+def revise_training_cycle_draft(
+    runtime: ToolRuntime[CoachRuntimeContext],
+    cycle_id: Annotated[int, Field(gt=0)],
+    start_date: date | None = None,
+    target_date: date | None = None,
+    event_type: GoalEventType | None = None,
+    goal_id: Annotated[int | None, Field(gt=0)] = None,
+    purpose: Annotated[str | None, Field(max_length=200)] = None,
+    edit_scope: Literal["supported_parameters", "unsupported"] = "supported_parameters",
+) -> str:
+    """Deterministically revise supported cycle fields without accepting the replacement."""
+    return coach_operations.revise_training_cycle_draft(
+        runtime.context,
+        cycle_id=cycle_id,
+        start_date=start_date,
+        target_date=target_date,
+        event_type=event_type,
+        goal_id=goal_id,
+        purpose=purpose,
+        edit_scope=edit_scope,
+    )
+
+
+@tool
 def revise_running_workout_proposal(
     runtime: ToolRuntime[CoachRuntimeContext],
     workout_id: Annotated[int, Field(gt=0)],
@@ -778,17 +893,29 @@ COACH_TOOLS = (
 
 
 def coach_tools(
-    *, workout_proposals_enabled: bool, daily_adaptation_enabled: bool = False
+    *,
+    workout_proposals_enabled: bool,
+    daily_adaptation_enabled: bool = False,
+    plan_generation_enabled: bool = False,
 ) -> tuple[BaseTool, ...]:
     tools = (*COACH_TOOLS, assess_daily_adaptation) if daily_adaptation_enabled else COACH_TOOLS
-    if not workout_proposals_enabled:
-        return tools
-    return (
-        *tools,
-        create_running_workout_proposal,
-        get_revisable_running_workouts,
-        revise_running_workout_proposal,
-    )
+    if workout_proposals_enabled:
+        tools = (
+            *tools,
+            create_running_workout_proposal,
+            get_revisable_running_workouts,
+            revise_running_workout_proposal,
+        )
+    if plan_generation_enabled:
+        tools = (
+            *tools,
+            get_revisable_training_plans,
+            create_weekly_plan_draft,
+            revise_weekly_plan_draft,
+            create_training_cycle_draft,
+            revise_training_cycle_draft,
+        )
+    return tools
 
 
 class OpenRouterCoachProvider:
@@ -800,12 +927,14 @@ class OpenRouterCoachProvider:
         timeout_seconds: float,
         workout_proposals_enabled: bool = False,
         daily_adaptation_enabled: bool = False,
+        plan_generation_enabled: bool = False,
     ) -> None:
         self._api_key = api_key
         self._model_id = model_id
         self._timeout_seconds = timeout_seconds
         self._workout_proposals_enabled = workout_proposals_enabled
         self._daily_adaptation_enabled = daily_adaptation_enabled
+        self._plan_generation_enabled = plan_generation_enabled
 
     def _build_agent(self) -> Any:
         model = _ToolMarkupAdapter(
@@ -834,6 +963,7 @@ class OpenRouterCoachProvider:
             tools=coach_tools(
                 workout_proposals_enabled=self._workout_proposals_enabled,
                 daily_adaptation_enabled=self._daily_adaptation_enabled,
+                plan_generation_enabled=self._plan_generation_enabled,
             ),
             system_prompt=SYSTEM_PROMPT
             + ADAPTIVE_CONTEXT_PROMPT
@@ -841,7 +971,8 @@ class OpenRouterCoachProvider:
             + PROGRESS_PROMPT
             + FEEDBACK_PROMPT
             + (DAILY_ADAPTATION_PROMPT if self._daily_adaptation_enabled else "")
-            + (PROPOSAL_PROMPT if self._workout_proposals_enabled else ""),
+            + (PROPOSAL_PROMPT if self._workout_proposals_enabled else "")
+            + (PLANS_PROMPT if self._plan_generation_enabled else ""),
             context_schema=CoachRuntimeContext,
             middleware=middleware,
             name="pacepilot_health_coach",
@@ -1036,6 +1167,10 @@ def _artifact_type(content: object) -> str | None:
         return None
     if artifact.get("type") == "workout_proposal":
         return "workout"
+    if artifact.get("type") == "weekly_plan":
+        return "weekly_plan"
+    if artifact.get("type") == "training_cycle":
+        return "training_cycle"
     if artifact.get("type") == "planning_input":
         return "planning_input"
     if artifact.get("type") == "feedback":

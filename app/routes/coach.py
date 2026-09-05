@@ -42,8 +42,10 @@ from app.services.coach.dependencies import (
     CoachProviderConfiguredDep,
 )
 from app.services.coach.presentation import (
+    PlanArtifactCard,
     PlanningArtifactPresentation,
     WorkoutArtifactPresentation,
+    plan_artifact_presentations,
     planning_artifact_presentations,
     workout_artifact_presentation,
     workout_artifact_presentations,
@@ -95,6 +97,7 @@ def _message_html(
     item: CoachMessage,
     card: WorkoutArtifactPresentation | None,
     planning_artifacts: Sequence[PlanningArtifactPresentation] = (),
+    plan_artifacts: Sequence[PlanArtifactCard] = (),
     *,
     message_state: str | None = None,
 ) -> str:
@@ -103,6 +106,7 @@ def _message_html(
         item=item,
         card=card,
         planning_artifacts=planning_artifacts,
+        plan_artifacts=plan_artifacts,
     )
     if message_state is not None:
         values["message_state"] = message_state
@@ -161,6 +165,9 @@ def _render_coach(
             proposal_cards=(_proposal_cards(session, user.id, messages) if selected else {}),
             planning_artifact_cards=(
                 planning_artifact_presentations(session, user.id, messages) if selected else {}
+            ),
+            plan_artifact_cards=(
+                plan_artifact_presentations(session, user.id, messages) if selected else {}
             ),
             today=date.today(),
             proposal_error=proposal_error,
@@ -679,8 +686,11 @@ async def _stream_answer(
                     planning_artifacts = planning_artifact_presentations(
                         session, runtime.user_id, [assistant_message]
                     ).get(assistant_message.id, ())
+                    plan_artifacts = plan_artifact_presentations(
+                        session, runtime.user_id, [assistant_message]
+                    ).get(assistant_message.id, ())
                     completed_html = _message_html(
-                        request, assistant_message, card, planning_artifacts
+                        request, assistant_message, card, planning_artifacts, plan_artifacts
                     )
                 logger.info(
                     "AI coach stream completed request_id=%s user_id=%s assistant_message_id=%s "
@@ -733,7 +743,12 @@ async def _stream_answer(
             planning_artifacts = planning_artifact_presentations(
                 session, runtime.user_id, [assistant_message]
             ).get(assistant_message.id, ())
-            failed_html = _message_html(request, assistant_message, card, planning_artifacts)
+            plan_artifacts = plan_artifact_presentations(
+                session, runtime.user_id, [assistant_message]
+            ).get(assistant_message.id, ())
+            failed_html = _message_html(
+                request, assistant_message, card, planning_artifacts, plan_artifacts
+            )
         logger.warning(
             "AI coach stream failed request_id=%s user_id=%s assistant_message_id=%s "
             "failure_category=%s duration_ms=%s",

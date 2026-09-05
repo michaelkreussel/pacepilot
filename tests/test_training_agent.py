@@ -35,6 +35,8 @@ from app.models import (
     PreSessionFeedback,
     TrainingCycle,
     TrainingCycleRevision,
+    TrainingPlan,
+    TrainingPlanRevision,
     User,
     Workout,
     WorkoutEvent,
@@ -50,6 +52,9 @@ from app.services.coach.agent import CoachEvent
 from app.services.coach.conversation import CoachHistoryMessage, CoachRuntimeContext
 from app.services.coach.dependencies import get_coach_agent_factory
 from app.services.coach.presentation import (
+    TrainingCycleArtifactPresentation,
+    WeekPlanArtifactPresentation,
+    plan_artifact_presentations,
     planning_artifact_presentations,
     workout_artifact_presentation,
 )
@@ -73,6 +78,7 @@ from app.services.planning import workout_proposals as workout_proposals_module
 from app.services.planning.daily_adaptation import DailyAdaptationClass
 from app.services.planning.feedback_service import FeedbackCommands
 from app.services.planning.planning_commands import (
+    AvailabilityInput,
     GoalUpdateInput,
     PerformanceAnchorUpdateInput,
     PlanningProfileUpdateInput,
@@ -2560,6 +2566,13 @@ def test_agent_registers_only_bounded_conversational_mutation_tools() -> None:
         )
     }
     enabled = {tool.name for tool in coach_tools(workout_proposals_enabled=True)}
+    plans_enabled = {
+        tool.name
+        for tool in coach_tools(
+            workout_proposals_enabled=True,
+            plan_generation_enabled=True,
+        )
+    }
     assert {
         "create_planning_goal",
         "update_planning_goal",
@@ -2577,6 +2590,13 @@ def test_agent_registers_only_bounded_conversational_mutation_tools() -> None:
         "revise_running_workout_proposal",
     }
     assert adaptation_enabled - read_only == {"assess_daily_adaptation"}
+    assert plans_enabled - enabled == {
+        "get_revisable_training_plans",
+        "create_weekly_plan_draft",
+        "revise_weekly_plan_draft",
+        "create_training_cycle_draft",
+        "revise_training_cycle_draft",
+    }
     adaptation_tool = next(
         tool
         for tool in coach_tools(
@@ -2600,6 +2620,82 @@ def test_agent_registers_only_bounded_conversational_mutation_tools() -> None:
         }
         & enabled
     )
+    assert (
+        not {
+            "accept_training_plan",
+            "accept_training_cycle",
+            "schedule_plan",
+            "publish_plan",
+            "push_plan",
+        }
+        & plans_enabled
+    )
+
+
+def test_plan_tool_schemas_expose_only_bounded_user_choices() -> None:
+    tools = {
+        tool.name: tool
+        for tool in coach_tools(
+            workout_proposals_enabled=True,
+            plan_generation_enabled=True,
+        )
+    }
+    expected = {
+        "get_revisable_training_plans": {"limit"},
+        "create_weekly_plan_draft": {"week_start", "availability"},
+        "revise_weekly_plan_draft": {
+            "plan_id",
+            "week_start",
+            "availability",
+            "edit_scope",
+        },
+        "create_training_cycle_draft": {
+            "start_date",
+            "target_date",
+            "goal_id",
+            "event_type",
+            "purpose",
+        },
+        "revise_training_cycle_draft": {
+            "cycle_id",
+            "start_date",
+            "target_date",
+            "event_type",
+            "goal_id",
+            "purpose",
+            "edit_scope",
+        },
+    }
+    assert expected.keys() <= tools.keys()
+    for name, properties in expected.items():
+        schema_model: Any = tools[name].tool_call_schema
+        schema = schema_model.model_json_schema()
+        assert set(schema["properties"]) == properties
+        serialized = json.dumps(schema)
+        assert "user_id" not in serialized
+        assert "conversation_id" not in serialized
+        assert "assistant_message_id" not in serialized
+        assert "accepted_revision" not in serialized
+        assert "idempotency" not in serialized
+        assert "as_of" not in serialized
+    cycle_schema_model: Any = tools["create_training_cycle_draft"].tool_call_schema
+    event_type_schema = cycle_schema_model.model_json_schema()["properties"]["event_type"]
+    assert [
+        variant.get("enum") for variant in event_type_schema.get("anyOf", []) if "enum" in variant
+    ] == [
+        [
+            "general_fitness",
+            "5k",
+            "10k",
+            "half_marathon",
+            "marathon",
+        ]
+    ]
+    revise_schema_model: Any = tools["revise_weekly_plan_draft"].tool_call_schema
+    assert revise_schema_model.model_json_schema()["properties"]["edit_scope"]["enum"] == [
+        "supported_parameters",
+        "unsupported",
+    ]
 
 
 def test_daily_adaptation_operation_uses_runtime_date_and_rejects_cross_user_workout(
@@ -3664,3 +3760,815 @@ def test_coach_card_separates_elevated_acknowledgement_from_acceptance(
     assert 'name="acknowledge_elevated_warning"' in card.text
     assert f'action="/workouts/{workout_id}/confirm"' in card.text
     assert "Vorschlag annehmen" in card.text
+
+
+PLAN_DRAFT_AS_OF = date(2026, 8, 26)
+PLAN_DRAFT_MONDAY = date(2026, 8, 31)
+PLAN_DRAFT_AVAILABILITY = (
+    AvailabilityInput(weekday=0, available=True, available_minutes=60),
+    AvailabilityInput(weekday=2, available=True, available_minutes=75),
+    AvailabilityInput(weekday=5, available=True, available_minutes=120),
+)
+
+
+def _plan_draft_runtime(
+    session_factory: sessionmaker[Session],
+    user: User,
+    *,
+    as_of: date = PLAN_DRAFT_AS_OF,
+) -> CoachRuntimeContext:
+    with session_factory() as session:
+        conversation = CoachConversation(user_id=user.id, title="BC17")
+        session.add(conversation)
+        session.flush()
+        user_message = CoachMessage(
+            conversation_id=conversation.id,
+            role="user",
+            content="Erstelle einen Trainingsplan.",
+            status="completed",
+        )
+        assistant_message = CoachMessage(
+            conversation_id=conversation.id,
+            role="assistant",
+            content="",
+            status="streaming",
+        )
+        session.add_all([user_message, assistant_message])
+        session.commit()
+        return CoachRuntimeContext(
+            user_id=user.id,
+            as_of=as_of,
+            session_factory=session_factory,
+            conversation_id=conversation.id,
+            user_message_id=user_message.id,
+            assistant_message_id=assistant_message.id,
+        )
+
+
+def _plan_draft_history(session: Session, user_id: int) -> None:
+    index = 0
+    for week_offset in range(3):
+        for run_offset in (0, 3):
+            started = PLAN_DRAFT_AS_OF - timedelta(days=7 * week_offset + run_offset)
+            session.add(
+                Activity(
+                    user_id=user_id,
+                    garmin_activity_id=f"coach-plan-run-{user_id}-{index}",
+                    name=f"Planlauf {index}",
+                    activity_type="running",
+                    started_at=datetime.combine(started, time(8)),
+                    duration_s=5400,
+                    distance_m=12000,
+                    average_hr=145,
+                    max_hr=170,
+                    synced_at=utcnow(),
+                )
+            )
+            index += 1
+    session.add_all(
+        AthleteAvailability(
+            user_id=user_id,
+            weekday=item.weekday,
+            available=True,
+            available_minutes=item.available_minutes,
+        )
+        for item in PLAN_DRAFT_AVAILABILITY
+    )
+    session.flush()
+
+
+def test_conversation_creates_weekly_plan_draft(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
+    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
+    with session_factory() as session:
+        user = User(display_name="Owner")
+        session.add(user)
+        session.flush()
+        _plan_draft_history(session, user.id)
+        session.commit()
+        runtime = _plan_draft_runtime(session_factory, user)
+
+    created = json.loads(
+        coach_operations.create_weekly_plan_draft(
+            runtime,
+            week_start=PLAN_DRAFT_MONDAY,
+            availability=PLAN_DRAFT_AVAILABILITY,
+        )
+    )
+    assert created["status"] == "created"
+    assert created["artifact"]["type"] == "weekly_plan"
+    plan_id = created["artifact"]["plan_id"]
+    revision_id = created["artifact"]["revision_id"]
+
+    repeated = json.loads(
+        coach_operations.create_weekly_plan_draft(
+            runtime,
+            week_start=PLAN_DRAFT_MONDAY,
+            availability=PLAN_DRAFT_AVAILABILITY,
+        )
+    )
+    assert repeated == created
+
+    with session_factory() as session:
+        plan = session.get(TrainingPlan, plan_id)
+        assert plan is not None
+        assert plan.week_start == PLAN_DRAFT_MONDAY
+        assert plan.accepted_revision_id is None
+        assert plan.current_revision_id == revision_id
+        revision = session.get(TrainingPlanRevision, revision_id)
+        assert revision is not None
+        assert revision.source_assistant_message_id == runtime.assistant_message_id
+        assert revision.generation_context_json["as_of"] == PLAN_DRAFT_AS_OF.isoformat()
+        assert session.scalar(select(func.count()).select_from(TrainingPlanRevision)) == 1
+
+
+def test_conversation_creates_training_cycle_draft_from_goal(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
+    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
+    target = PLAN_DRAFT_MONDAY + timedelta(weeks=8) - timedelta(days=1)
+    with session_factory() as session:
+        user = User(display_name="Owner")
+        session.add(user)
+        session.flush()
+        _plan_draft_history(session, user.id)
+        goal = AthleteGoal(user_id=user.id, event_type="10k", target_date=target)
+        session.add(goal)
+        session.commit()
+        runtime = _plan_draft_runtime(session_factory, user)
+        goal_id = goal.id
+
+    created = json.loads(
+        coach_operations.create_training_cycle_draft(
+            runtime,
+            start_date=PLAN_DRAFT_MONDAY,
+            target_date=target,
+            goal_id=goal_id,
+        )
+    )
+    assert created["status"] == "created"
+    assert created["artifact"]["type"] == "training_cycle"
+    cycle_id = created["artifact"]["cycle_id"]
+    revision_id = created["artifact"]["revision_id"]
+
+    with session_factory() as session:
+        cycle = session.get(TrainingCycle, cycle_id)
+        assert cycle is not None
+        assert cycle.accepted_revision_id is None
+        assert cycle.current_revision_id == revision_id
+        revision = session.get(TrainingCycleRevision, revision_id)
+        assert revision is not None
+        assert revision.source_assistant_message_id == runtime.assistant_message_id
+        assert revision.event_type == "10k"
+        assert revision.confidence
+        assert isinstance(revision.assumptions_json, dict)
+
+
+def test_conversation_cycle_draft_needs_purpose_without_goal(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
+    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
+    target = PLAN_DRAFT_MONDAY + timedelta(weeks=8) - timedelta(days=1)
+    with session_factory() as session:
+        user = User(display_name="Owner")
+        session.add(user)
+        session.flush()
+        _plan_draft_history(session, user.id)
+        session.commit()
+        runtime = _plan_draft_runtime(session_factory, user)
+
+    missing = json.loads(
+        coach_operations.create_training_cycle_draft(
+            runtime,
+            start_date=PLAN_DRAFT_MONDAY,
+            target_date=target,
+        )
+    )
+    assert missing["status"] == "needs_clarification"
+    assert "Zweck" in missing["question"] or "Ziel" in missing["question"]
+
+    created = json.loads(
+        coach_operations.create_training_cycle_draft(
+            runtime,
+            start_date=PLAN_DRAFT_MONDAY,
+            target_date=target,
+            purpose="Allgemeine Fitness",
+        )
+    )
+    assert created["status"] == "created"
+
+    with session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(TrainingCycle)) == 1
+        revision = session.scalar(select(TrainingCycleRevision))
+        assert revision is not None
+        assert revision.assumptions_json.get("purpose") == "Allgemeine Fitness"
+
+
+def test_conversational_plan_revision_regenerates_and_rejects_unsupported(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
+    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
+    with session_factory() as session:
+        user = User(display_name="Owner")
+        session.add(user)
+        session.flush()
+        _plan_draft_history(session, user.id)
+        session.commit()
+        runtime = _plan_draft_runtime(session_factory, user)
+
+    weekly = json.loads(
+        coach_operations.create_weekly_plan_draft(
+            runtime,
+            week_start=PLAN_DRAFT_MONDAY,
+            availability=PLAN_DRAFT_AVAILABILITY,
+        )
+    )
+    revised_weekly = json.loads(
+        coach_operations.revise_weekly_plan_draft(
+            runtime,
+            plan_id=weekly["artifact"]["plan_id"],
+            availability=(
+                AvailabilityInput(weekday=0, available=True, available_minutes=45),
+                AvailabilityInput(weekday=2, available=True, available_minutes=45),
+                AvailabilityInput(weekday=5, available=True, available_minutes=90),
+            ),
+        )
+    )
+    assert revised_weekly["status"] == "revised"
+    assert revised_weekly["artifact"]["type"] == "weekly_plan"
+    assert revised_weekly["artifact"]["revision_id"] != weekly["artifact"]["revision_id"]
+
+    empty_weekly = json.loads(
+        coach_operations.revise_weekly_plan_draft(
+            runtime,
+            plan_id=weekly["artifact"]["plan_id"],
+        )
+    )
+    assert empty_weekly["status"] == "needs_clarification"
+
+    unsupported_weekly = json.loads(
+        coach_operations.revise_weekly_plan_draft(
+            runtime,
+            plan_id=weekly["artifact"]["plan_id"],
+            edit_scope="unsupported",
+        )
+    )
+    assert unsupported_weekly["status"] == "not_revised"
+    assert unsupported_weekly["error"]["code"] == "plan.revision_edit_unsupported"
+    assert unsupported_weekly["supported_alternative"]["command"] == ("create_weekly_plan_draft")
+
+    cycle_start = PLAN_DRAFT_MONDAY + timedelta(weeks=1)
+    cycle_target = cycle_start + timedelta(weeks=8) - timedelta(days=1)
+    cycle = json.loads(
+        coach_operations.create_training_cycle_draft(
+            runtime,
+            start_date=cycle_start,
+            target_date=cycle_target,
+            purpose="Allgemeine Fitness",
+        )
+    )
+    revised_cycle = json.loads(
+        coach_operations.revise_training_cycle_draft(
+            runtime,
+            cycle_id=cycle["artifact"]["cycle_id"],
+            target_date=cycle_target + timedelta(weeks=1),
+        )
+    )
+    assert revised_cycle["status"] == "revised"
+    assert revised_cycle["artifact"]["revision_id"] != cycle["artifact"]["revision_id"]
+
+    unsupported_cycle = json.loads(
+        coach_operations.revise_training_cycle_draft(
+            runtime,
+            cycle_id=cycle["artifact"]["cycle_id"],
+            edit_scope="unsupported",
+        )
+    )
+    assert unsupported_cycle["status"] == "not_revised"
+    assert unsupported_cycle["error"]["code"] == "plan.revision_edit_unsupported"
+
+    with session_factory() as session:
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(TrainingPlanRevision)
+                .where(TrainingPlanRevision.plan_id == weekly["artifact"]["plan_id"])
+            )
+            == 2
+        )
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(TrainingCycleRevision)
+                .where(TrainingCycleRevision.cycle_id == cycle["artifact"]["cycle_id"])
+            )
+            == 2
+        )
+
+
+def test_conversational_plan_drafts_reject_cross_user_ids_and_incomplete_runtime(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
+    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
+    target = PLAN_DRAFT_MONDAY + timedelta(weeks=8) - timedelta(days=1)
+    with session_factory() as session:
+        owner = User(display_name="Owner")
+        other = User(display_name="Other")
+        session.add_all([owner, other])
+        session.flush()
+        _plan_draft_history(session, other.id)
+        session.commit()
+        foreign_runtime = _plan_draft_runtime(session_factory, other)
+        owner_runtime = _plan_draft_runtime(session_factory, owner)
+
+    foreign_weekly = json.loads(
+        coach_operations.create_weekly_plan_draft(
+            foreign_runtime,
+            week_start=PLAN_DRAFT_MONDAY,
+            availability=PLAN_DRAFT_AVAILABILITY,
+        )
+    )
+    foreign_cycle = json.loads(
+        coach_operations.create_training_cycle_draft(
+            foreign_runtime,
+            start_date=PLAN_DRAFT_MONDAY,
+            target_date=target,
+            purpose="Allgemeine Fitness",
+        )
+    )
+    foreign_plan_id = foreign_weekly["artifact"]["plan_id"]
+    foreign_cycle_id = foreign_cycle["artifact"]["cycle_id"]
+
+    incomplete = CoachRuntimeContext(
+        user_id=owner_runtime.user_id,
+        as_of=PLAN_DRAFT_AS_OF,
+        session_factory=session_factory,
+    )
+    with pytest.raises(ValueError, match="runtime is incomplete"):
+        coach_operations.create_weekly_plan_draft(incomplete, week_start=PLAN_DRAFT_MONDAY)
+    with pytest.raises(ValueError, match="runtime is incomplete"):
+        coach_operations.revise_weekly_plan_draft(incomplete, plan_id=foreign_plan_id)
+    with pytest.raises(ValueError, match="runtime is incomplete"):
+        coach_operations.create_training_cycle_draft(
+            incomplete, start_date=PLAN_DRAFT_MONDAY, target_date=target
+        )
+    with pytest.raises(ValueError, match="runtime is incomplete"):
+        coach_operations.revise_training_cycle_draft(incomplete, cycle_id=foreign_cycle_id)
+    with pytest.raises(ValueError, match="runtime is incomplete"):
+        coach_operations.get_revisable_training_plans(incomplete)
+
+    cross_weekly = json.loads(
+        coach_operations.revise_weekly_plan_draft(
+            owner_runtime,
+            plan_id=foreign_plan_id,
+            availability=PLAN_DRAFT_AVAILABILITY,
+        )
+    )
+    assert cross_weekly["status"] == "not_revised"
+    assert cross_weekly["error"]["code"] == "plan.not_found"
+    cross_cycle = json.loads(
+        coach_operations.revise_training_cycle_draft(
+            owner_runtime,
+            cycle_id=foreign_cycle_id,
+            purpose="Anderer Zweck",
+        )
+    )
+    assert cross_cycle["status"] == "not_revised"
+    assert cross_cycle["error"]["code"] == "cycle.not_found"
+
+    with session_factory() as session:
+        owner_id = owner_runtime.user_id
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(TrainingPlanRevision)
+                .where(TrainingPlanRevision.owner_user_id == owner_id)
+            )
+            == 0
+        )
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(TrainingCycleRevision)
+                .where(TrainingCycleRevision.owner_user_id == owner_id)
+            )
+            == 0
+        )
+
+
+def test_conversation_lists_revisable_training_plans(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
+    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
+    with session_factory() as session:
+        owner = User(display_name="Owner")
+        other = User(display_name="Other")
+        session.add_all([owner, other])
+        session.flush()
+        _plan_draft_history(session, owner.id)
+        _plan_draft_history(session, other.id)
+        session.commit()
+        owner_runtime = _plan_draft_runtime(session_factory, owner)
+        other_runtime = _plan_draft_runtime(session_factory, other)
+
+    foreign_weekly = json.loads(
+        coach_operations.create_weekly_plan_draft(
+            other_runtime,
+            week_start=PLAN_DRAFT_MONDAY,
+            availability=PLAN_DRAFT_AVAILABILITY,
+        )
+    )
+    weekly = json.loads(
+        coach_operations.create_weekly_plan_draft(
+            owner_runtime,
+            week_start=PLAN_DRAFT_MONDAY,
+            availability=PLAN_DRAFT_AVAILABILITY,
+        )
+    )
+    cycle_start = PLAN_DRAFT_MONDAY + timedelta(weeks=1)
+    cycle_target = cycle_start + timedelta(weeks=8) - timedelta(days=1)
+    cycle = json.loads(
+        coach_operations.create_training_cycle_draft(
+            owner_runtime,
+            start_date=cycle_start,
+            target_date=cycle_target,
+            purpose="Allgemeine Fitness",
+        )
+    )
+
+    listed = json.loads(coach_operations.get_revisable_training_plans(owner_runtime))
+    by_plan = {entry["plan_id"]: entry for entry in listed["weekly_plans"]}
+    assert by_plan[weekly["artifact"]["plan_id"]] == {
+        "plan_id": weekly["artifact"]["plan_id"],
+        "revision_id": weekly["artifact"]["revision_id"],
+        "week_start": PLAN_DRAFT_MONDAY.isoformat(),
+        "accepted_revision_id": None,
+    }
+    assert foreign_weekly["artifact"]["plan_id"] not in by_plan
+    assert listed["training_cycles"] == [
+        {
+            "cycle_id": cycle["artifact"]["cycle_id"],
+            "revision_id": cycle["artifact"]["revision_id"],
+            "event_type": "general_fitness",
+            "start_date": cycle_start.isoformat(),
+            "target_date": cycle_target.isoformat(),
+            "accepted_revision_id": None,
+        }
+    ]
+    bounded = json.loads(coach_operations.get_revisable_training_plans(owner_runtime, limit=2))
+    assert len(bounded["weekly_plans"]) == 2
+    assert len(bounded["training_cycles"]) == 1
+
+
+def test_conversational_plan_generation_requires_feature_flag(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
+    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", False)
+    target = PLAN_DRAFT_MONDAY + timedelta(weeks=8) - timedelta(days=1)
+    with session_factory() as session:
+        user = User(display_name="Owner")
+        session.add(user)
+        session.flush()
+        _plan_draft_history(session, user.id)
+        session.commit()
+        runtime = _plan_draft_runtime(session_factory, user)
+
+    disabled_weekly = json.loads(
+        coach_operations.create_weekly_plan_draft(
+            runtime,
+            week_start=PLAN_DRAFT_MONDAY,
+            availability=PLAN_DRAFT_AVAILABILITY,
+        )
+    )
+    assert disabled_weekly["status"] == "not_created"
+    assert disabled_weekly["error"]["code"] == "plan.feature_disabled"
+    disabled_cycle = json.loads(
+        coach_operations.create_training_cycle_draft(
+            runtime,
+            start_date=PLAN_DRAFT_MONDAY,
+            target_date=target,
+            purpose="Allgemeine Fitness",
+        )
+    )
+    assert disabled_cycle["status"] == "not_created"
+    assert disabled_cycle["error"]["code"] == "plan.feature_disabled"
+
+    with session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(TrainingPlan)) == 0
+        assert session.scalar(select(func.count()).select_from(TrainingCycle)) == 0
+
+
+def test_conversation_renders_weekly_plan_card_with_exact_acceptance(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
+    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
+    coaching_date = PLAN_DRAFT_AS_OF
+
+    class TurnStartDate(date):
+        @classmethod
+        def today(cls) -> date:
+            return coaching_date
+
+    monkeypatch.setattr(coach_route_module, "date", TurnStartDate)
+
+    class WeekPlanAgent:
+        runtime: CoachRuntimeContext | None = None
+
+        async def stream(
+            self,
+            messages: Sequence[CoachHistoryMessage],
+            runtime: CoachRuntimeContext,
+        ) -> AsyncIterator[CoachEvent]:
+            del messages
+            self.runtime = runtime
+            created = json.loads(
+                coach_operations.create_weekly_plan_draft(
+                    runtime,
+                    week_start=PLAN_DRAFT_MONDAY,
+                    availability=PLAN_DRAFT_AVAILABILITY,
+                )
+            )
+            assert created["status"] == "created"
+            yield CoachEvent("artifact_available", artifact_type="weekly_plan")
+            yield CoachEvent("answer_text", text="Ich habe einen Wochenplan vorbereitet.")
+            yield CoachEvent("completed")
+
+    fake = WeekPlanAgent()
+    app.dependency_overrides[get_coach_agent_factory] = lambda: lambda: fake
+    with session_factory() as session:
+        user = session.scalar(select(User))
+        assert user is not None
+        _plan_draft_history(session, user.id)
+        session.commit()
+        user_id = user.id
+    conversation_id = _new_chat(client)
+
+    response = client.post(
+        f"/coach/{conversation_id}/messages",
+        data={"message": "Erstelle mir einen Wochenplan ab Montag."},
+    )
+    assert response.status_code == 200
+    assert fake.runtime is not None
+    assert fake.runtime.as_of == coaching_date
+    assistant_message_id = fake.runtime.assistant_message_id
+    assert assistant_message_id is not None
+    completed_html = cast(str, _sse_payload(response.text, "answer.completed")["html"])
+
+    with session_factory() as session:
+        plan = session.scalar(select(TrainingPlan))
+        assert plan is not None
+        revision = session.scalar(select(TrainingPlanRevision))
+        assert revision is not None
+        assert revision.source_assistant_message_id == assistant_message_id
+        assert plan.accepted_revision_id is None
+        plan_id, revision_id = plan.id, revision.id
+        assistant_message = session.get(CoachMessage, assistant_message_id)
+        assert assistant_message is not None
+        cards = plan_artifact_presentations(session, user_id, [assistant_message])
+        assert set(cards) == {assistant_message_id}
+        card = cards[assistant_message_id][0]
+        assert isinstance(card, WeekPlanArtifactPresentation)
+        assert (card.plan_id, card.revision_id) == (plan_id, revision_id)
+        assert card.accept_endpoint == (f"/plans/weeks/{plan_id}/revisions/{revision_id}/accept")
+        assert card.sessions
+        assert card.confidence_label
+        assert card.evidence is not None
+        assert card.evidence.assessed_on == coaching_date
+
+        other_user = User(display_name="Andere Person")
+        session.add(other_user)
+        session.flush()
+        assert plan_artifact_presentations(session, other_user.id, [assistant_message]) == {}
+
+    assert "Wochenplan-Entwurf" in completed_html
+    assert f'action="/plans/weeks/{plan_id}/revisions/{revision_id}/accept"' in (completed_html)
+    assert "Wochenplan annehmen" in completed_html
+
+    page = client.get(f"/coach/{conversation_id}")
+    assert page.status_code == 200
+    assert "Wochenplan-Entwurf" in page.text
+    assert f'action="/plans/weeks/{plan_id}/revisions/{revision_id}/accept"' in page.text
+
+    accepted = client.post(
+        f"/plans/weeks/{plan_id}/revisions/{revision_id}/accept",
+        follow_redirects=False,
+    )
+    assert accepted.status_code == 303
+    with session_factory() as session:
+        plan = session.get(TrainingPlan, plan_id)
+        assert plan is not None
+        assert plan.accepted_revision_id == revision_id
+
+    updated = client.get(f"/coach/{conversation_id}")
+    assert updated.status_code == 200
+    assert "Angenommen" in updated.text
+    assert f'action="/plans/weeks/{plan_id}/revisions/{revision_id}/accept"' not in (updated.text)
+
+
+def test_conversation_renders_training_cycle_card_with_evidence_and_warnings(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
+    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
+    coaching_date = PLAN_DRAFT_AS_OF
+    cycle_target = PLAN_DRAFT_MONDAY + timedelta(weeks=8) - timedelta(days=1)
+
+    class TurnStartDate(date):
+        @classmethod
+        def today(cls) -> date:
+            return coaching_date
+
+    monkeypatch.setattr(coach_route_module, "date", TurnStartDate)
+
+    class CycleAgent:
+        runtime: CoachRuntimeContext | None = None
+
+        async def stream(
+            self,
+            messages: Sequence[CoachHistoryMessage],
+            runtime: CoachRuntimeContext,
+        ) -> AsyncIterator[CoachEvent]:
+            del messages
+            self.runtime = runtime
+            created = json.loads(
+                coach_operations.create_training_cycle_draft(
+                    runtime,
+                    start_date=PLAN_DRAFT_MONDAY,
+                    target_date=cycle_target,
+                    purpose="Allgemeine Fitness",
+                )
+            )
+            assert created["status"] == "created"
+            yield CoachEvent("artifact_available", artifact_type="training_cycle")
+            yield CoachEvent("answer_text", text="Ich habe einen Mehrwochenplan vorbereitet.")
+            yield CoachEvent("completed")
+
+    fake = CycleAgent()
+    app.dependency_overrides[get_coach_agent_factory] = lambda: lambda: fake
+    with session_factory() as session:
+        user = session.scalar(select(User))
+        assert user is not None
+        _plan_draft_history(session, user.id)
+        session.commit()
+        user_id = user.id
+    conversation_id = _new_chat(client)
+
+    response = client.post(
+        f"/coach/{conversation_id}/messages",
+        data={"message": "Erstelle mir einen Mehrwochenplan für allgemeine Fitness."},
+    )
+    assert response.status_code == 200
+    assert fake.runtime is not None
+    assistant_message_id = fake.runtime.assistant_message_id
+    assert assistant_message_id is not None
+    completed_html = cast(str, _sse_payload(response.text, "answer.completed")["html"])
+
+    with session_factory() as session:
+        cycle = session.scalar(select(TrainingCycle))
+        assert cycle is not None
+        revision = session.scalar(select(TrainingCycleRevision))
+        assert revision is not None
+        assert revision.source_assistant_message_id == assistant_message_id
+        cycle_id, revision_id = cycle.id, revision.id
+        assistant_message = session.get(CoachMessage, assistant_message_id)
+        assert assistant_message is not None
+        cards = plan_artifact_presentations(session, user_id, [assistant_message])
+        assert len(cards[assistant_message_id]) == 9
+        cycle_cards = [
+            card for card in cards[assistant_message_id] if card.artifact_type == "training_cycle"
+        ]
+        assert len(cycle_cards) == 1
+        card = cycle_cards[0]
+        assert isinstance(card, TrainingCycleArtifactPresentation)
+        assert (card.cycle_id, card.revision_id) == (cycle_id, revision_id)
+        assert card.accept_endpoint == (f"/plans/cycles/{cycle_id}/revisions/{revision_id}/accept")
+        assert len(card.weeks) == 8
+        assert card.confidence_label
+        assert any("Allgemeine Fitness" in value for _, value in card.assumptions)
+
+    assert "Mehrwochenplan-Entwurf" in completed_html
+    assert "Allgemeine Fitness" in completed_html
+    assert f'action="/plans/cycles/{cycle_id}/revisions/{revision_id}/accept"' in (completed_html)
+    assert "Mehrwochenplan annehmen" in completed_html
+    assert f'href="/plans/cycles/{cycle_id}"' in completed_html
+
+    accepted = client.post(
+        f"/plans/cycles/{cycle_id}/revisions/{revision_id}/accept",
+        follow_redirects=False,
+    )
+    assert accepted.status_code == 303
+    with session_factory() as session:
+        cycle = session.get(TrainingCycle, cycle_id)
+        assert cycle is not None
+        assert cycle.accepted_revision_id == revision_id
+
+
+def test_sparse_weekly_card_exposes_dated_evidence_coverage_and_confidence(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
+    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
+    with session_factory() as session:
+        user = User(display_name="Owner")
+        session.add(user)
+        session.flush()
+        session.commit()
+        runtime = _plan_draft_runtime(session_factory, user)
+        user_id = user.id
+
+    created = json.loads(
+        coach_operations.create_weekly_plan_draft(
+            runtime,
+            week_start=PLAN_DRAFT_MONDAY,
+            availability=PLAN_DRAFT_AVAILABILITY,
+        )
+    )
+    assert created["status"] == "created"
+
+    with session_factory() as session:
+        assistant_message = session.get(CoachMessage, runtime.assistant_message_id)
+        assert assistant_message is not None
+        cards = plan_artifact_presentations(session, user_id, [assistant_message])
+        card = cards[assistant_message.id][0]
+        assert isinstance(card, WeekPlanArtifactPresentation)
+        assert card.warnings
+        for warning in card.warnings:
+            assert warning.code
+            assert warning.label
+        assert card.evidence is not None
+        assert card.evidence.assessed_on == PLAN_DRAFT_AS_OF
+        assert card.evidence.coverage_percent is not None
+        assert card.confidence_label
+        assert card.recommendation
+        assert card.alternative
+
+
+def test_plan_draft_survives_provider_failure_after_commit(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
+    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
+    coaching_date = PLAN_DRAFT_AS_OF
+
+    class TurnStartDate(date):
+        @classmethod
+        def today(cls) -> date:
+            return coaching_date
+
+    monkeypatch.setattr(coach_route_module, "date", TurnStartDate)
+
+    class FailingAfterPlanAgent:
+        async def stream(
+            self,
+            messages: Sequence[CoachHistoryMessage],
+            runtime: CoachRuntimeContext,
+        ) -> AsyncIterator[CoachEvent]:
+            del messages
+            coach_operations.create_weekly_plan_draft(
+                runtime,
+                week_start=PLAN_DRAFT_MONDAY,
+                availability=PLAN_DRAFT_AVAILABILITY,
+            )
+            yield CoachEvent("artifact_available", artifact_type="weekly_plan")
+            yield CoachEvent("failed")
+
+    app.dependency_overrides[get_coach_agent_factory] = lambda: lambda: FailingAfterPlanAgent()
+    with session_factory() as session:
+        user = session.scalar(select(User))
+        assert user is not None
+        _plan_draft_history(session, user.id)
+        session.commit()
+    conversation_id = _new_chat(client)
+    response = client.post(
+        f"/coach/{conversation_id}/messages",
+        data={"message": "Erstelle mir einen Wochenplan."},
+    )
+    assert response.status_code == 200
+    failed_html = cast(str, _sse_payload(response.text, "error")["html"])
+    assert "Wochenplan-Entwurf" in failed_html
+
+    with session_factory() as session:
+        revision = session.scalar(select(TrainingPlanRevision))
+        assert revision is not None
+        assistant = session.scalar(select(CoachMessage).where(CoachMessage.role == "assistant"))
+        assert assistant is not None and assistant.status == "failed"
+        assert revision.source_assistant_message_id == assistant.id
+
+    reloaded = client.get(f"/coach/{conversation_id}")
+    assert reloaded.status_code == 200
+    assert "Wochenplan-Entwurf" in reloaded.text

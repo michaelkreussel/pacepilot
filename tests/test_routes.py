@@ -23,6 +23,7 @@ from app.models import (
     GarminSyncState,
     SyncEvent,
     SyncRun,
+    TrainingCycle,
     TrainingPlan,
     TrainingPlanRevision,
     User,
@@ -1082,7 +1083,7 @@ def test_edit_draft_workout(client: TestClient, session_factory: sessionmaker[Se
     assert "startPaletteDrag('interval'" in form.text
     assert "/static/icons/workout.svg#pencil" in form.text
     assert "setDropTarget(null, index)" in form.text
-    assert "/static/css/tailwind.css?v=20260905-31" in form.text
+    assert "/static/css/tailwind.css?v=20260905-32" in form.text
     assert "/static/js/theme.js?v=20260809-3" in form.text
     assert "data-theme-toggle" in form.text
 
@@ -2035,3 +2036,126 @@ def test_multiweek_plan_generate_detail_and_accept(
     assert accepted.status_code == 303
     accepted_detail = client.get(accepted.headers["location"])
     assert "Planrevision angenommen" in accepted_detail.text
+
+
+def test_plan_acceptance_targets_exact_revision_and_requires_csrf(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: Any,
+) -> None:
+    from app.services.planning.multiweek_planner import revise_training_cycle
+    from app.services.planning.planning_commands import (
+        AvailabilityInput,
+        CycleRevisionInput,
+        WeekPlanRevisionInput,
+    )
+    from app.services.planning.weekly_plan_service import revise_week_plan
+
+    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
+    monday = _seed_shadow_week_history(session_factory)
+    generated = client.post(
+        "/plans/generate-week",
+        data={"week_start": monday.isoformat()},
+        follow_redirects=False,
+    )
+    assert generated.status_code == 303
+
+    with session_factory() as session:
+        user = session.scalar(select(User))
+        assert user is not None
+        plan = session.scalar(select(TrainingPlan))
+        assert plan is not None
+        stale_id = plan.current_revision_id
+        assert stale_id is not None
+        revised = revise_week_plan(
+            session,
+            user,
+            plan_id=plan.id,
+            data=WeekPlanRevisionInput(
+                availability=[
+                    AvailabilityInput(weekday=0, available=True, available_minutes=45),
+                    AvailabilityInput(weekday=2, available=True, available_minutes=45),
+                    AvailabilityInput(weekday=5, available=True, available_minutes=90),
+                ]
+            ),
+        )
+        plan_id = plan.id
+        current_id = revised.id
+
+    stale = client.post(
+        f"/plans/weeks/{plan_id}/revisions/{stale_id}/accept",
+        follow_redirects=False,
+    )
+    assert stale.status_code == 409
+
+    csrf_token = client.headers.pop("X-CSRF-Token")
+    try:
+        missing_csrf = client.post(
+            f"/plans/weeks/{plan_id}/revisions/{current_id}/accept",
+            follow_redirects=False,
+        )
+    finally:
+        client.headers["X-CSRF-Token"] = csrf_token
+    assert missing_csrf.status_code == 403
+
+    accepted = client.post(
+        f"/plans/weeks/{plan_id}/revisions/{current_id}/accept",
+        follow_redirects=False,
+    )
+    assert accepted.status_code == 303
+    with session_factory() as session:
+        plan = session.get(TrainingPlan, plan_id)
+        assert plan is not None
+        assert plan.accepted_revision_id == current_id
+
+    start = monday + timedelta(days=7)
+    target = start + timedelta(weeks=7, days=6)
+    with session_factory() as session:
+        user = session.scalar(select(User))
+        assert user is not None
+        goal = AthleteGoal(user_id=user.id, event_type="10k", target_date=target)
+        session.add(goal)
+        session.commit()
+        goal_id = goal.id
+    generated_cycle = client.post(
+        "/plans/generate-cycle",
+        data={
+            "start_date": start.isoformat(),
+            "target_date": target.isoformat(),
+            "goal_id": str(goal_id),
+        },
+        follow_redirects=False,
+    )
+    assert generated_cycle.status_code == 303
+    with session_factory() as session:
+        user = session.scalar(select(User))
+        assert user is not None
+        cycle = session.scalar(select(TrainingCycle))
+        assert cycle is not None
+        stale_cycle_id = cycle.current_revision_id
+        assert stale_cycle_id is not None
+        revise_training_cycle(
+            session,
+            user,
+            cycle_id=cycle.id,
+            data=CycleRevisionInput(purpose="Verlängerte Vorbereitung"),
+        )
+        cycle_id = cycle.id
+        current_cycle_id = cycle.current_revision_id
+        assert current_cycle_id is not None
+
+    stale_cycle = client.post(
+        f"/plans/cycles/{cycle_id}/revisions/{stale_cycle_id}/accept",
+        follow_redirects=False,
+    )
+    assert stale_cycle.status_code == 409
+
+    csrf_token = client.headers.pop("X-CSRF-Token")
+    try:
+        missing_cycle_csrf = client.post(
+            f"/plans/cycles/{cycle_id}/revisions/{current_cycle_id}/accept",
+            follow_redirects=False,
+        )
+    finally:
+        client.headers["X-CSRF-Token"] = csrf_token
+    assert missing_cycle_csrf.status_code == 403

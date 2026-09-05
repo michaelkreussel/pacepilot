@@ -1,5 +1,5 @@
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import asdict
 from datetime import date, datetime, timedelta
 from typing import Literal
@@ -8,10 +8,13 @@ from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.config import coach_feature_enabled, get_settings
 from app.models import (
     CoachMessage,
     PostSessionFeedback,
     PreSessionFeedback,
+    TrainingCycle,
+    TrainingPlan,
     User,
     Workout,
     WorkoutRevision,
@@ -23,9 +26,18 @@ from app.services.analytics.progress import ProgressReferenceError
 from app.services.coach.conversation import CoachRuntimeContext
 from app.services.planning.daily_adaptation import DailyAdaptationError, DailyAdaptationService
 from app.services.planning.feedback_service import FeedbackCommands, FeedbackNotFoundError
+from app.services.planning.multiweek_planner import (
+    CycleRevisionError,
+    MultiweekPlannerError,
+    TrainingCyclePersistenceError,
+    persist_training_cycle,
+    plan_training_cycle,
+    revise_training_cycle,
+)
 from app.services.planning.planning_commands import (
     AnchorKind,
     AvailabilityInput,
+    CycleRevisionInput,
     GoalCreateInput,
     GoalEventType,
     GoalUpdateInput,
@@ -35,6 +47,7 @@ from app.services.planning.planning_commands import (
     PlanningInputCommands,
     PlanningProfileUpdateInput,
     ReferencedGoalChangeConfirmation,
+    WeekPlanRevisionInput,
 )
 from app.services.planning.planning_queries import (
     AvailabilityFact,
@@ -50,6 +63,17 @@ from app.services.planning.safety_triage import (
     PainInput,
     PostSessionFeedbackInput,
     PreSessionFeedbackInput,
+)
+from app.services.planning.weekly_plan_service import (
+    WeeklyPlanPersistenceError,
+    WeekPlanRevisionError,
+    persist_week_candidate,
+    revise_week_plan,
+)
+from app.services.planning.weekly_planner import (
+    DayAvailability,
+    WeeklyPlannerError,
+    plan_shadow_week,
 )
 from app.services.planning.workout_proposals import (
     RunningProposalRequest,
@@ -1187,5 +1211,384 @@ def revise_running_workout_proposal(
         {
             "status": "revised",
             "artifact": {"type": "workout_proposal"},
+        }
+    )
+
+
+def _plan_generation_enabled(user_id: int) -> bool:
+    return coach_feature_enabled(get_settings().coach_plan_generation_enabled, user_id)
+
+
+def _draft_availability(
+    availability: Sequence[AvailabilityInput] | None,
+) -> tuple[DayAvailability, ...] | None:
+    if availability is None:
+        return None
+    return tuple(
+        DayAvailability(weekday=item.weekday, available_minutes=int(item.available_minutes or 0))
+        for item in availability
+        if item.available
+    )
+
+
+def get_revisable_training_plans(runtime: CoachRuntimeContext, limit: int = 10) -> str:
+    """List user-owned weekly plans and training cycles with exact current revision identity."""
+    if runtime.conversation_id is None or runtime.user_message_id is None:
+        raise ValueError("Coach plan draft runtime is incomplete")
+    bounded_limit = min(max(limit, 1), 20)
+    with runtime.session_factory() as session:
+        _proposal_runtime(session, runtime)
+        plans = session.scalars(
+            select(TrainingPlan)
+            .where(
+                TrainingPlan.user_id == runtime.user_id,
+                TrainingPlan.current_revision_id.is_not(None),
+            )
+            .order_by(TrainingPlan.updated_at.desc(), TrainingPlan.id.desc())
+            .limit(bounded_limit)
+        ).all()
+        cycles = session.scalars(
+            select(TrainingCycle)
+            .where(
+                TrainingCycle.user_id == runtime.user_id,
+                TrainingCycle.current_revision_id.is_not(None),
+            )
+            .order_by(TrainingCycle.updated_at.desc(), TrainingCycle.id.desc())
+            .limit(bounded_limit)
+        ).all()
+    return _json(
+        {
+            "weekly_plans": [
+                {
+                    "plan_id": plan.id,
+                    "revision_id": plan.current_revision_id,
+                    "week_start": plan.week_start,
+                    "accepted_revision_id": plan.accepted_revision_id,
+                }
+                for plan in plans
+            ],
+            "training_cycles": [
+                {
+                    "cycle_id": cycle.id,
+                    "revision_id": cycle.current_revision_id,
+                    "event_type": cycle.event_type,
+                    "start_date": cycle.start_date,
+                    "target_date": cycle.target_date,
+                    "accepted_revision_id": cycle.accepted_revision_id,
+                }
+                for cycle in cycles
+            ],
+        }
+    )
+
+
+def create_weekly_plan_draft(
+    runtime: CoachRuntimeContext,
+    *,
+    week_start: date,
+    availability: Sequence[AvailabilityInput] | None = None,
+) -> str:
+    """Create one unaccepted weekly plan draft through the deterministic weekly planner.
+
+    Use this only when the athlete explicitly wants a weekly plan and the week start
+    plus available time are known. The result remains unaccepted and its child
+    workouts keep their independent lifecycle. This tool cannot accept a plan.
+    """
+    with runtime.session_factory() as session:
+        user, assistant_message = _proposal_runtime(session, runtime)
+        if not _plan_generation_enabled(user.id):
+            return _json(
+                {
+                    "status": "not_created",
+                    "error": {
+                        "code": "plan.feature_disabled",
+                        "message": "Die Planerstellung ist derzeit deaktiviert.",
+                    },
+                }
+            )
+        try:
+            candidate = plan_shadow_week(
+                session,
+                user,
+                week_start=week_start,
+                as_of=runtime.as_of,
+                availability=_draft_availability(availability),
+            )
+            revision = persist_week_candidate(
+                session,
+                user,
+                candidate,
+                source_assistant_message_id=assistant_message.id,
+            )
+        except (WeeklyPlannerError, WeeklyPlanPersistenceError) as exc:
+            return _json(
+                {
+                    "status": "not_created",
+                    "error": {"code": exc.code, "message": str(exc)},
+                }
+            )
+    return _json(
+        {
+            "status": "created",
+            "artifact": {
+                "type": "weekly_plan",
+                "plan_id": revision.plan_id,
+                "revision_id": revision.id,
+            },
+        }
+    )
+
+
+def revise_weekly_plan_draft(
+    runtime: CoachRuntimeContext,
+    *,
+    plan_id: int,
+    week_start: date | None = None,
+    availability: Sequence[AvailabilityInput] | None = None,
+    edit_scope: RevisionEditScope = "supported_parameters",
+) -> str:
+    """Revise only the week or availability of an exact weekly plan draft."""
+    with runtime.session_factory() as session:
+        user, assistant_message = _proposal_runtime(session, runtime)
+        if not _plan_generation_enabled(user.id):
+            return _json(
+                {
+                    "status": "not_revised",
+                    "error": {
+                        "code": "plan.feature_disabled",
+                        "message": "Die Planänderung ist derzeit deaktiviert.",
+                    },
+                }
+            )
+        alternative = {
+            "command": "create_weekly_plan_draft",
+            "description": (
+                "Erstelle einen neuen Wochenplan-Entwurf oder ändere nur die Woche "
+                "beziehungsweise die verfügbare Zeit."
+            ),
+        }
+        if edit_scope == "unsupported":
+            return _json(
+                {
+                    "status": "not_revised",
+                    "error": {
+                        "code": "plan.revision_edit_unsupported",
+                        "message": (
+                            "Eigene Sitzungen, Rollen und Strukturänderungen werden "
+                            "nicht übernommen."
+                        ),
+                    },
+                    "supported_alternative": alternative,
+                }
+            )
+        if week_start is None and availability is None:
+            return _json(
+                {
+                    "status": "needs_clarification",
+                    "question": ("Soll die Woche oder die verfügbare Zeit geändert werden?"),
+                }
+            )
+        try:
+            data = WeekPlanRevisionInput(
+                week_start=week_start,
+                availability=list(availability) if availability is not None else None,
+            )
+        except ValidationError:
+            return _json({"status": "not_revised", "error": {"code": "plan.invalid_input"}})
+        try:
+            revision = revise_week_plan(
+                session,
+                user,
+                plan_id=plan_id,
+                data=data,
+                source_assistant_message_id=assistant_message.id,
+            )
+        except (WeekPlanRevisionError, WeeklyPlannerError, WeeklyPlanPersistenceError) as exc:
+            return _json(
+                {
+                    "status": "not_revised",
+                    "error": {"code": exc.code, "message": str(exc)},
+                }
+            )
+    return _json(
+        {
+            "status": "revised",
+            "artifact": {
+                "type": "weekly_plan",
+                "plan_id": revision.plan_id,
+                "revision_id": revision.id,
+            },
+        }
+    )
+
+
+def create_training_cycle_draft(
+    runtime: CoachRuntimeContext,
+    *,
+    start_date: date,
+    target_date: date,
+    goal_id: int | None = None,
+    event_type: GoalEventType | None = None,
+    purpose: str | None = None,
+) -> str:
+    """Create one unaccepted multiweek cycle draft through the deterministic cycle planner.
+
+    Use this only when the athlete explicitly wants a multiweek plan and the start,
+    target, and either an active goal or an explicit purpose are known. The result
+    remains unaccepted and accepting it never accepts child workouts. This tool
+    cannot accept a cycle.
+    """
+    with runtime.session_factory() as session:
+        user, assistant_message = _proposal_runtime(session, runtime)
+        if not _plan_generation_enabled(user.id):
+            return _json(
+                {
+                    "status": "not_created",
+                    "error": {
+                        "code": "plan.feature_disabled",
+                        "message": "Die Planerstellung ist derzeit deaktiviert.",
+                    },
+                }
+            )
+        if goal_id is None and event_type is None and (purpose is None or not purpose.strip()):
+            return _json(
+                {
+                    "status": "needs_clarification",
+                    "question": (
+                        "Für welches Ziel oder welchen Zweck soll der Mehrwochenplan gelten?"
+                    ),
+                }
+            )
+        try:
+            candidate = plan_training_cycle(
+                session,
+                user,
+                start_date=start_date,
+                target_date=target_date,
+                as_of=runtime.as_of,
+                goal_id=goal_id,
+                event_type=event_type,
+                purpose=purpose,
+            )
+            revision = persist_training_cycle(
+                session,
+                user,
+                candidate,
+                source_assistant_message_id=assistant_message.id,
+            )
+        except (MultiweekPlannerError, TrainingCyclePersistenceError) as exc:
+            return _json(
+                {
+                    "status": "not_created",
+                    "error": {"code": exc.code, "message": str(exc)},
+                }
+            )
+    return _json(
+        {
+            "status": "created",
+            "artifact": {
+                "type": "training_cycle",
+                "cycle_id": revision.cycle_id,
+                "revision_id": revision.id,
+            },
+        }
+    )
+
+
+def revise_training_cycle_draft(
+    runtime: CoachRuntimeContext,
+    *,
+    cycle_id: int,
+    start_date: date | None = None,
+    target_date: date | None = None,
+    event_type: GoalEventType | None = None,
+    goal_id: int | None = None,
+    purpose: str | None = None,
+    edit_scope: RevisionEditScope = "supported_parameters",
+) -> str:
+    """Revise only the supported date, goal, or purpose fields of an exact cycle draft."""
+    with runtime.session_factory() as session:
+        user, assistant_message = _proposal_runtime(session, runtime)
+        if not _plan_generation_enabled(user.id):
+            return _json(
+                {
+                    "status": "not_revised",
+                    "error": {
+                        "code": "plan.feature_disabled",
+                        "message": "Die Planänderung ist derzeit deaktiviert.",
+                    },
+                }
+            )
+        alternative = {
+            "command": "create_training_cycle_draft",
+            "description": (
+                "Erstelle einen neuen Mehrwochenplan-Entwurf oder ändere nur Start, "
+                "Ziel, Zieldatum oder Zweck."
+            ),
+        }
+        if edit_scope == "unsupported":
+            return _json(
+                {
+                    "status": "not_revised",
+                    "error": {
+                        "code": "plan.revision_edit_unsupported",
+                        "message": (
+                            "Eigene Sitzungen, Phasen und Strukturänderungen werden "
+                            "nicht übernommen."
+                        ),
+                    },
+                    "supported_alternative": alternative,
+                }
+            )
+        if (
+            start_date is None
+            and target_date is None
+            and event_type is None
+            and goal_id is None
+            and purpose is None
+        ):
+            return _json(
+                {
+                    "status": "needs_clarification",
+                    "question": ("Soll Start, Ziel, Zieldatum oder Zweck geändert werden?"),
+                }
+            )
+        try:
+            data = CycleRevisionInput(
+                start_date=start_date,
+                target_date=target_date,
+                event_type=event_type,
+                goal_id=goal_id,
+                purpose=purpose,
+            )
+        except ValidationError:
+            return _json({"status": "not_revised", "error": {"code": "plan.invalid_input"}})
+        try:
+            revision = revise_training_cycle(
+                session,
+                user,
+                cycle_id=cycle_id,
+                data=data,
+                source_assistant_message_id=assistant_message.id,
+            )
+        except (
+            CycleRevisionError,
+            MultiweekPlannerError,
+            TrainingCyclePersistenceError,
+        ) as exc:
+            return _json(
+                {
+                    "status": "not_revised",
+                    "error": {"code": exc.code, "message": str(exc)},
+                }
+            )
+    return _json(
+        {
+            "status": "revised",
+            "artifact": {
+                "type": "training_cycle",
+                "cycle_id": revision.cycle_id,
+                "revision_id": revision.id,
+            },
         }
     )

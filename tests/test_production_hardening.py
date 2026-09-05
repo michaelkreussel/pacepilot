@@ -94,7 +94,7 @@ def test_coach_tool_and_prompt_contracts_are_versioned_and_stable() -> None:
 
     assert fixture["contract_version"] == COACH_TOOL_CONTRACT_VERSION
     assert actual == fixture["tools"]
-    assert COACH_PROMPT_TEMPLATE_VERSION == "coach-prompt-v9"
+    assert COACH_PROMPT_TEMPLATE_VERSION == "coach-prompt-v10"
     assert "get_adaptive_context" in PROGRESS_PROMPT
     assert "keine Verlaufsdaten" in PROGRESS_PROMPT
     assert {"user_id", "workout_id", "definition", "idempotency_key"}.isdisjoint(
@@ -150,6 +150,29 @@ def test_prompt_injection_corpus_cannot_expand_coach_mutation_authority() -> Non
         "get_revisable_running_workouts",
         "get_planning_inputs",
     }
+    plan_tool_names = {
+        tool.name
+        for tool in coach_tools(workout_proposals_enabled=True, plan_generation_enabled=True)
+    }
+    assert plan_tool_names - tool_names == {
+        "get_revisable_training_plans",
+        "create_weekly_plan_draft",
+        "revise_weekly_plan_draft",
+        "create_training_cycle_draft",
+        "revise_training_cycle_draft",
+    }
+    assert (
+        plan_tool_names
+        & {
+            "accept_training_plan",
+            "accept_training_cycle",
+            "schedule_plan",
+            "publish_plan",
+            "push_plan",
+            "delete_plan",
+        }
+        == set()
+    )
 
 
 def _revision_graph(session: Session) -> tuple[WorkoutRevision, list[WorkoutValidationRun]]:
