@@ -6,19 +6,25 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.config import get_settings
 from app.models import (
     Activity,
     DailyFitness,
+    GarminAccount,
     PostSessionFeedback,
     PreSessionFeedback,
     User,
     Workout,
     WorkoutEvent,
+    WorkoutGarminOperation,
     WorkoutRevision,
 )
 from app.models.user import utcnow
+from app.routes import workouts as workouts_module
 from app.services.analytics.athlete_data import AthleteDataService
 from app.services.analytics.subjective_feedback import effective_activity_feedback
+from app.services.garmin import workout_operations as workout_operations_module
+from app.services.garmin.client import GarminUnavailableError
 from app.services.planning.feedback_service import (
     FeedbackCommands,
     FeedbackNotFoundError,
@@ -33,7 +39,7 @@ from app.services.planning.safety_triage import (
     build_safety_context,
     triage_feedback,
 )
-from app.services.planning.validator import WorkoutInput
+from app.services.planning.validator import WorkoutInput, WorkoutValidationError
 from app.services.planning.workout_definition import default_definition
 from app.services.planning.workout_revision import (
     AcceptRevisionCommand,
@@ -362,6 +368,7 @@ def test_elevated_same_day_accept_requires_fresh_acknowledgement(
         ("policy_version", "training-fit-stale"),
         ("assessment_fingerprint", "0" * 64),
         ("local_date", "2026-01-01"),
+        ("acknowledged_at", "not-a-date"),
     ],
 )
 def test_mismatched_acknowledgement_cannot_authorize_schedule(
@@ -526,24 +533,32 @@ def test_replacing_a_revision_uses_the_existing_same_day_schedule_for_authorizat
         assert workout.scheduled_for == date.today()
 
 
-def test_same_day_safety_stop_blocks_delayed_garmin_sync(
-    session_factory: sessionmaker[Session],
+def test_newly_elevated_delayed_publish_requires_acknowledgement(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(get_settings(), "garmin_call_delay_seconds", 0)
+
+    class FakeGarmin:
+        uploads = 0
+        pushes = 0
+
+        def upload_workout(self, _payload: dict[str, object]) -> dict[str, str]:
+            self.uploads += 1
+            return {"workoutId": "remote-1"}
+
+        def push_workout_to_device(self, _workout_id: str) -> None:
+            self.pushes += 1
+
+    garmin = FakeGarmin()
     with session_factory() as session:
         user = User(display_name="Runner")
         session.add(user)
         session.flush()
-        service = WorkoutService(session, user)
+        session.add(GarminAccount(user_id=user.id, connected_at=utcnow()))
+        session.commit()
+        service = WorkoutService(session, user, connect_garmin=lambda *_args: garmin)
         workout = service.create(_workout_input(date.today()))
         service.accept(workout.id, _accept_command(service, workout))
-        service.schedule(
-            workout.id,
-            ScheduleWorkoutCommand(
-                revision_id=workout.accepted_revision_id or 0,
-                expected_lock_version=workout.lock_version,
-                scheduled_for=date.today(),
-            ),
-        )
         FeedbackCommands(session, user).record_pre_session(
             workout.id,
             PreSessionFeedbackInput(
@@ -556,10 +571,297 @@ def test_same_day_safety_stop_blocks_delayed_garmin_sync(
         )
         session.commit()
 
-        with pytest.raises(WorkoutTransitionError) as stopped:
+        with pytest.raises(WorkoutTransitionError) as required:
             service.publish(workout.id)
-        assert stopped.value.code == "workout.validation_failed"
-        assert "Sicherheitshinweis" in str(stopped.value)
+        assert required.value.code == "workout.training_fit_acknowledgement_required"
+        assert garmin.uploads == 0
+        assert session.scalar(select(WorkoutGarminOperation)) is None
+
+        service.publish(workout.id, acknowledge_elevated_warning=True)
+
+        operation = session.scalar(select(WorkoutGarminOperation))
+        revision = session.get(WorkoutRevision, workout.accepted_revision_id)
+        assert operation is not None and operation.status == "succeeded"
+        assert revision is not None and revision.validation_report_json is not None
+        assert revision.validation_report_json["valid"] is True
+        assert operation.training_fit_policy_version
+        assert len(operation.training_fit_assessment_fingerprint or "") == 64
+        assert operation.training_fit_effective_date == date.today()
+        assert operation.training_fit_acknowledged_by_user_id == user.id
+        assert operation.training_fit_acknowledged_at is not None
+        assert operation.training_fit_authorized_revision_id == revision.id
+        assert workout.status == "published"
+        assert garmin.uploads == 1
+
+        service.push(workout.id)
+
+        push_operation = session.scalar(
+            select(WorkoutGarminOperation).where(WorkoutGarminOperation.operation_type == "push")
+        )
+        assert push_operation is not None and push_operation.status == "succeeded"
+        assert (
+            push_operation.training_fit_assessment_fingerprint
+            == operation.training_fit_assessment_fingerprint
+        )
+        assert push_operation.training_fit_acknowledged_at == operation.training_fit_acknowledged_at
+        assert workout.status == "pushed"
+        assert garmin.pushes == 1
+
+
+def test_ambiguous_acknowledged_push_retains_authorization_without_claiming_success(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(get_settings(), "garmin_call_delay_seconds", 0)
+
+    class AmbiguousPushGarmin:
+        pushes = 0
+
+        def upload_workout(self, _payload: dict[str, object]) -> dict[str, str]:
+            return {"workoutId": "remote-1"}
+
+        def push_workout_to_device(self, _workout_id: str) -> None:
+            self.pushes += 1
+            raise TimeoutError("response lost")
+
+    garmin = AmbiguousPushGarmin()
+    with session_factory() as session:
+        user = User(display_name="Runner")
+        session.add(user)
+        session.flush()
+        session.add(GarminAccount(user_id=user.id, connected_at=utcnow()))
+        session.commit()
+        service = WorkoutService(session, user, connect_garmin=lambda *_args: garmin)
+        workout = service.create(_workout_input(date.today()))
+        service.accept(workout.id, _accept_command(service, workout))
+        service.publish(workout.id)
+        FeedbackCommands(session, user).record_pre_session(
+            workout.id,
+            PreSessionFeedbackInput(illness_signal=IllnessSignal.FEVER),
+        )
+        session.commit()
+
+        with pytest.raises(WorkoutTransitionError) as required:
+            service.push(workout.id)
+        assert required.value.code == "workout.training_fit_acknowledgement_required"
+        assert garmin.pushes == 0
+
+        with pytest.raises(GarminUnavailableError):
+            service.push(workout.id, acknowledge_elevated_warning=True)
+
+        operation = session.scalar(
+            select(WorkoutGarminOperation).where(WorkoutGarminOperation.operation_type == "push")
+        )
+        assert operation is not None and operation.status == "unknown"
+        assert operation.training_fit_effective_date == date.today()
+        assert operation.training_fit_acknowledged_by_user_id == user.id
+        assert operation.training_fit_acknowledged_at is not None
+        assert operation.training_fit_authorized_revision_id == workout.accepted_revision_id
+        assert len(operation.attempts) == 1
+        assert operation.attempts[0].status == "unknown"
+        assert (
+            session.scalar(
+                select(WorkoutEvent).where(
+                    WorkoutEvent.workout_id == workout.id,
+                    WorkoutEvent.action == "push",
+                )
+            )
+            is None
+        )
+        session.refresh(workout)
+        assert workout.status == "published"
+        assert garmin.pushes == 1
+
+
+def test_ambiguous_acknowledged_publish_retains_authorization_without_claiming_success(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(get_settings(), "garmin_call_delay_seconds", 0)
+
+    class AmbiguousGarmin:
+        uploads = 0
+
+        def upload_workout(self, _payload: dict[str, object]) -> dict[str, str]:
+            self.uploads += 1
+            raise TimeoutError("response lost")
+
+    garmin = AmbiguousGarmin()
+    with session_factory() as session:
+        user = User(display_name="Runner")
+        session.add(user)
+        session.flush()
+        session.add(GarminAccount(user_id=user.id, connected_at=utcnow()))
+        session.commit()
+        service = WorkoutService(session, user, connect_garmin=lambda *_args: garmin)
+        workout = service.create(_workout_input(date.today()))
+        service.accept(workout.id, _accept_command(service, workout))
+        FeedbackCommands(session, user).record_pre_session(
+            workout.id,
+            PreSessionFeedbackInput(illness_signal=IllnessSignal.FEVER),
+        )
+        session.commit()
+
+        with pytest.raises(GarminUnavailableError):
+            service.publish(workout.id, acknowledge_elevated_warning=True)
+
+        operation = session.scalar(
+            select(WorkoutGarminOperation).where(WorkoutGarminOperation.operation_type == "upload")
+        )
+        assert operation is not None and operation.status == "unknown"
+        assert operation.training_fit_effective_date == date.today()
+        assert operation.training_fit_acknowledged_by_user_id == user.id
+        assert operation.training_fit_acknowledged_at is not None
+        assert operation.training_fit_authorized_revision_id == workout.accepted_revision_id
+        assert len(operation.attempts) == 1
+        assert operation.attempts[0].status == "unknown"
+        assert (
+            session.scalar(
+                select(WorkoutEvent).where(
+                    WorkoutEvent.workout_id == workout.id,
+                    WorkoutEvent.action == "publish",
+                )
+            )
+            is None
+        )
+        session.refresh(workout)
+        assert workout.status == "confirmed"
+        assert garmin.uploads == 1
+
+
+def test_failed_acknowledged_publish_retains_authorization_without_claiming_success(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(get_settings(), "garmin_call_delay_seconds", 0)
+
+    def fail_upload(*_args: object) -> None:
+        raise WorkoutValidationError("Garmin-Inhalt ungültig.", code="garmin.validation_failed")
+
+    monkeypatch.setattr(workout_operations_module, "upload_workout", fail_upload)
+
+    with session_factory() as session:
+        user = User(display_name="Runner")
+        session.add(user)
+        session.flush()
+        session.add(GarminAccount(user_id=user.id, connected_at=utcnow()))
+        session.commit()
+        service = WorkoutService(session, user, connect_garmin=lambda *_args: object())
+        workout = service.create(_workout_input(date.today()))
+        service.accept(workout.id, _accept_command(service, workout))
+        FeedbackCommands(session, user).record_pre_session(
+            workout.id,
+            PreSessionFeedbackInput(illness_signal=IllnessSignal.FEVER),
+        )
+        session.commit()
+
+        with pytest.raises(WorkoutValidationError):
+            service.publish(workout.id, acknowledge_elevated_warning=True)
+
+        operation = session.scalar(select(WorkoutGarminOperation))
+        assert operation is not None and operation.status == "failed_final"
+        assert operation.training_fit_acknowledged_by_user_id == user.id
+        assert operation.training_fit_authorized_revision_id == workout.accepted_revision_id
+        assert len(operation.attempts) == 1
+        assert operation.attempts[0].status == "failed"
+        assert (
+            session.scalar(
+                select(WorkoutEvent).where(
+                    WorkoutEvent.workout_id == workout.id,
+                    WorkoutEvent.action == "publish",
+                )
+            )
+            is None
+        )
+        session.refresh(workout)
+        assert workout.status == "confirmed"
+
+
+def test_delayed_publish_form_submits_elevated_acknowledgement(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client.get("/")
+    with session_factory() as session:
+        user = session.scalar(select(User))
+        assert user is not None
+        service = WorkoutService(session, user)
+        workout = service.create(_workout_input(date.today()))
+        service.accept(workout.id, _accept_command(service, workout))
+        account = session.scalar(select(GarminAccount).where(GarminAccount.user_id == user.id))
+        assert account is not None
+        account.connected_at = utcnow()
+        FeedbackCommands(session, user).record_pre_session(
+            workout.id,
+            PreSessionFeedbackInput(illness_signal=IllnessSignal.FEVER),
+        )
+        session.commit()
+        workout_id = workout.id
+
+    class FakeGarmin:
+        uploads = 0
+        pushes = 0
+
+        def upload_workout(self, _payload: dict[str, object]) -> dict[str, str]:
+            self.uploads += 1
+            return {"workoutId": "remote-1"}
+
+        def push_workout_to_device(self, _workout_id: str) -> None:
+            self.pushes += 1
+
+    garmin = FakeGarmin()
+    monkeypatch.setattr(
+        workouts_module,
+        "connect_garmin_account",
+        lambda *_args: garmin,
+    )
+
+    detail = client.get(f"/workouts/{workout_id}")
+    assert f'action="/workouts/{workout_id}/publish"' in detail.text
+    assert 'name="acknowledge_elevated_warning"' in detail.text
+    assert "An Garmin übertragen" in detail.text
+
+    blocked = client.post(f"/workouts/{workout_id}/publish", follow_redirects=False)
+    assert blocked.status_code == 303
+    assert "error=" in blocked.headers["location"]
+    assert garmin.uploads == 0
+
+    allowed = client.post(
+        f"/workouts/{workout_id}/publish",
+        data={"acknowledge_elevated_warning": "yes"},
+        follow_redirects=False,
+    )
+    assert allowed.status_code == 303
+    assert "error=" not in allowed.headers["location"]
+    assert garmin.uploads == 1
+
+    with session_factory() as session:
+        user = session.scalar(select(User))
+        assert user is not None
+        FeedbackCommands(session, user).record_pre_session(
+            workout_id,
+            PreSessionFeedbackInput(
+                fatigue=5,
+                illness_signal=IllnessSignal.FEVER,
+            ),
+        )
+        session.commit()
+
+    detail = client.get(f"/workouts/{workout_id}")
+    push_form = detail.text.split(f'action="/workouts/{workout_id}/push"', maxsplit=1)[1].split(
+        "</form>", maxsplit=1
+    )[0]
+    assert 'name="acknowledge_elevated_warning"' in push_form
+    blocked = client.post(f"/workouts/{workout_id}/push", follow_redirects=False)
+    assert "error=" in blocked.headers["location"]
+    assert garmin.pushes == 0
+
+    allowed = client.post(
+        f"/workouts/{workout_id}/push",
+        data={"acknowledge_elevated_warning": "yes"},
+        follow_redirects=False,
+    )
+    assert allowed.status_code == 303
+    assert "error=" not in allowed.headers["location"]
+    assert garmin.pushes == 1
 
 
 def test_future_sync_does_not_require_unrelated_daily_feedback(

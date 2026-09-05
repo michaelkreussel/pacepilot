@@ -448,6 +448,14 @@ class GarminWorkoutOperations:
                 )
                 if operation is None:
                     raise
+        elif operation.status == "retryable" and self.training_fit_authorization is not None:
+            authorization = self.training_fit_authorization
+            operation.training_fit_policy_version = authorization.policy_version
+            operation.training_fit_assessment_fingerprint = authorization.assessment_fingerprint
+            operation.training_fit_effective_date = authorization.effective_date
+            operation.training_fit_acknowledged_by_user_id = authorization.acknowledged_by_user_id
+            operation.training_fit_acknowledged_at = authorization.acknowledged_at
+            operation.training_fit_authorized_revision_id = authorization.revision_id
 
         if operation.status == "succeeded":
             return operation

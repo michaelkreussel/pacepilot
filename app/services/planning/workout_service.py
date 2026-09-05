@@ -1,7 +1,7 @@
 import hashlib
 import json
 from dataclasses import dataclass, replace
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, cast
 
 from sqlalchemy import func, select, update
@@ -15,6 +15,7 @@ from app.models import (
     Workout,
     WorkoutEvent,
     WorkoutGarminBinding,
+    WorkoutGarminOperation,
     WorkoutGarminRemoteIdentity,
     WorkoutRevision,
     WorkoutValidationRun,
@@ -25,6 +26,7 @@ from app.repositories.workouts import find_workout
 from app.services.garmin.client import GarminUnavailableError, connect_garmin_account
 from app.services.garmin.workout_operations import (
     GarminConnector,
+    GarminTrainingFitAuthorization,
     GarminWorkoutOperations,
 )
 from app.services.planning.safety_triage import (
@@ -1469,7 +1471,7 @@ class WorkoutService:
         self.session.refresh(workout)
         return workout
 
-    def publish(self, workout_id: int) -> Workout:
+    def publish(self, workout_id: int, *, acknowledge_elevated_warning: bool = False) -> Workout:
         workout = self.get(workout_id)
         revision = self._accepted_revision(workout)
         binding = self._binding(workout)
@@ -1482,15 +1484,32 @@ class WorkoutService:
         )
         if not retirement_required:
             self._ensure_generated_garmin_enabled(workout)
-        account: GarminAccount | None = None
-        if retirement_required:
-            account = self._garmin_account()
-            self._retire_remote_calendar(workout, revision, binding, account)
-        if (
+        self._validate_for_sync(workout, revision)
+        retirement_only = (
             target_date is None
             and binding.active_remote_identity_id is not None
             and binding.content_status == "synced"
-        ):
+        )
+        training_fit_authorization = (
+            None
+            if retirement_only
+            else self._authorize_garmin_action(
+                workout,
+                revision,
+                acknowledge_elevated_warning=acknowledge_elevated_warning,
+            )
+        )
+        account: GarminAccount | None = None
+        if retirement_required:
+            account = self._garmin_account()
+            self._retire_remote_calendar(
+                workout,
+                revision,
+                binding,
+                account,
+                training_fit_authorization=training_fit_authorization,
+            )
+        if retirement_only:
             self.session.commit()
             return workout
         if workout.replaces_workout_id is not None:
@@ -1498,11 +1517,13 @@ class WorkoutService:
                 account = self._garmin_account()
             self._retire_replaced_calendar(workout, account)
         self._ensure_generated_garmin_enabled(workout)
-        self._validate_for_sync(workout, revision)
         if account is None:
             account = self._garmin_account()
         operations = GarminWorkoutOperations(
-            self.session, account, connect_garmin=self.connect_garmin
+            self.session,
+            account,
+            connect_garmin=self.connect_garmin,
+            training_fit_authorization=training_fit_authorization,
         )
         execution = self._execution(workout, revision)
         identity = self._active_identity(binding, account)
@@ -1570,6 +1591,8 @@ class WorkoutService:
         revision: WorkoutRevision,
         binding: WorkoutGarminBinding,
         account: GarminAccount,
+        *,
+        training_fit_authorization: GarminTrainingFitAuthorization | None = None,
     ) -> None:
         identity = self._active_identity(binding, account)
         if identity is None:
@@ -1585,10 +1608,13 @@ class WorkoutService:
             binding.calendar_status = "not_requested"
             return
         GarminWorkoutOperations(
-            self.session, account, connect_garmin=self.connect_garmin
+            self.session,
+            account,
+            connect_garmin=self.connect_garmin,
+            training_fit_authorization=training_fit_authorization,
         ).unschedule(workout, binding, revision, identity, remote_date)
 
-    def push(self, workout_id: int) -> Workout:
+    def push(self, workout_id: int, *, acknowledge_elevated_warning: bool = False) -> Workout:
         workout = self.get(workout_id)
         self._ensure_generated_garmin_enabled(workout)
         revision = self._accepted_revision(workout)
@@ -1615,8 +1641,16 @@ class WorkoutService:
             )
         account = self._garmin_account()
         self._ensure_identity_principal(identity, account)
+        training_fit_authorization = self._authorize_garmin_action(
+            workout,
+            revision,
+            acknowledge_elevated_warning=acknowledge_elevated_warning,
+        )
         operation = GarminWorkoutOperations(
-            self.session, account, connect_garmin=self.connect_garmin
+            self.session,
+            account,
+            connect_garmin=self.connect_garmin,
+            training_fit_authorization=training_fit_authorization,
         ).push(
             workout,
             binding,
@@ -1722,6 +1756,10 @@ class WorkoutService:
             acknowledgement_required=(
                 assessment.outcome == TrainingFitOutcome.ELEVATED
                 and self._matching_training_fit_authorization(
+                    workout, revision, effective_date, assessment
+                )
+                is None
+                and self._matching_garmin_operation_authorization(
                     workout, revision, effective_date, assessment
                 )
                 is None
@@ -2111,21 +2149,10 @@ class WorkoutService:
             )
 
             ensure_easy_run_device_target_current(self.session, self.user.id, revision)
-        validation = self._validate_context(
-            workout,
-            revision,
-            self._safety_context(workout, revision, mode="sync"),
-        )
-        if not validation.valid:
-            outcome = str(validation.report_json.get("outcome", "clarify"))
-            message = (
-                "Ein neuer Sicherheitshinweis blockiert die Übertragung dieses Lauftrainings."
-                if outcome == TriageOutcome.SAFETY_STOP.value
-                else "Vor der Übertragung fehlen noch eindeutige Sicherheitsangaben."
-            )
-            self.session.commit()
+        structural_report = revision.validation_report_json
+        if structural_report is None or structural_report.get("valid") is not True:
             raise WorkoutTransitionError(
-                message,
+                "Nur eine strukturell gültige Revision kann an Garmin übertragen werden.",
                 code="workout.validation_failed",
             )
 
@@ -2223,6 +2250,11 @@ class WorkoutService:
         )
         if matching_event is not None:
             return {"training_fit_authorization_event_id": matching_event.id}
+        matching_operation = self._matching_garmin_operation_authorization(
+            workout, revision, effective_date, assessment
+        )
+        if matching_operation is not None:
+            return {"training_fit_authorization_operation_id": matching_operation.id}
         if not acknowledge_elevated_warning:
             raise WorkoutTransitionError(
                 "Für diese heutige Einheit ist zuerst eine ausdrückliche Bestätigung des "
@@ -2235,6 +2267,71 @@ class WorkoutService:
                 "acknowledged_at": utcnow().isoformat(),
             }
         }
+
+    def _authorize_garmin_action(
+        self,
+        workout: Workout,
+        revision: WorkoutRevision,
+        *,
+        acknowledge_elevated_warning: bool,
+    ) -> GarminTrainingFitAuthorization | None:
+        effective_date = (
+            workout.scheduled_for
+            if workout.local_schedule_status == "scheduled"
+            else revision.suggested_for
+        )
+        if effective_date is None:
+            return None
+        assessment = self.local_action_training_fit(
+            workout.id, revision.id, effective_date
+        ).assessment
+        if assessment.outcome != TrainingFitOutcome.ELEVATED:
+            return None
+        matching_event = self._matching_training_fit_authorization(
+            workout, revision, effective_date, assessment
+        )
+        if matching_event is not None:
+            metadata = matching_event.safe_metadata_json["training_fit_authorization"]
+            if isinstance(metadata, dict):
+                acknowledged_at = metadata.get("acknowledged_at")
+                if isinstance(acknowledged_at, str):
+                    return GarminTrainingFitAuthorization(
+                        policy_version=assessment.policy_version,
+                        assessment_fingerprint=assessment.authoritative_input_fingerprint,
+                        effective_date=effective_date,
+                        acknowledged_by_user_id=self.user.id,
+                        acknowledged_at=datetime.fromisoformat(acknowledged_at),
+                        revision_id=revision.id,
+                    )
+        matching_operation = self._matching_garmin_operation_authorization(
+            workout, revision, effective_date, assessment
+        )
+        if (
+            matching_operation is not None
+            and matching_operation.training_fit_acknowledged_at is not None
+        ):
+            return GarminTrainingFitAuthorization(
+                policy_version=assessment.policy_version,
+                assessment_fingerprint=assessment.authoritative_input_fingerprint,
+                effective_date=effective_date,
+                acknowledged_by_user_id=self.user.id,
+                acknowledged_at=matching_operation.training_fit_acknowledged_at,
+                revision_id=revision.id,
+            )
+        if not acknowledge_elevated_warning:
+            raise WorkoutTransitionError(
+                "Für diese heutige Einheit ist zuerst eine ausdrückliche Bestätigung des "
+                "erhöhten Gesundheitsrisikos erforderlich.",
+                code="workout.training_fit_acknowledgement_required",
+            )
+        return GarminTrainingFitAuthorization(
+            policy_version=assessment.policy_version,
+            assessment_fingerprint=assessment.authoritative_input_fingerprint,
+            effective_date=effective_date,
+            acknowledged_by_user_id=self.user.id,
+            acknowledged_at=utcnow(),
+            revision_id=revision.id,
+        )
 
     def _matching_training_fit_authorization(
         self,
@@ -2258,8 +2355,42 @@ class WorkoutService:
                 and all(authorization.get(key) == value for key, value in expected.items())
                 and isinstance(authorization.get("acknowledged_at"), str)
             ):
+                try:
+                    datetime.fromisoformat(authorization["acknowledged_at"])
+                except ValueError:
+                    continue
                 return event
         return None
+
+    def _matching_garmin_operation_authorization(
+        self,
+        workout: Workout,
+        revision: WorkoutRevision,
+        effective_date: date,
+        assessment: TrainingFitAssessment,
+    ) -> WorkoutGarminOperation | None:
+        operation = self.session.scalar(
+            select(WorkoutGarminOperation)
+            .where(
+                WorkoutGarminOperation.workout_id == workout.id,
+                WorkoutGarminOperation.revision_id == revision.id,
+                WorkoutGarminOperation.training_fit_policy_version == assessment.policy_version,
+                WorkoutGarminOperation.training_fit_assessment_fingerprint
+                == assessment.authoritative_input_fingerprint,
+                WorkoutGarminOperation.training_fit_effective_date == effective_date,
+                WorkoutGarminOperation.training_fit_acknowledged_by_user_id == self.user.id,
+                WorkoutGarminOperation.training_fit_authorized_revision_id == revision.id,
+                WorkoutGarminOperation.training_fit_acknowledged_at.is_not(None),
+            )
+            .order_by(WorkoutGarminOperation.id.desc())
+        )
+        if (
+            operation is None
+            or operation.training_fit_acknowledged_at is None
+            or operation.training_fit_acknowledged_at.date() != date.today()
+        ):
+            return None
+        return operation
 
     def _training_fit_authorization_identity(
         self,

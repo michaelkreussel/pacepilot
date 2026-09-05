@@ -5,7 +5,7 @@ from typing import Annotated, Never
 from urllib.parse import urlencode
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from pydantic import ValidationError
 
@@ -209,7 +209,6 @@ def _get_workout(service: WorkoutService, workout_id: int) -> WorkoutDetailView:
     try:
         workout = service.get(workout_id)
         safety_context = service.acceptance_context(workout_id)
-        sync_context = service.sync_context(workout_id)
         action_revision_id = (
             workout.current_revision_id
             if workout.current_revision_id != workout.accepted_revision_id
@@ -248,7 +247,6 @@ def _get_workout(service: WorkoutService, workout_id: int) -> WorkoutDetailView:
             workout,
             context_fingerprint=safety_context.fingerprint,
             safety_report=safety_context.report.to_json(),
-            sync_safety_report=sync_context.report.to_json(),
             training_fit_outcome=(
                 training_fit.assessment.outcome.value if training_fit is not None else None
             ),
@@ -646,9 +644,16 @@ async def unschedule_workout(
 
 
 @router.post("/{workout_id}/publish", response_class=RedirectResponse, status_code=303)
-def publish(workout_id: int, service: WorkoutServiceDep) -> RedirectResponse:
+def publish(
+    workout_id: int,
+    service: WorkoutServiceDep,
+    acknowledge_elevated_warning: Annotated[str | None, Form()] = None,
+) -> RedirectResponse:
     try:
-        service.publish(workout_id)
+        service.publish(
+            workout_id,
+            acknowledge_elevated_warning=acknowledge_elevated_warning == "yes",
+        )
     except WorkoutNotFoundError as exc:
         _raise_not_found(exc)
     except (
@@ -662,9 +667,16 @@ def publish(workout_id: int, service: WorkoutServiceDep) -> RedirectResponse:
 
 
 @router.post("/{workout_id}/push", response_class=RedirectResponse, status_code=303)
-def push(workout_id: int, service: WorkoutServiceDep) -> RedirectResponse:
+def push(
+    workout_id: int,
+    service: WorkoutServiceDep,
+    acknowledge_elevated_warning: Annotated[str | None, Form()] = None,
+) -> RedirectResponse:
     try:
-        service.push(workout_id)
+        service.push(
+            workout_id,
+            acknowledge_elevated_warning=acknowledge_elevated_warning == "yes",
+        )
     except WorkoutNotFoundError as exc:
         _raise_not_found(exc)
     except (
