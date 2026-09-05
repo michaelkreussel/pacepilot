@@ -6,10 +6,9 @@ from dataclasses import asdict
 from datetime import date, timedelta
 from time import monotonic
 from typing import Annotated
-from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, Response, StreamingResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
@@ -60,19 +59,11 @@ from app.services.planning.planning_commands import (
     PlanningInputCommands,
     ReferencedGoalChangeConfirmation,
 )
-from app.services.planning.registry import registered_workout_formats
 from app.services.planning.weekly_planner import (
     WeeklyPlanCandidate,
     WeeklyPlannerError,
     plan_shadow_week,
 )
-from app.services.planning.workout_proposals import (
-    RunningProposalRequest,
-    RunningProposalService,
-    WorkoutProposalError,
-)
-from app.services.planning.workout_service import WorkoutTransitionError
-from app.services.planning.workout_templates import TemplateExpansionError
 from app.services.planning.workout_views import GOAL_TYPE_LABELS, PLAN_ROLE_LABELS
 from app.web import context, templates
 
@@ -121,10 +112,6 @@ def _render_coach(
     conversation_id: int | None,
     *,
     message_before: int | None = None,
-    proposal_error: str | None = None,
-    proposal_date: str | None = None,
-    proposal_minutes: str = "45",
-    proposal_template_id: str = "easy_run",
     status_code: int = 200,
 ) -> HTMLResponse:
     conversations = list_conversations(session, user.id)
@@ -169,16 +156,6 @@ def _render_coach(
             plan_artifact_cards=(
                 plan_artifact_presentations(session, user.id, messages) if selected else {}
             ),
-            today=date.today(),
-            proposal_error=proposal_error,
-            proposal_date=proposal_date or date.today().isoformat(),
-            proposal_minutes=proposal_minutes,
-            proposal_template_id=proposal_template_id,
-            proposal_templates=[
-                {"id": template.id, "label": template.name}
-                for template in registered_workout_formats()
-            ],
-            proposal_idempotency_key=str(uuid4()),
         ),
         status_code=status_code,
     )
@@ -431,59 +408,6 @@ def proposal_card(
         request,
         "workouts/_coach_proposal_card.html",
         context(request, card=card),
-    )
-
-
-@router.post("/workout-proposals/easy-run")
-@router.post("/workout-proposals/running")
-async def create_running_proposal(
-    request: Request,
-    session: SessionDep,
-    user: CurrentUser,
-    configured: CoachProviderConfiguredDep,
-) -> Response:
-    form = await request.form()
-    proposal_date = str(form.get("suggested_for", ""))
-    proposal_minutes = str(form.get("available_minutes", ""))
-    proposal_template_id = str(form.get("template_id", "easy_run"))
-    try:
-        proposal = RunningProposalRequest.model_validate(
-            {
-                "template_id": proposal_template_id,
-                "suggested_for": proposal_date,
-                "available_minutes": proposal_minutes,
-                "idempotency_key": str(form.get("idempotency_key", "")),
-            }
-        )
-        workout = RunningProposalService(
-            session,
-            user,
-            as_of=date.today(),
-            request_id=request.state.request_id,
-        ).create(proposal)
-    except ValidationError:
-        error = "Bitte gib ein gültiges Datum und mindestens 20 verfügbare Minuten an."
-    except WorkoutProposalError as exc:
-        if exc.code == "proposal.feature_disabled":
-            raise HTTPException(status_code=403, detail=str(exc)) from exc
-        error = str(exc)
-    except (TemplateExpansionError, WorkoutTransitionError) as exc:
-        error = str(exc)
-    else:
-        return RedirectResponse(
-            f"/workouts/{workout.id}?notice=Workout-Vorschlag erstellt", status_code=303
-        )
-    return _render_coach(
-        request,
-        session,
-        user,
-        configured,
-        None,
-        proposal_error=error,
-        proposal_date=proposal_date,
-        proposal_minutes=proposal_minutes,
-        proposal_template_id=proposal_template_id,
-        status_code=422,
     )
 
 

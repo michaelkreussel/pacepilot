@@ -1,4 +1,3 @@
-import json
 from datetime import date, datetime, timedelta
 
 import pytest
@@ -31,7 +30,6 @@ from app.services.planning.workout_definition import (
     default_definition,
 )
 from app.services.planning.workout_proposals import (
-    EasyRunProposalRequest,
     RunningProposalRequest,
     RunningProposalService,
     RunningRevisionRequest,
@@ -87,8 +85,9 @@ def _history(session, user_id: int, as_of: date) -> None:
     session.flush()
 
 
-def _request(*, minutes: int = 45, key: str = "phase8-request-1") -> EasyRunProposalRequest:
-    return EasyRunProposalRequest(
+def _request(*, minutes: int = 45, key: str = "phase8-request-1") -> RunningProposalRequest:
+    return RunningProposalRequest(
+        template_id="easy_run",
         suggested_for=date.today() + timedelta(days=1),
         available_minutes=minutes,
         idempotency_key=key,
@@ -113,8 +112,8 @@ def test_easy_run_proposal_is_deterministic_revisioned_and_unscheduled(
         _history(session, user.id, date.today())
 
         service = RunningProposalService(session, user, as_of=date.today())
-        workout = service.create_easy_run(_request())
-        repeated = service.create_easy_run(_request())
+        workout = service.create(_request())
+        repeated = service.create(_request())
         revision = session.get(WorkoutRevision, workout.current_revision_id)
 
         assert repeated.id == workout.id
@@ -176,9 +175,9 @@ def test_easy_run_proposal_is_deterministic_revisioned_and_unscheduled(
             )
         )
         session.commit()
-        assert service.create_easy_run(_request()).id == workout.id
+        assert service.create(_request()).id == workout.id
         with pytest.raises(WorkoutConflictError) as conflict:
-            service.create_easy_run(_request(minutes=35))
+            service.create(_request(minutes=35))
         assert conflict.value.code == "proposal.idempotency_conflict"
 
 
@@ -242,7 +241,7 @@ def test_easy_run_proposal_uses_requested_60_minutes(
         user = _user(session)
         _history(session, user.id, date.today())
 
-        workout = RunningProposalService(session, user, as_of=date.today()).create_easy_run(
+        workout = RunningProposalService(session, user, as_of=date.today()).create(
             _request(minutes=60, key="phase8-request-60")
         )
         revision = session.get(WorkoutRevision, workout.current_revision_id)
@@ -324,7 +323,7 @@ def test_stale_idempotency_precheck_rolls_back_duplicate_proposal(
         _history(session, user.id, date.today())
         service = RunningProposalService(session, user, as_of=date.today())
         request = _request(key="phase8-race-regression")
-        winner = service.create_easy_run(request)
+        winner = service.create(request)
 
         original_idempotent_proposal = WorkoutService.idempotent_proposal
         stale_checks = 0
@@ -346,7 +345,7 @@ def test_stale_idempotency_precheck_rolls_back_duplicate_proposal(
             )
 
         monkeypatch.setattr(WorkoutService, "idempotent_proposal", stale_idempotent_proposal)
-        replay = service.create_easy_run(request)
+        replay = service.create(request)
 
         assert replay.id == winner.id
         assert session.scalar(select(func.count()).select_from(Workout)) == 1
@@ -368,7 +367,7 @@ def test_missing_history_and_safety_stop_are_persisted_as_advisory_warnings(
         user = _user(session)
         service = RunningProposalService(session, user, as_of=date.today())
 
-        sparse = service.create_easy_run(_request(key="phase8-no-history"))
+        sparse = service.create(_request(key="phase8-no-history"))
         sparse_revision = session.get(WorkoutRevision, sparse.current_revision_id)
         assert sparse_revision is not None and sparse_revision.guidance_json is not None
         sparse_fit = sparse_revision.guidance_json["training_fit"]
@@ -438,7 +437,7 @@ def test_easy_run_uses_personal_garmin_hr_range_as_device_target(
         session.add(account)
         session.flush()
 
-        workout = RunningProposalService(session, user, as_of=date.today()).create_easy_run(
+        workout = RunningProposalService(session, user, as_of=date.today()).create(
             _request(key="phase8-personal-hr")
         )
         revision = session.get(WorkoutRevision, workout.current_revision_id)
@@ -578,9 +577,7 @@ def test_proposal_edit_accept_schedule_and_reject_lifecycle(
     with session_factory() as session:
         user = _user(session)
         _history(session, user.id, date.today())
-        workout = RunningProposalService(session, user, as_of=date.today()).create_easy_run(
-            _request()
-        )
+        workout = RunningProposalService(session, user, as_of=date.today()).create(_request())
         service = WorkoutService(session, user)
         revision = session.get(WorkoutRevision, workout.current_revision_id)
         assert revision is not None
@@ -661,7 +658,7 @@ def test_proposal_edit_accept_schedule_and_reject_lifecycle(
             == 1
         )
 
-        second = RunningProposalService(session, user, as_of=date.today()).create_easy_run(
+        second = RunningProposalService(session, user, as_of=date.today()).create(
             _request(key="phase8-request-2")
         )
         second_revision = session.get(WorkoutRevision, second.current_revision_id)
@@ -788,7 +785,7 @@ def test_generated_edit_and_schedule_enforce_proposal_contract(
     with session_factory() as session:
         user = _user(session)
         _history(session, user.id, date.today())
-        workout = RunningProposalService(session, user, as_of=date.today()).create_easy_run(
+        workout = RunningProposalService(session, user, as_of=date.today()).create(
             _request(key="phase8-contract")
         )
         service = WorkoutService(session, user)
@@ -840,155 +837,6 @@ def test_generated_edit_and_schedule_enforce_proposal_contract(
                 ),
             )
         assert date_error.value.code == "workout.schedule_date_mismatch"
-
-
-def test_proposal_route_is_feature_gated_and_renders_detail(
-    client, session_factory, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    settings = get_settings()
-    monkeypatch.setattr(settings, "coach_workout_proposals_enabled", False)
-    response = client.get("/coach")
-    assert "Workout vorschlagen" not in response.text
-
-    blocked = client.post(
-        "/coach/workout-proposals/easy-run",
-        data={
-            "suggested_for": (date.today() + timedelta(days=1)).isoformat(),
-            "available_minutes": "45",
-            "idempotency_key": "phase8-route-disabled",
-        },
-    )
-    assert blocked.status_code == 403
-    assert "noch nicht freigeschaltet" in blocked.text
-
-    monkeypatch.setattr(settings, "coach_workout_proposals_enabled", True)
-    with session_factory() as session:
-        user = session.scalar(select(User))
-        assert user is not None
-        _history(session, user.id, date.today())
-        session.commit()
-
-    page = client.get("/coach")
-    assert "Workout vorschlagen" in page.text
-    assert "Regenerationslauf" in page.text
-    assert "Schwellenintervalle" in page.text
-    assert "VO₂max-Intervalle" in page.text
-    created = client.post(
-        "/coach/workout-proposals/easy-run",
-        data={
-            "suggested_for": (date.today() + timedelta(days=1)).isoformat(),
-            "available_minutes": "35",
-            "idempotency_key": "phase8-route-enabled",
-        },
-        follow_redirects=False,
-    )
-    assert created.status_code == 303
-    detail = client.get(created.headers["location"])
-    assert detail.status_code == 200
-    assert "Deterministischer Vorschlag" in detail.text
-    assert "35 Minuten" in detail.text
-    assert "Distanz bewusst offen" in detail.text
-    assert "Vorschlag annehmen" in detail.text
-    assert "Vorschlag ablehnen" in detail.text
-
-    workout_id = int(created.headers["location"].split("/", 3)[2].split("?", 1)[0])
-    with session_factory() as session:
-        workout = session.get(Workout, workout_id)
-        assert workout is not None
-        revision = session.get(WorkoutRevision, workout.current_revision_id)
-        assert revision is not None
-        assert revision.suggested_for is not None
-        definition = json.loads(json.dumps(revision.definition))
-        definition["blocks"][0]["end"]["seconds"] = 30 * 60
-        edit_payload = {
-            "name": revision.name,
-            "sport": "running",
-            "scheduled_for": revision.suggested_for.isoformat(),
-            "description": revision.description or "",
-            "definition_version": "2",
-            "definition": json.dumps(definition),
-            "revision_id": str(revision.id),
-            "revision_number": str(revision.revision_number),
-            "content_hash": revision.content_hash,
-            "lock_version": str(workout.lock_version),
-            "idempotency_key": "phase8-route-edit",
-        }
-    edited_response = client.post(
-        f"/workouts/{workout_id}", data=edit_payload, follow_redirects=False
-    )
-    assert edited_response.status_code == 303
-    edited_detail = client.get(f"/workouts/{workout_id}")
-    assert "Revision 1 → 2" in edited_detail.text
-    assert "Geändert: Ablauf" in edited_detail.text
-
-    with session_factory() as session:
-        workout = session.get(Workout, workout_id)
-        user = session.scalar(select(User))
-        assert workout is not None and user is not None
-        revision = session.get(WorkoutRevision, workout.current_revision_id)
-        assert revision is not None
-        context_fingerprint = (
-            WorkoutService(session, user).acceptance_context(workout.id).fingerprint
-        )
-        accept_payload = {
-            "revision_id": str(revision.id),
-            "revision_number": str(revision.revision_number),
-            "content_hash": revision.content_hash,
-            "lock_version": str(workout.lock_version),
-            "context_fingerprint": context_fingerprint,
-        }
-    accepted_response = client.post(
-        f"/workouts/{workout_id}/confirm", data=accept_payload, follow_redirects=False
-    )
-    assert accepted_response.status_code == 303
-
-    with session_factory() as session:
-        workout = session.get(Workout, workout_id)
-        assert workout is not None and workout.accepted_revision_id is not None
-        accepted = session.get(WorkoutRevision, workout.accepted_revision_id)
-        assert accepted is not None and accepted.suggested_for is not None
-        schedule_payload = {
-            "revision_id": str(accepted.id),
-            "lock_version": str(workout.lock_version),
-            "scheduled_for": accepted.suggested_for.isoformat(),
-        }
-    scheduled_response = client.post(
-        f"/workouts/{workout_id}/schedule", data=schedule_payload, follow_redirects=False
-    )
-    assert scheduled_response.status_code == 303
-    with session_factory() as session:
-        workout = session.get(Workout, workout_id)
-        assert workout is not None
-        assert workout.local_schedule_status == "scheduled"
-
-
-def test_quality_proposal_route_creates_non_editable_interval_workout(
-    client, session_factory, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    settings = get_settings()
-    monkeypatch.setattr(settings, "coach_workout_proposals_enabled", True)
-    with session_factory() as session:
-        user = session.scalar(select(User))
-        assert user is not None
-        _history(session, user.id, date.today())
-        session.commit()
-
-    created = client.post(
-        "/coach/workout-proposals/running",
-        data={
-            "template_id": "threshold_cruise",
-            "suggested_for": (date.today() + timedelta(days=1)).isoformat(),
-            "available_minutes": "60",
-            "idempotency_key": "quality-route-threshold",
-        },
-        follow_redirects=False,
-    )
-
-    assert created.status_code == 303
-    detail = client.get(created.headers["location"])
-    assert "Schwellenintervalle" in detail.text
-    assert "57 Minuten" in detail.text
-    assert "/edit" not in detail.text
 
 
 def test_quality_spacing_warns_without_hiding_the_requested_draft(
@@ -1066,7 +914,7 @@ def test_generated_proposal_uses_shared_idempotent_garmin_service(
         user = _user(session)
         _history(session, user.id, date.today())
         garmin = FakeGarmin()
-        proposal = RunningProposalService(session, user, as_of=date.today()).create_easy_run(
+        proposal = RunningProposalService(session, user, as_of=date.today()).create(
             _request(key="phase8-garmin")
         )
         service = WorkoutService(session, user, connect_garmin=lambda *_args: garmin)
@@ -1101,3 +949,21 @@ def test_generated_proposal_uses_shared_idempotent_garmin_service(
 
         assert garmin.uploads == 1
         assert garmin.schedules == 1
+
+
+def test_direct_proposal_routes_return_404_and_no_form_remains(
+    client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
+    page = client.get("/coach")
+    assert "Workout vorschlagen" not in page.text
+    assert "workout-proposals" not in page.text
+
+    payload = {
+        "template_id": "easy_run",
+        "suggested_for": (date.today() + timedelta(days=1)).isoformat(),
+        "available_minutes": "45",
+        "idempotency_key": "dd02-removed-route",
+    }
+    for route in ("/coach/workout-proposals/running", "/coach/workout-proposals/easy-run"):
+        assert client.post(route, data=payload, follow_redirects=False).status_code == 404

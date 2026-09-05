@@ -60,16 +60,13 @@ RunningTemplateId = WorkoutFormatId
 QUALITY_TEMPLATE_IDS = frozenset({"strides", "threshold_cruise", "vo2_intervals"})
 
 
-class EasyRunProposalRequest(BaseModel):
+class RunningProposalRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
+    template_id: RunningTemplateId = "easy_run"
     suggested_for: date
     available_minutes: int = Field(ge=20, le=1440)
     idempotency_key: str = Field(min_length=8, max_length=200)
-
-
-class RunningProposalRequest(EasyRunProposalRequest):
-    template_id: RunningTemplateId = "easy_run"
 
 
 class RunningRevisionRequest(BaseModel):
@@ -163,7 +160,7 @@ def ensure_easy_run_device_target_current(
         )
 
 
-def _request_fingerprint(request: EasyRunProposalRequest | RunningProposalRequest) -> str:
+def _request_fingerprint(request: RunningProposalRequest) -> str:
     payload = json.dumps(
         request.model_dump(mode="json", exclude={"idempotency_key"}),
         sort_keys=True,
@@ -492,19 +489,6 @@ class RunningProposalService:
         self.user = user
         self.as_of = as_of
         self.request_id = request_id
-
-    def create_easy_run(
-        self, request: EasyRunProposalRequest, *, origin: ProposalOrigin | None = None
-    ) -> Workout:
-        return self.create(
-            RunningProposalRequest(
-                template_id="easy_run",
-                suggested_for=request.suggested_for,
-                available_minutes=request.available_minutes,
-                idempotency_key=request.idempotency_key,
-            ),
-            origin=origin,
-        )
 
     def create(
         self, request: RunningProposalRequest, *, origin: ProposalOrigin | None = None
