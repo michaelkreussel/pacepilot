@@ -380,6 +380,7 @@ class WorkoutService:
         context_fingerprint: str,
         expected_identity: RevisionIdentity,
         idempotency_key: str,
+        acknowledge_elevated_warning: bool = False,
     ) -> Workout:
         self._ensure_daily_adaptation_enabled()
         if metadata.source_type != "coach_daily_adaptation":
@@ -416,6 +417,12 @@ class WorkoutService:
                 "Der Trainingstermin wurde bereits geändert.",
                 code="adaptation.schedule_stale",
             )
+        authorization = self._authorize_local_action(
+            original,
+            accepted,
+            original.scheduled_for,
+            acknowledge_elevated_warning=acknowledge_elevated_warning,
+        )
         open_replacement = self.session.scalar(
             select(Workout.id).where(
                 Workout.user_id == self.user.id,
@@ -504,6 +511,7 @@ class WorkoutService:
                 "context_fingerprint": context_fingerprint,
                 "request_hash": request_hash,
                 "replacement_workout_id": replacement.id,
+                **authorization,
             },
             idempotency_key=idempotency_key,
             skip_existing=False,

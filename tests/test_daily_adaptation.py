@@ -31,9 +31,6 @@ from app.services.planning.feedback_service import FeedbackCommands
 from app.services.planning.load_estimate import IntensityDomainTime, LoadEstimate
 from app.services.planning.safety_triage import (
     PreSessionFeedbackInput,
-    SafetyIssue,
-    SafetyReport,
-    TriageOutcome,
 )
 from app.services.planning.training_fit import TrainingFitAssessment, TrainingFitOutcome
 from app.services.planning.validator import WorkoutInput
@@ -65,10 +62,17 @@ from app.services.planning.workout_templates import (
 )
 
 
-def _report(outcome: TriageOutcome, *codes: str) -> SafetyReport:
-    return SafetyReport(
-        outcome,
-        tuple(SafetyIssue(code, outcome, code, "TEST-RULE", ("pre:1",)) for code in codes),
+def _fit(outcome: TrainingFitOutcome, *codes: str) -> TrainingFitAssessment:
+    return TrainingFitAssessment(
+        outcome=outcome,
+        policy_version="training-fit-test",
+        evaluated_at=datetime(2026, 9, 5, 12),
+        effective_workout_date=date.today(),
+        warning_codes=codes,
+        evidence=(),
+        coverage=(),
+        feedback_ids=(),
+        authoritative_input_fingerprint="f" * 64,
     )
 
 
@@ -133,13 +137,13 @@ def test_identical_inputs_generate_identical_candidates() -> None:
 
     first = generate_daily_adaptation_candidates(
         expanded.definition,
-        safety_report=_report(TriageOutcome.ALLOW),
+        training_fit=_fit(TrainingFitOutcome.NORMAL),
         load_estimate=expanded.load_estimate,
         available_minutes=45,
     )
     second = generate_daily_adaptation_candidates(
         expanded.definition,
-        safety_report=_report(TriageOutcome.ALLOW),
+        training_fit=_fit(TrainingFitOutcome.NORMAL),
         load_estimate=expanded.load_estimate,
         available_minutes=45,
     )
@@ -165,7 +169,7 @@ def test_generated_candidates_never_increase_load(
 ) -> None:
     assessment = generate_daily_adaptation_candidates(
         _mixed_definition(time_seconds, distance_meters),
-        safety_report=_report(TriageOutcome.ALLOW),
+        training_fit=_fit(TrainingFitOutcome.NORMAL),
     )
 
     assert all(
@@ -182,30 +186,45 @@ def test_generated_candidates_never_increase_load(
             )
 
 
-def test_safety_stop_only_allows_rest() -> None:
+def test_elevated_warning_keeps_all_representable_choices_and_recommends_rest() -> None:
     expanded = _easy()
     assessment = generate_daily_adaptation_candidates(
         expanded.definition,
-        safety_report=_report(TriageOutcome.SAFETY_STOP, "safety.pain_alters_gait"),
+        training_fit=_fit(TrainingFitOutcome.ELEVATED, "safety.pain_alters_gait"),
         load_estimate=expanded.load_estimate,
     )
 
-    assert len(assessment.candidates) == 1
-    assert assessment.candidates[0].adaptation_class == DailyAdaptationClass.REST
-    assert assessment.candidates[0].recommended
-    assert assessment.candidates[0].definition is None
+    assert [candidate.adaptation_class for candidate in assessment.candidates] == [
+        DailyAdaptationClass.KEEP,
+        DailyAdaptationClass.REDUCE_VOLUME,
+        DailyAdaptationClass.REPLACE_WITH_EASY,
+        DailyAdaptationClass.REST,
+    ]
+    assert [
+        candidate.adaptation_class for candidate in assessment.candidates if candidate.recommended
+    ] == [DailyAdaptationClass.REST]
+    assert all(
+        "safety.pain_alters_gait" in candidate.reason_codes for candidate in assessment.candidates
+    )
 
 
-def test_clarification_produces_no_executable_candidate() -> None:
+def test_health_uncertainty_keeps_choices_available_with_warning() -> None:
     expanded = _easy()
     assessment = generate_daily_adaptation_candidates(
         expanded.definition,
-        safety_report=_report(TriageOutcome.CLARIFY, "safety.pain_unclear"),
+        training_fit=_fit(TrainingFitOutcome.CAUTION, "safety.pain_unclear"),
         load_estimate=expanded.load_estimate,
     )
 
-    assert assessment.candidates == ()
-    assert assessment.blocked_reason_codes == ("safety.pain_unclear",)
+    assert [candidate.adaptation_class for candidate in assessment.candidates] == [
+        DailyAdaptationClass.KEEP,
+        DailyAdaptationClass.REDUCE_VOLUME,
+        DailyAdaptationClass.REPLACE_WITH_EASY,
+        DailyAdaptationClass.REST,
+    ]
+    assert all(
+        "safety.pain_unclear" in candidate.reason_codes for candidate in assessment.candidates
+    )
 
 
 def test_reduce_volume_scales_time_distance_and_repeats_without_changing_targets() -> None:
@@ -244,7 +263,7 @@ def test_easy_replacement_requires_comparable_load_and_keeps_low_intensity() -> 
     )
     warned = generate_daily_adaptation_candidates(
         moderate,
-        safety_report=_report(TriageOutcome.WARN, "readiness.subjective_strain"),
+        training_fit=_fit(TrainingFitOutcome.CAUTION, "readiness.subjective_strain"),
         available_minutes=40,
     )
     replacement = next(
@@ -275,37 +294,41 @@ def test_easy_replacement_requires_comparable_load_and_keeps_low_intensity() -> 
     )
     unknown_assessment = generate_daily_adaptation_candidates(
         unknown,
-        safety_report=_report(TriageOutcome.WARN, "readiness.subjective_strain"),
+        training_fit=_fit(TrainingFitOutcome.CAUTION, "readiness.subjective_strain"),
     )
     assert DailyAdaptationClass.REPLACE_WITH_EASY not in {
         candidate.adaptation_class for candidate in unknown_assessment.candidates
     }
 
 
-def test_zero_available_time_only_allows_rest() -> None:
+def test_zero_available_time_recommends_rest_without_suppressing_choices() -> None:
     expanded = _easy()
     assessment = generate_daily_adaptation_candidates(
         expanded.definition,
-        safety_report=_report(TriageOutcome.ALLOW),
+        training_fit=_fit(TrainingFitOutcome.NORMAL),
         load_estimate=expanded.load_estimate,
         available_minutes=0,
     )
 
     assert [candidate.adaptation_class for candidate in assessment.candidates] == [
-        DailyAdaptationClass.REST
+        DailyAdaptationClass.KEEP,
+        DailyAdaptationClass.REDUCE_VOLUME,
+        DailyAdaptationClass.REPLACE_WITH_EASY,
+        DailyAdaptationClass.REST,
     ]
+    assert assessment.candidates[-1].recommended
 
 
-def test_available_time_removes_keep_and_caps_reduced_duration() -> None:
+def test_available_time_advises_reduction_without_removing_keep() -> None:
     expanded = _easy(60)
     assessment = generate_daily_adaptation_candidates(
         expanded.definition,
-        safety_report=_report(TriageOutcome.ALLOW),
+        training_fit=_fit(TrainingFitOutcome.NORMAL),
         load_estimate=expanded.load_estimate,
         available_minutes=30,
     )
 
-    assert DailyAdaptationClass.KEEP not in {
+    assert DailyAdaptationClass.KEEP in {
         candidate.adaptation_class for candidate in assessment.candidates
     }
     reduced = next(
@@ -341,7 +364,7 @@ def test_distance_workout_uses_estimated_duration_for_budget_and_comparison() ->
 
     assessment = generate_daily_adaptation_candidates(
         definition,
-        safety_report=_report(TriageOutcome.ALLOW),
+        training_fit=_fit(TrainingFitOutcome.NORMAL),
         load_estimate=estimate,
         available_minutes=30,
     )
@@ -352,7 +375,7 @@ def test_distance_workout_uses_estimated_duration_for_budget_and_comparison() ->
     )
 
     assert assessment.original_load.dimensions.duration_seconds == 3600
-    assert DailyAdaptationClass.KEEP not in {
+    assert DailyAdaptationClass.KEEP in {
         candidate.adaptation_class for candidate in assessment.candidates
     }
     assert reduced.load.dimensions.duration_seconds == 1800
@@ -386,18 +409,20 @@ def test_distance_workout_uses_estimated_duration_for_budget_and_comparison() ->
         ),
     ],
 )
-def test_warn_without_provably_easy_replacement_recommends_rest(
+def test_caution_without_provably_easy_replacement_keeps_other_choices(
     definition: WorkoutDefinitionV2,
 ) -> None:
     assessment = generate_daily_adaptation_candidates(
         definition,
-        safety_report=_report(TriageOutcome.WARN, "safety.mild_illness"),
+        training_fit=_fit(TrainingFitOutcome.CAUTION, "safety.mild_illness"),
     )
 
     assert [candidate.adaptation_class for candidate in assessment.candidates] == [
-        DailyAdaptationClass.REST
+        DailyAdaptationClass.KEEP,
+        DailyAdaptationClass.REDUCE_VOLUME,
+        DailyAdaptationClass.REST,
     ]
-    assert assessment.candidates[0].recommended
+    assert assessment.candidates[-1].recommended
 
 
 def _accepted_workout(session, user: User, day: date) -> Workout:
@@ -498,6 +523,73 @@ def test_elevated_keep_requires_acknowledgement_and_records_authorization(
         assert authorization["effective_date"] == today.isoformat()
 
 
+def test_elevated_easy_replacement_requires_acknowledgement_and_records_authorization(
+    session_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_daily_adaptation_enabled", True)
+    today = date.today()
+
+    def elevated_assessment(*_args, **_kwargs) -> TrainingFitAssessment:
+        return TrainingFitAssessment(
+            outcome=TrainingFitOutcome.ELEVATED,
+            policy_version="training-fit-test",
+            evaluated_at=utcnow(),
+            effective_workout_date=today,
+            warning_codes=("safety.test",),
+            evidence=(),
+            coverage=(),
+            feedback_ids=(),
+            authoritative_input_fingerprint="f" * 64,
+        )
+
+    with session_factory() as session:
+        user = User(display_name="Elevated Replacement Runner")
+        session.add(user)
+        session.flush()
+        workout = _accepted_workout(session, user, today)
+        monkeypatch.setattr(
+            "app.services.planning.daily_adaptation.assess_training_fit",
+            elevated_assessment,
+        )
+        monkeypatch.setattr(
+            "app.services.planning.workout_service.assess_training_fit",
+            elevated_assessment,
+        )
+        adaptation = DailyAdaptationService(session, user, as_of=today)
+        preview = adaptation.assess_today(workout.id)
+
+        with pytest.raises(WorkoutTransitionError) as required:
+            adaptation.apply(
+                workout.id,
+                DailyAdaptationClass.REPLACE_WITH_EASY,
+                expected_context_fingerprint=preview.context_fingerprint,
+                idempotency_key="elevated-replacement",
+            )
+        assert required.value.code == "workout.training_fit_acknowledgement_required"
+        assert len(list(session.scalars(select(Workout)))) == 1
+
+        result = adaptation.apply(
+            workout.id,
+            DailyAdaptationClass.REPLACE_WITH_EASY,
+            expected_context_fingerprint=preview.context_fingerprint,
+            idempotency_key="elevated-replacement",
+            acknowledge_elevated_warning=True,
+        )
+
+        assert result.revision_created
+        assert result.workout.replaces_workout_id == workout.id
+        event = session.scalar(
+            select(WorkoutEvent).where(
+                WorkoutEvent.workout_id == workout.id,
+                WorkoutEvent.action == "adapt_replace_propose",
+            )
+        )
+        assert event is not None
+        authorization = event.safe_metadata_json["training_fit_authorization"]
+        assert authorization["authorized_revision_id"] == workout.accepted_revision_id
+        assert authorization["effective_date"] == today.isoformat()
+
+
 def test_only_owned_accepted_scheduled_running_workout_today_is_eligible(
     session_factory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -545,9 +637,9 @@ def test_feedback_and_week_changes_invalidate_adaptation_context(
         after_feedback = service.assess_today(workout.id)
 
         assert after_feedback.context_fingerprint != initial.context_fingerprint
-        assert after_feedback.safety_fingerprint != initial.safety_fingerprint
+        assert after_feedback.training_fit_fingerprint != initial.training_fit_fingerprint
         assert after_feedback.available_minutes == 30
-        assert DailyAdaptationClass.KEEP not in {
+        assert DailyAdaptationClass.KEEP in {
             candidate.adaptation_class for candidate in after_feedback.assessment.candidates
         }
 
@@ -1203,7 +1295,7 @@ def test_synced_replacement_retires_old_calendar_before_new_upload(
         assert replacement_identity.garmin_workout_id == "remote-2"
 
 
-def test_safety_stop_rest_can_remove_existing_garmin_calendar_entry(
+def test_elevated_advisory_rest_can_remove_existing_garmin_calendar_entry(
     session_factory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(get_settings(), "coach_daily_adaptation_enabled", True)
@@ -1253,7 +1345,10 @@ def test_safety_stop_rest_can_remove_existing_garmin_calendar_entry(
         adaptation = DailyAdaptationService(session, user, as_of=today)
         preview = adaptation.assess_today(workout.id)
         assert [item.adaptation_class for item in preview.assessment.candidates] == [
-            DailyAdaptationClass.REST
+            DailyAdaptationClass.KEEP,
+            DailyAdaptationClass.REDUCE_VOLUME,
+            DailyAdaptationClass.REPLACE_WITH_EASY,
+            DailyAdaptationClass.REST,
         ]
         adaptation.apply(
             workout.id,

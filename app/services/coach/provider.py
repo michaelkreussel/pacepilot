@@ -40,8 +40,8 @@ from app.services.planning.safety_triage import IllnessSignal, PainInput
 from app.services.planning.workout_proposals import RunningTemplateId
 
 logger = logging.getLogger(__name__)
-COACH_PROMPT_TEMPLATE_VERSION = "coach-prompt-v8"
-COACH_TOOL_CONTRACT_VERSION = "coach-tools-v7"
+COACH_PROMPT_TEMPLATE_VERSION = "coach-prompt-v9"
+COACH_TOOL_CONTRACT_VERSION = "coach-tools-v8"
 
 
 def _exception_source(exc: Exception) -> str:
@@ -161,6 +161,17 @@ Feedback:
   behaupte keine Speicherung.
 - Verweise nach status recorded knapp auf das serverseitige Feedback-Artefakt. Gespeichertes
   Feedback kann bei späteren Empfehlungen über get_subjective_context erneut gelesen werden.
+"""
+
+DAILY_ADAPTATION_PROMPT = """
+Tägliche Anpassung:
+- Wenn der Nutzer Optionen für den heutigen Lauf möchte, ermittle zuerst das exakte eigene,
+  angenommene und eingeplante Workout und rufe assess_daily_adaptation mit dessen ID auf.
+- Das Werkzeug bewertet ausschließlich den vertrauenswürdigen Turn-Tag. Gesundheit und Historie
+  beeinflussen Warnung und Empfehlung, entfernen aber keine strukturell mögliche Auswahl.
+- Verweise nach status assessed auf das serverseitige Artefakt. Wende keine Auswahl aus Chattext an;
+  nur die ausdrücklich betätigten Artefakt-Schaltflächen dürfen beibehalten, reduzieren, ersetzen
+  oder einen Ruhetag eintragen.
 """
 
 
@@ -527,6 +538,15 @@ def get_upcoming_workouts(
 
 
 @tool
+def assess_daily_adaptation(
+    runtime: ToolRuntime[CoachRuntimeContext],
+    workout_id: Annotated[int, Field(gt=0)],
+) -> str:
+    """Assess keep, reduce, easy replacement, and rest choices for today's exact workout."""
+    return coach_operations.assess_daily_adaptation(runtime.context, workout_id=workout_id)
+
+
+@tool
 def get_planning_inputs(runtime: ToolRuntime[CoachRuntimeContext]) -> str:
     """Read active goals, planning profile, recurring availability, and performance anchors."""
     return coach_operations.get_planning_inputs(runtime.context)
@@ -757,15 +777,18 @@ COACH_TOOLS = (
 )
 
 
-def coach_tools(*, workout_proposals_enabled: bool) -> tuple[BaseTool, ...]:
-    if workout_proposals_enabled:
-        return (
-            *COACH_TOOLS,
-            create_running_workout_proposal,
-            get_revisable_running_workouts,
-            revise_running_workout_proposal,
-        )
-    return COACH_TOOLS
+def coach_tools(
+    *, workout_proposals_enabled: bool, daily_adaptation_enabled: bool = False
+) -> tuple[BaseTool, ...]:
+    tools = (*COACH_TOOLS, assess_daily_adaptation) if daily_adaptation_enabled else COACH_TOOLS
+    if not workout_proposals_enabled:
+        return tools
+    return (
+        *tools,
+        create_running_workout_proposal,
+        get_revisable_running_workouts,
+        revise_running_workout_proposal,
+    )
 
 
 class OpenRouterCoachProvider:
@@ -776,11 +799,13 @@ class OpenRouterCoachProvider:
         model_id: str,
         timeout_seconds: float,
         workout_proposals_enabled: bool = False,
+        daily_adaptation_enabled: bool = False,
     ) -> None:
         self._api_key = api_key
         self._model_id = model_id
         self._timeout_seconds = timeout_seconds
         self._workout_proposals_enabled = workout_proposals_enabled
+        self._daily_adaptation_enabled = daily_adaptation_enabled
 
     def _build_agent(self) -> Any:
         model = _ToolMarkupAdapter(
@@ -806,12 +831,16 @@ class OpenRouterCoachProvider:
         )
         return create_agent(
             model,
-            tools=coach_tools(workout_proposals_enabled=self._workout_proposals_enabled),
+            tools=coach_tools(
+                workout_proposals_enabled=self._workout_proposals_enabled,
+                daily_adaptation_enabled=self._daily_adaptation_enabled,
+            ),
             system_prompt=SYSTEM_PROMPT
             + ADAPTIVE_CONTEXT_PROMPT
             + PLANNING_INPUT_PROMPT
             + PROGRESS_PROMPT
             + FEEDBACK_PROMPT
+            + (DAILY_ADAPTATION_PROMPT if self._daily_adaptation_enabled else "")
             + (PROPOSAL_PROMPT if self._workout_proposals_enabled else ""),
             context_schema=CoachRuntimeContext,
             middleware=middleware,
@@ -997,9 +1026,13 @@ def _artifact_type(content: object) -> str | None:
     if not isinstance(payload, dict):
         return None
     artifact = payload.get("artifact")
-    if payload.get("status") not in {"created", "revised", "updated", "recorded"} or not isinstance(
-        artifact, dict
-    ):
+    if payload.get("status") not in {
+        "assessed",
+        "created",
+        "revised",
+        "updated",
+        "recorded",
+    } or not isinstance(artifact, dict):
         return None
     if artifact.get("type") == "workout_proposal":
         return "workout"
@@ -1007,4 +1040,6 @@ def _artifact_type(content: object) -> str | None:
         return "planning_input"
     if artifact.get("type") == "feedback":
         return "feedback"
+    if artifact.get("type") == "daily_adaptation":
+        return "daily_adaptation"
     return None

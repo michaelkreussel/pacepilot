@@ -84,12 +84,29 @@ class WorkoutArtifactPresentation:
 
 
 @dataclass(frozen=True)
+class DailyAdaptationChoicePresentation:
+    adaptation_class: str
+    label: str
+    rationale: str
+    endpoint: str
+    context_fingerprint: str
+    idempotency_key: str
+    duration_minutes: int
+    distance_kilometers: float
+    week_duration_delta_minutes: int
+    recommended: bool
+    acknowledgement_required: bool
+
+
+@dataclass(frozen=True)
 class PlanningArtifactPresentation:
     resource: str
     title: str
     details: tuple[tuple[str, str], ...]
     confirmation_endpoint: str | None = None
     confirmation_label: str | None = None
+    adaptation_choices: tuple[DailyAdaptationChoicePresentation, ...] = ()
+    warning: str | None = None
 
 
 WEEKDAY_LABELS = (
@@ -125,6 +142,99 @@ ILLNESS_LABELS = {
     "systemic": "Deutliches allgemeines Krankheitsgefühl",
     "cardiopulmonary_warning": "Kardiopulmonales Warnzeichen",
 }
+TRAINING_FIT_LABELS = {
+    "normal": "Normal",
+    "caution": "Hinweis",
+    "elevated": "Erhöht",
+}
+
+
+def _daily_adaptation_artifact_presentation(
+    artifact: dict[str, object],
+) -> PlanningArtifactPresentation | None:
+    result = artifact.get("result")
+    if not isinstance(result, dict):
+        return None
+    workout_id = result.get("workout_id")
+    as_of = result.get("as_of")
+    context_fingerprint = result.get("context_fingerprint")
+    training_fit = result.get("training_fit")
+    raw_choices = result.get("choices")
+    if (
+        not isinstance(workout_id, int)
+        or not isinstance(as_of, str)
+        or not isinstance(context_fingerprint, str)
+        or not isinstance(training_fit, dict)
+        or not isinstance(raw_choices, list)
+    ):
+        return None
+    outcome = training_fit.get("outcome")
+    if not isinstance(outcome, str) or outcome not in TRAINING_FIT_LABELS:
+        return None
+    choices: list[DailyAdaptationChoicePresentation] = []
+    for raw in raw_choices:
+        if not isinstance(raw, dict):
+            return None
+        adaptation_class = raw.get("adaptation_class")
+        label = raw.get("label")
+        rationale = raw.get("rationale")
+        idempotency_key = raw.get("idempotency_key")
+        duration_minutes = raw.get("duration_minutes")
+        distance_kilometers = raw.get("distance_kilometers")
+        week_delta = raw.get("week_duration_delta_minutes")
+        recommended = raw.get("recommended")
+        if (
+            not isinstance(adaptation_class, str)
+            or not isinstance(label, str)
+            or not isinstance(rationale, str)
+            or not isinstance(idempotency_key, str)
+            or not isinstance(duration_minutes, int)
+            or isinstance(distance_kilometers, bool)
+            or not isinstance(distance_kilometers, int | float)
+            or not isinstance(week_delta, int)
+            or not isinstance(recommended, bool)
+        ):
+            return None
+        choices.append(
+            DailyAdaptationChoicePresentation(
+                adaptation_class=adaptation_class,
+                label=label,
+                rationale=rationale,
+                endpoint=f"/workouts/{workout_id}/adaptation/apply",
+                context_fingerprint=context_fingerprint,
+                idempotency_key=idempotency_key,
+                duration_minutes=duration_minutes,
+                distance_kilometers=float(distance_kilometers),
+                week_duration_delta_minutes=week_delta,
+                recommended=recommended,
+                acknowledgement_required=(
+                    outcome == "elevated" and adaptation_class in {"KEEP", "REPLACE_WITH_EASY"}
+                ),
+            )
+        )
+    available_minutes = result.get("available_minutes")
+    details = [
+        ("Workout", f"#{workout_id}"),
+        ("Datum", as_of),
+        ("Trainingshinweis", TRAINING_FIT_LABELS[outcome]),
+    ]
+    if isinstance(available_minutes, int):
+        details.append(("Verfügbar", f"{available_minutes} Minuten"))
+    warning = None
+    if outcome == "caution":
+        warning = "Hinweise beeinflussen die Empfehlung, entfernen aber keine mögliche Auswahl."
+    elif outcome == "elevated":
+        warning = (
+            "Erhöhtes persönliches Gesundheitsrisiko: Pause oder Änderung empfohlen. "
+            "Beibehalten oder Ersetzen erfordert deine ausdrückliche Bestätigung."
+        )
+    return PlanningArtifactPresentation(
+        resource="daily_adaptation",
+        title="Anpassung für heute",
+        details=tuple(details),
+        adaptation_choices=tuple(choices),
+        warning=warning,
+    )
 
 
 def _feedback_artifact_presentation(
@@ -187,6 +297,8 @@ def _planning_artifact_presentation(
 ) -> PlanningArtifactPresentation | None:
     if not isinstance(artifact, dict):
         return None
+    if artifact.get("type") == "daily_adaptation":
+        return _daily_adaptation_artifact_presentation(artifact)
     if artifact.get("type") == "feedback":
         return _feedback_artifact_presentation(artifact)
     if artifact.get("type") != "planning_input":

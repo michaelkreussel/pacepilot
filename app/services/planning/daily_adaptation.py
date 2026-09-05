@@ -27,10 +27,10 @@ from app.services.planning.constraints import (
 )
 from app.services.planning.load_estimate import LoadEstimate
 from app.services.planning.registry import KnowledgeRegistry, get_knowledge_registry
-from app.services.planning.safety_triage import (
-    SafetyReport,
-    TriageOutcome,
-    build_safety_context,
+from app.services.planning.training_fit import (
+    TrainingFitAssessment,
+    TrainingFitOutcome,
+    assess_training_fit,
 )
 from app.services.planning.validator import WorkoutInput
 from app.services.planning.workout_definition import (
@@ -121,10 +121,9 @@ class DailyAdaptationCandidate:
 
 @dataclass(frozen=True)
 class DailyAdaptationAssessment:
-    safety_outcome: TriageOutcome
+    training_fit: TrainingFitAssessment
     original_load: AdaptationLoad
     candidates: tuple[DailyAdaptationCandidate, ...]
-    blocked_reason_codes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -169,7 +168,7 @@ class DailyAdaptationPreview:
     accepted_revision_id: int
     context_fingerprint: str
     baseline_fingerprint: str
-    safety_fingerprint: str
+    training_fit_fingerprint: str
     recovery_fingerprint: str
     week: PlannedWeekContext
     week_impacts: tuple[DailyAdaptationWeekImpact, ...]
@@ -250,13 +249,12 @@ class DailyAdaptationService:
                 code="adaptation.candidate_already_open",
             )
         evaluated_at = datetime.combine(self.as_of, time.max)
-        safety = build_safety_context(
+        training_fit = assess_training_fit(
             self.session,
             self.user.id,
-            workout,
-            revision,
-            mode="acceptance",
-            now=evaluated_at,
+            effective_workout_date=self.as_of,
+            revision_fingerprint=revision.content_hash,
+            evaluated_at=evaluated_at,
         )
         feedback_cutoff = datetime.combine(self.as_of, time.min)
         latest_feedback = self.session.scalar(
@@ -277,14 +275,15 @@ class DailyAdaptationService:
         week = self._week_context()
         context_fingerprint = _fingerprint(
             {
-                "schema_version": "daily_adaptation_context.v1",
+                "schema_version": "daily_adaptation_context.v2",
                 "as_of": self.as_of,
                 "workout_id": workout.id,
                 "accepted_revision_id": revision.id,
                 "accepted_revision_number": revision.revision_number,
                 "accepted_content_hash": revision.content_hash,
                 "baseline_fingerprint": baseline.input_fingerprint,
-                "safety_fingerprint": safety.fingerprint,
+                "training_fit_policy_version": training_fit.policy_version,
+                "training_fit_fingerprint": training_fit.authoritative_input_fingerprint,
                 "recovery_fingerprint": recovery_fingerprint,
                 "week_fingerprint": week.fingerprint,
                 "available_minutes": available_minutes,
@@ -294,7 +293,7 @@ class DailyAdaptationService:
         )
         assessment = generate_daily_adaptation_candidates(
             revision.definition_model,
-            safety_report=safety.report,
+            training_fit=training_fit,
             load_estimate=revision.load_estimate_json,
             available_minutes=available_minutes,
         )
@@ -324,7 +323,7 @@ class DailyAdaptationService:
             accepted_revision_id=revision.id,
             context_fingerprint=context_fingerprint,
             baseline_fingerprint=baseline.input_fingerprint,
-            safety_fingerprint=safety.fingerprint,
+            training_fit_fingerprint=training_fit.authoritative_input_fingerprint,
             recovery_fingerprint=recovery_fingerprint,
             week=week,
             week_impacts=week_impacts,
@@ -445,6 +444,7 @@ class DailyAdaptationService:
                 context_fingerprint=preview.context_fingerprint,
                 expected_identity=identity,
                 idempotency_key=idempotency_key,
+                acknowledge_elevated_warning=acknowledge_elevated_warning,
             )
         else:
             result = service.propose_adaptation_revision(
@@ -590,7 +590,7 @@ class DailyAdaptationService:
 def generate_daily_adaptation_candidates(
     definition: WorkoutDefinitionModel,
     *,
-    safety_report: SafetyReport,
+    training_fit: TrainingFitAssessment,
     load_estimate: LoadEstimate | dict[str, object] | None = None,
     available_minutes: int | None = None,
     registry: KnowledgeRegistry | None = None,
@@ -598,44 +598,31 @@ def generate_daily_adaptation_candidates(
     """Generate the initial Phase 10 classes without model-authored workout content."""
     knowledge = registry or get_knowledge_registry()
     original = adaptation_load(definition, load_estimate=load_estimate)
-    issue_codes = tuple(sorted(issue.code for issue in safety_report.issues))
-
-    if safety_report.outcome == TriageOutcome.CLARIFY:
-        return DailyAdaptationAssessment(
-            safety_outcome=safety_report.outcome,
-            original_load=original,
-            candidates=(),
-            blocked_reason_codes=issue_codes or ("adaptation.safety_clarification_required",),
-        )
+    issue_codes = tuple(sorted(training_fit.warning_codes))
+    caution = training_fit.outcome == TrainingFitOutcome.CAUTION
+    elevated = training_fit.outcome == TrainingFitOutcome.ELEVATED
+    warned = caution or elevated
 
     rest = DailyAdaptationCandidate(
         adaptation_class=DailyAdaptationClass.REST,
         definition=None,
         load=AdaptationLoad(LoadDimensions(0, 0, 0, 0), True),
-        recommended=(safety_report.outcome == TriageOutcome.SAFETY_STOP or available_minutes == 0),
+        recommended=(elevated or available_minutes == 0),
         reason_codes=(
             issue_codes
-            if safety_report.outcome == TriageOutcome.SAFETY_STOP
+            if warned
             else ("constraint.no_time_available",)
             if available_minutes == 0
             else ("adaptation.rest_available",)
         ),
     )
-    if safety_report.outcome == TriageOutcome.SAFETY_STOP or available_minutes == 0:
-        return DailyAdaptationAssessment(
-            safety_outcome=safety_report.outcome,
-            original_load=original,
-            candidates=(rest,),
-        )
-
-    strained = safety_report.outcome == TriageOutcome.WARN
     time_limited = _time_budget_requires_reduction(original, available_minutes)
     keep = DailyAdaptationCandidate(
         adaptation_class=DailyAdaptationClass.KEEP,
         definition=definition.model_copy(deep=True),
         load=original,
-        recommended=not strained and not time_limited,
-        reason_codes=("adaptation.keep_current",),
+        recommended=not warned and not time_limited,
+        reason_codes=issue_codes if warned else ("adaptation.keep_current",),
     )
     reduced_definition = reduce_volume(
         definition,
@@ -646,13 +633,9 @@ def generate_daily_adaptation_candidates(
     easy = _easy_replacement(
         original,
         available_minutes=available_minutes,
-        safety_report=safety_report,
         registry=knowledge,
     )
-    requires_proven_low_intensity = bool(
-        {"safety.mild_illness", "safety.pain_warning"} & set(issue_codes)
-    )
-    warning_requires_rest = strained and (
+    warning_requires_rest = caution and (
         not original.intensity_comparable
         or original.dimensions.intensity_score > 1
         and easy is None
@@ -662,28 +645,26 @@ def generate_daily_adaptation_candidates(
         definition=reduced_definition,
         load=_same_intensity_load(reduced_definition, original, definition),
         recommended=(
-            not warning_requires_rest
+            not elevated
+            and not warning_requires_rest
             and (
-                not strained
+                not warned
                 and time_limited
-                or strained
+                and available_minutes != 0
+                or caution
                 and original.intensity_comparable
                 and original.dimensions.intensity_score <= 1
             )
         ),
         reason_codes=(
             issue_codes
-            if strained
+            if warned
             else ("constraint.available_time_reduction",)
             if time_limited
             else ("adaptation.reduce_volume_available",)
         ),
     )
-    candidates = [reduced] if time_limited else [keep, reduced]
-    if requires_proven_low_intensity and (
-        not original.intensity_comparable or original.dimensions.intensity_score > 1
-    ):
-        candidates = []
+    candidates = [keep, reduced]
 
     if easy is not None:
         candidates.append(
@@ -691,13 +672,13 @@ def generate_daily_adaptation_candidates(
                 adaptation_class=DailyAdaptationClass.REPLACE_WITH_EASY,
                 definition=easy[0],
                 load=easy[1],
-                recommended=strained and original.dimensions.intensity_score > 1,
+                recommended=caution and original.dimensions.intensity_score > 1,
                 reason_codes=(
-                    issue_codes if strained else ("adaptation.easy_replacement_available",)
+                    issue_codes if warned else ("adaptation.easy_replacement_available",)
                 ),
             )
         )
-    if warning_requires_rest:
+    if elevated or warning_requires_rest:
         rest = DailyAdaptationCandidate(
             adaptation_class=rest.adaptation_class,
             definition=rest.definition,
@@ -724,7 +705,7 @@ def generate_daily_adaptation_candidates(
         if not engine.adaptation_allows(original.dimensions, candidate.load.dimensions):
             raise RuntimeError("Daily adaptation generated an escalating candidate")
     return DailyAdaptationAssessment(
-        safety_outcome=safety_report.outcome,
+        training_fit=training_fit,
         original_load=original,
         candidates=tuple(candidates),
     )
@@ -808,7 +789,6 @@ def _easy_replacement(
     original: AdaptationLoad,
     *,
     available_minutes: int | None,
-    safety_report: SafetyReport,
     registry: KnowledgeRegistry,
 ) -> tuple[WorkoutDefinitionModel, AdaptationLoad] | None:
     original_minutes = int(original.dimensions.duration_seconds // 60)
@@ -824,7 +804,6 @@ def _easy_replacement(
             consistent_running_weeks=0,
             runs_per_week=0,
             available_minutes=selected_minutes,
-            safety_stop=safety_report.outcome == TriageOutcome.SAFETY_STOP,
         ),
         registry=registry,
     )
@@ -968,17 +947,18 @@ def _adaptation_metadata(
             "checks": [
                 {"code": "structure.valid", "result": "pass"},
                 {"code": "adaptation.no_load_increase", "result": "pass"},
-                {"code": "adaptation.safety_context", "result": "pass"},
                 {"code": "adaptation.week_context", "result": "pass"},
             ],
         },
         generation_context_json={
-            "schema_version": "daily_adaptation_context.v1",
+            "schema_version": "daily_adaptation_context.v2",
             "adaptation_class": candidate.adaptation_class.value,
             "as_of": preview.as_of.isoformat(),
             "adaptation_context_fingerprint": preview.context_fingerprint,
             "baseline_fingerprint": preview.baseline_fingerprint,
-            "safety_fingerprint": preview.safety_fingerprint,
+            "training_fit_policy_version": preview.assessment.training_fit.policy_version,
+            "training_fit_fingerprint": preview.training_fit_fingerprint,
+            "training_fit_outcome": preview.assessment.training_fit.outcome.value,
             "recovery_fingerprint": preview.recovery_fingerprint,
             "week_fingerprint": preview.week.fingerprint,
             "original_revision": {

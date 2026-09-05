@@ -55,6 +55,7 @@ from app.services.coach.presentation import (
 )
 from app.services.coach.provider import OpenRouterCoachProvider, coach_tools
 from app.services.coach.tools import (
+    assess_daily_adaptation,
     create_planning_anchor,
     create_planning_goal,
     create_running_workout_proposal,
@@ -69,6 +70,7 @@ from app.services.coach.tools import (
     update_planning_profile,
 )
 from app.services.planning import workout_proposals as workout_proposals_module
+from app.services.planning.daily_adaptation import DailyAdaptationClass
 from app.services.planning.feedback_service import FeedbackCommands
 from app.services.planning.planning_commands import (
     GoalUpdateInput,
@@ -84,8 +86,17 @@ from app.services.planning.safety_triage import (
 from app.services.planning.validator import WorkoutInput
 from app.services.planning.workout_definition import default_definition
 from app.services.planning.workout_proposals import RunningProposalRequest, RunningProposalService
-from app.services.planning.workout_revision import AcceptRevisionCommand, RevisionIdentity
+from app.services.planning.workout_revision import (
+    AcceptRevisionCommand,
+    RevisionIdentity,
+    ScheduleWorkoutCommand,
+)
 from app.services.planning.workout_service import WorkoutService
+from app.services.planning.workout_templates import (
+    TemplateEligibilityContext,
+    TemplateParameters,
+    expand_workout_template,
+)
 from app.services.planning.workout_views import workout_lifecycle_projection
 
 
@@ -782,6 +793,52 @@ def _running_history(session: Session, user_id: int, *, as_of: date | None = Non
     session.flush()
 
 
+def _accepted_scheduled_workout(session: Session, user: User, day: date) -> Workout:
+    service = WorkoutService(session, user)
+    expanded = expand_workout_template(
+        "easy_run",
+        TemplateParameters(duration_minutes=45),
+        eligibility=TemplateEligibilityContext(
+            consistent_running_weeks=0,
+            runs_per_week=0,
+            available_minutes=45,
+        ),
+    )
+    workout = service.create(
+        WorkoutInput(
+            name="Heutiger Lauf",
+            sport="running",
+            scheduled_for=day,
+            description="",
+            definition=expanded.definition,
+            definition_version=2,
+        )
+    )
+    revision = session.get(WorkoutRevision, workout.current_revision_id)
+    assert revision is not None
+    service.accept(
+        workout.id,
+        AcceptRevisionCommand(
+            identity=RevisionIdentity(
+                revision_id=revision.id,
+                revision_number=revision.revision_number,
+                content_hash=revision.content_hash,
+                lock_version=workout.lock_version,
+            ),
+            context_fingerprint=service.acceptance_context(workout.id).fingerprint,
+        ),
+    )
+    service.schedule(
+        workout.id,
+        ScheduleWorkoutCommand(
+            revision_id=revision.id,
+            scheduled_for=day,
+            expected_lock_version=workout.lock_version,
+        ),
+    )
+    return workout
+
+
 def test_coach_streams_and_persists_conversation(
     client: TestClient,
     session_factory: sessionmaker[Session],
@@ -1072,6 +1129,118 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
         assert workout.originating_user_message_id is None
         assert workout.originating_assistant_message_id is None
         assert workout.source_assistant_message_id is None
+
+
+def test_coach_assesses_daily_adaptation_as_artifact_before_explicit_apply(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_daily_adaptation_enabled", True)
+    today = date.today()
+    with session_factory() as session:
+        user = session.scalar(select(User))
+        assert user is not None
+        workout = _accepted_scheduled_workout(session, user, today)
+        workout_id = workout.id
+
+    class AdaptationAgent:
+        runtime: CoachRuntimeContext | None = None
+        result: dict[str, object] | None = None
+
+        async def stream(
+            self,
+            messages: Sequence[CoachHistoryMessage],
+            runtime: CoachRuntimeContext,
+        ) -> AsyncIterator[CoachEvent]:
+            del messages
+            self.runtime = runtime
+            self.result = json.loads(assess_daily_adaptation(runtime, workout_id=workout_id))
+            assert self.result["status"] == "assessed"
+            yield CoachEvent("artifact_available", artifact_type="daily_adaptation")
+            yield CoachEvent("answer_text", text="Hier sind deine Optionen für heute.")
+            yield CoachEvent("completed")
+
+    fake = AdaptationAgent()
+    app.dependency_overrides[get_coach_agent_factory] = lambda: lambda: fake
+    conversation_id = _new_chat(client)
+
+    response = client.post(
+        f"/coach/{conversation_id}/messages",
+        data={"message": "Soll ich meinen heutigen Lauf anpassen?"},
+    )
+
+    assert response.status_code == 200
+    completed_html = cast(str, _sse_payload(response.text, "answer.completed")["html"])
+    assert "Anpassung für heute" in completed_html
+    for label in (
+        "Training beibehalten",
+        "Umfang reduzieren",
+        "Durch Easy Run ersetzen",
+        "Ruhetag",
+    ):
+        assert label in completed_html
+    assert fake.runtime is not None and fake.runtime.assistant_message_id is not None
+    assert fake.result is not None
+    artifact_summary = cast(dict[str, object], fake.result["artifact"])
+    assert artifact_summary == {"type": "daily_adaptation", "workout_id": workout_id}
+
+    with session_factory() as session:
+        assistant = session.get(CoachMessage, fake.runtime.assistant_message_id)
+        assert assistant is not None
+        assert len(assistant.artifacts_json) == 1
+        artifact = assistant.artifacts_json[0]
+        assert artifact["type"] == "daily_adaptation"
+        result = cast(dict[str, object], artifact["result"])
+        assert result["as_of"] == today.isoformat()
+        assert result["workout_id"] == workout_id
+        assert [
+            choice["adaptation_class"]
+            for choice in cast(list[dict[str, object]], result["choices"])
+        ] == [
+            "KEEP",
+            "REDUCE_VOLUME",
+            "REPLACE_WITH_EASY",
+            "REST",
+        ]
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(WorkoutEvent)
+                .where(WorkoutEvent.action.like("adapt_%"))
+            )
+            == 0
+        )
+        context_fingerprint = cast(str, result["context_fingerprint"])
+        keep = next(
+            choice
+            for choice in cast(list[dict[str, object]], result["choices"])
+            if choice["adaptation_class"] == "KEEP"
+        )
+        idempotency_key = cast(str, keep["idempotency_key"])
+
+    reloaded = client.get(f"/coach/{conversation_id}")
+    assert reloaded.status_code == 200
+    assert "Anpassung für heute" in reloaded.text
+
+    applied = client.post(
+        f"/workouts/{workout_id}/adaptation/apply",
+        data={
+            "adaptation_class": DailyAdaptationClass.KEEP.value,
+            "context_fingerprint": context_fingerprint,
+            "idempotency_key": idempotency_key,
+        },
+        follow_redirects=False,
+    )
+    assert applied.status_code == 303
+    with session_factory() as session:
+        event = session.scalar(
+            select(WorkoutEvent).where(
+                WorkoutEvent.workout_id == workout_id,
+                WorkoutEvent.action == "adapt_keep",
+            )
+        )
+        assert event is not None
 
 
 def test_conversation_updates_availability_with_durable_server_artifact(
@@ -2383,6 +2552,13 @@ def test_health_trend_tool_schema_uses_analytics_metric_choices() -> None:
 
 def test_agent_registers_only_bounded_conversational_mutation_tools() -> None:
     read_only = {tool.name for tool in coach_tools(workout_proposals_enabled=False)}
+    adaptation_enabled = {
+        tool.name
+        for tool in coach_tools(
+            workout_proposals_enabled=False,
+            daily_adaptation_enabled=True,
+        )
+    }
     enabled = {tool.name for tool in coach_tools(workout_proposals_enabled=True)}
     assert {
         "create_planning_goal",
@@ -2400,6 +2576,21 @@ def test_agent_registers_only_bounded_conversational_mutation_tools() -> None:
         "get_revisable_running_workouts",
         "revise_running_workout_proposal",
     }
+    assert adaptation_enabled - read_only == {"assess_daily_adaptation"}
+    adaptation_tool = next(
+        tool
+        for tool in coach_tools(
+            workout_proposals_enabled=False,
+            daily_adaptation_enabled=True,
+        )
+        if tool.name == "assess_daily_adaptation"
+    )
+    adaptation_schema_model: Any = adaptation_tool.tool_call_schema
+    adaptation_schema = adaptation_schema_model.model_json_schema()
+    assert set(adaptation_schema["properties"]) == {"workout_id"}
+    assert "user_id" not in json.dumps(adaptation_schema)
+    assert "as_of" not in json.dumps(adaptation_schema)
+    assert "adaptation_class" not in json.dumps(adaptation_schema)
     assert (
         not {
             "accept_workout",
@@ -2409,6 +2600,63 @@ def test_agent_registers_only_bounded_conversational_mutation_tools() -> None:
         }
         & enabled
     )
+
+
+def test_daily_adaptation_operation_uses_runtime_date_and_rejects_cross_user_workout(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_daily_adaptation_enabled", True)
+    today = date.today()
+    with session_factory() as session:
+        owner = User(display_name="Owner")
+        other = User(display_name="Other")
+        session.add_all([owner, other])
+        session.flush()
+        foreign_workout = _accepted_scheduled_workout(session, other, today)
+        tomorrow_workout = _accepted_scheduled_workout(session, owner, today + timedelta(days=1))
+        conversation = CoachConversation(user_id=owner.id, title="BC14")
+        session.add(conversation)
+        session.flush()
+        user_message = CoachMessage(
+            conversation_id=conversation.id,
+            role="user",
+            content="Passe mein Training an.",
+            status="completed",
+        )
+        assistant_message = CoachMessage(
+            conversation_id=conversation.id,
+            role="assistant",
+            content="",
+            status="streaming",
+        )
+        session.add_all([user_message, assistant_message])
+        session.commit()
+        runtime = CoachRuntimeContext(
+            user_id=owner.id,
+            as_of=today,
+            session_factory=session_factory,
+            conversation_id=conversation.id,
+            user_message_id=user_message.id,
+            assistant_message_id=assistant_message.id,
+        )
+        foreign_workout_id = foreign_workout.id
+        tomorrow_workout_id = tomorrow_workout.id
+
+    incomplete = CoachRuntimeContext(
+        user_id=runtime.user_id,
+        as_of=today,
+        session_factory=session_factory,
+    )
+    with pytest.raises(ValueError, match="runtime is incomplete"):
+        assess_daily_adaptation(incomplete, workout_id=foreign_workout_id)
+
+    foreign = json.loads(assess_daily_adaptation(runtime, workout_id=foreign_workout_id))
+    wrong_day = json.loads(assess_daily_adaptation(runtime, workout_id=tomorrow_workout_id))
+    assert foreign["error"]["code"] == "adaptation.not_found"
+    assert wrong_day["error"]["code"] == "adaptation.workout_not_eligible"
+    with session_factory() as session:
+        assistant = session.get(CoachMessage, runtime.assistant_message_id)
+        assert assistant is not None and assistant.artifacts_json == []
 
 
 def test_proposal_survives_provider_failure_after_commit(

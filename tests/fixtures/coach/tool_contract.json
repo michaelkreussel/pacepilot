@@ -1,6 +1,6 @@
 {
   "source": "synthetic",
-  "contract_version": "coach-tools-v7",
+  "contract_version": "coach-tools-v8",
   "tools": {
     "get_adaptive_context": ["days", "focus", "goal_id"],
     "get_current_recovery_state": [],

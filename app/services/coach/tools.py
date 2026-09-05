@@ -21,6 +21,7 @@ from app.services.analytics.athlete_data import AdaptiveContextFocus, AthleteDat
 from app.services.analytics.health_trends import HealthMetric
 from app.services.analytics.progress import ProgressReferenceError
 from app.services.coach.conversation import CoachRuntimeContext
+from app.services.planning.daily_adaptation import DailyAdaptationError, DailyAdaptationService
 from app.services.planning.feedback_service import FeedbackCommands, FeedbackNotFoundError
 from app.services.planning.planning_commands import (
     AnchorKind,
@@ -246,6 +247,93 @@ def get_upcoming_workouts(
             session, runtime.user_id, as_of=runtime.as_of
         ).get_upcoming_workouts(days)
     return _json(tuple(asdict(workout) for workout in workouts))
+
+
+def assess_daily_adaptation(runtime: CoachRuntimeContext, *, workout_id: int) -> str:
+    """Assess today's exact accepted scheduled run without applying an adaptation."""
+    if runtime.conversation_id is None or runtime.user_message_id is None:
+        raise ValueError("Coach adaptation runtime is incomplete")
+    with runtime.session_factory() as session:
+        user, assistant_message = _proposal_runtime(session, runtime)
+        existing = next(
+            (
+                artifact
+                for artifact in assistant_message.artifacts_json
+                if artifact.get("type") == "daily_adaptation"
+                and artifact.get("operation") == "assess_daily_adaptation"
+                and artifact.get("workout_id") == workout_id
+            ),
+            None,
+        )
+        if existing is not None:
+            return _json(
+                {
+                    "status": "assessed",
+                    "artifact": {"type": "daily_adaptation", "workout_id": workout_id},
+                }
+            )
+        try:
+            preview = DailyAdaptationService(
+                session,
+                user,
+                as_of=runtime.as_of,
+                request_id=assistant_message.request_id,
+            ).assess_today(workout_id)
+        except DailyAdaptationError as exc:
+            return _json(
+                {
+                    "status": "not_assessed",
+                    "error": {"code": exc.code, "message": str(exc)},
+                }
+            )
+        artifact: dict[str, object] = {
+            "type": "daily_adaptation",
+            "operation": "assess_daily_adaptation",
+            "workout_id": workout_id,
+            "result": {
+                "as_of": preview.as_of.isoformat(),
+                "workout_id": workout_id,
+                "accepted_revision_id": preview.accepted_revision_id,
+                "context_fingerprint": preview.context_fingerprint,
+                "available_minutes": preview.available_minutes,
+                "training_fit": {
+                    "outcome": preview.assessment.training_fit.outcome.value,
+                    "policy_version": preview.assessment.training_fit.policy_version,
+                    "warning_codes": list(preview.assessment.training_fit.warning_codes),
+                    "fingerprint": preview.training_fit_fingerprint,
+                },
+                "choices": [
+                    {
+                        "adaptation_class": candidate.adaptation_class.value,
+                        "label": candidate.label,
+                        "rationale": candidate.rationale,
+                        "recommended": candidate.recommended,
+                        "reason_codes": list(candidate.reason_codes),
+                        "duration_minutes": candidate.duration_minutes,
+                        "distance_kilometers": candidate.distance_kilometers,
+                        "week_duration_delta_minutes": preview.week_impact(
+                            candidate.adaptation_class
+                        ).duration_delta_minutes,
+                        "week_distance_delta_kilometers": preview.week_impact(
+                            candidate.adaptation_class
+                        ).distance_delta_kilometers,
+                        "idempotency_key": (
+                            f"coach-message:{assistant_message.id}:daily-adaptation:"
+                            f"{workout_id}:{candidate.adaptation_class.value}"
+                        ),
+                    }
+                    for candidate in preview.assessment.candidates
+                ],
+            },
+        }
+        assistant_message.artifacts_json = [*assistant_message.artifacts_json, artifact]
+        session.commit()
+    return _json(
+        {
+            "status": "assessed",
+            "artifact": {"type": "daily_adaptation", "workout_id": workout_id},
+        }
+    )
 
 
 def get_revisable_running_workouts(runtime: CoachRuntimeContext, limit: int = 10) -> str:

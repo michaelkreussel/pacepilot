@@ -56,9 +56,6 @@
   <p class="text-xs font-semibold uppercase tracking-widest text-primary-emphasis">Tägliche Anpassung</p>
   <h2 class="mt-1 text-lg font-semibold" id="adaptation-title">Passt dein heutiges Training?</h2>
   {% if adaptation_preview.available_minutes is not none %}<p class="mt-1 text-sm text-muted-foreground">Verfügbares Zeitbudget heute: {{ adaptation_preview.available_minutes }} Minuten.</p>{% endif %}
-  {% if adaptation_preview.assessment.blocked_reason_codes %}
-  <div class="mt-3 rounded-lg border border-warning/30 bg-warning-subtle px-3 py-2 text-sm text-warning-emphasis" role="status">Bitte kläre zuerst deine Sicherheitsangaben, bevor eine Anpassung möglich ist.</div>
-  {% else %}
   <div class="mt-4 grid gap-3 md:grid-cols-2">
     {% for candidate in adaptation_preview.assessment.candidates %}
     {% set impact = adaptation_preview.week_impact(candidate.adaptation_class) %}
@@ -70,12 +67,11 @@
         <div class="rounded bg-surface-muted p-1.5"><dt class="text-muted-foreground">Distanz</dt><dd class="font-semibold">{{ (adaptation_preview.assessment.original_load.dimensions.distance_meters / 1000)|round(1) }} → {{ candidate.distance_kilometers }} km</dd></div>
         <div class="rounded bg-surface-muted p-1.5"><dt class="text-muted-foreground">Woche</dt><dd class="font-semibold">{{ '+' if impact.duration_delta_minutes > 0 else '' }}{{ impact.duration_delta_minutes }} Min.</dd></div>
       </dl>
-      <form method="post" action="/workouts/{{ workout.id }}/adaptation/apply">{{ csrf_field() }}<input type="hidden" name="adaptation_class" value="{{ candidate.adaptation_class.value }}"><input type="hidden" name="context_fingerprint" value="{{ adaptation_preview.context_fingerprint }}"><input type="hidden" name="idempotency_key" value="{{ adaptation_apply_key }}-{{ candidate.adaptation_class.value }}">{% if candidate.adaptation_class.value == 'KEEP' and workout.training_fit_acknowledgement_required %}<label class="mb-3 flex items-start gap-2 rounded-lg border border-danger/25 bg-danger-subtle p-3 text-xs leading-5 text-danger-emphasis"><input class="mt-1" type="checkbox" name="acknowledge_elevated_warning" value="yes" required> Trotz erhöhtem Gesundheitsrisiko mit exakt Revision {{ workout.accepted.revision_number }} am {{ workout.training_fit_effective_date|date }} fortfahren.</label>{% endif %}<button class="inline-flex w-full items-center justify-center rounded-lg border border-transparent bg-primary px-3 py-1.5 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background" type="submit">{{ candidate.label }} anwenden</button></form>
+      <form method="post" action="/workouts/{{ workout.id }}/adaptation/apply">{{ csrf_field() }}<input type="hidden" name="adaptation_class" value="{{ candidate.adaptation_class.value }}"><input type="hidden" name="context_fingerprint" value="{{ adaptation_preview.context_fingerprint }}"><input type="hidden" name="idempotency_key" value="{{ adaptation_apply_key }}-{{ candidate.adaptation_class.value }}">{% if candidate.adaptation_class.value in ['KEEP', 'REPLACE_WITH_EASY'] and workout.training_fit_acknowledgement_required %}<label class="mb-3 flex items-start gap-2 rounded-lg border border-danger/25 bg-danger-subtle p-3 text-xs leading-5 text-danger-emphasis"><input class="mt-1" type="checkbox" name="acknowledge_elevated_warning" value="yes" required> Trotz erhöhtem Gesundheitsrisiko mit exakt Revision {{ workout.accepted.revision_number }} am {{ workout.training_fit_effective_date|date }} fortfahren.</label>{% endif %}<button class="inline-flex w-full items-center justify-center rounded-lg border border-transparent bg-primary px-3 py-1.5 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background" type="submit">{{ candidate.label }} anwenden</button></form>
     </article>
     {% endfor %}
   </div>
   <p class="mt-3 text-xs leading-5 text-muted-foreground">Inhaltsänderungen erzeugen eine neue Revision und müssen danach erneut angenommen werden. Der ursprüngliche Lauf bleibt im Verlauf erhalten.</p>
-  {% endif %}
 </section>
 {% endif %}
 

@@ -94,7 +94,7 @@ def test_coach_tool_and_prompt_contracts_are_versioned_and_stable() -> None:
 
     assert fixture["contract_version"] == COACH_TOOL_CONTRACT_VERSION
     assert actual == fixture["tools"]
-    assert COACH_PROMPT_TEMPLATE_VERSION == "coach-prompt-v8"
+    assert COACH_PROMPT_TEMPLATE_VERSION == "coach-prompt-v9"
     assert "get_adaptive_context" in PROGRESS_PROMPT
     assert "keine Verlaufsdaten" in PROGRESS_PROMPT
     assert {"user_id", "workout_id", "definition", "idempotency_key"}.isdisjoint(

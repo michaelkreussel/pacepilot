@@ -24,6 +24,9 @@ def get_coach_agent_factory(
     workout_proposals_enabled = coach_feature_enabled(
         settings.coach_workout_proposals_enabled, user.id
     )
+    daily_adaptation_enabled = coach_feature_enabled(
+        settings.coach_daily_adaptation_enabled, user.id
+    )
 
     def create_agent() -> CoachAgent:
         return OpenRouterCoachProvider(
@@ -31,6 +34,7 @@ def get_coach_agent_factory(
             model_id=model_id,
             timeout_seconds=timeout_seconds,
             workout_proposals_enabled=workout_proposals_enabled,
+            daily_adaptation_enabled=daily_adaptation_enabled,
         )
 
     return create_agent
