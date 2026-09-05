@@ -13,8 +13,8 @@ from app.models import (
     PreSessionFeedback,
     User,
     Workout,
+    WorkoutEvent,
     WorkoutRevision,
-    WorkoutValidationRun,
 )
 from app.models.user import utcnow
 from app.services.analytics.athlete_data import AthleteDataService
@@ -39,6 +39,7 @@ from app.services.planning.workout_revision import (
     AcceptRevisionCommand,
     RevisionIdentity,
     ScheduleWorkoutCommand,
+    UnscheduleWorkoutCommand,
 )
 from app.services.planning.workout_service import (
     WorkoutConflictError,
@@ -57,7 +58,12 @@ def _workout_input(day: date | None = None) -> WorkoutInput:
     )
 
 
-def _accept_command(service: WorkoutService, workout: Workout) -> AcceptRevisionCommand:
+def _accept_command(
+    service: WorkoutService,
+    workout: Workout,
+    *,
+    acknowledge_elevated_warning: bool = False,
+) -> AcceptRevisionCommand:
     service.session.refresh(workout)
     assert workout.current_revision_id is not None
     revision = service.session.get(WorkoutRevision, workout.current_revision_id)
@@ -70,6 +76,7 @@ def _accept_command(service: WorkoutService, workout: Workout) -> AcceptRevision
             lock_version=workout.lock_version,
         ),
         context_fingerprint=service.acceptance_context(workout.id).fingerprint,
+        acknowledge_elevated_warning=acknowledge_elevated_warning,
     )
 
 
@@ -274,7 +281,7 @@ def test_feedback_delete_commands_return_ids_without_committing(
         assert [item.id for item in queries.all_post_session()] == [post.id]
 
 
-def test_new_safety_feedback_invalidates_acceptance_and_delete_does_not_reuse_cache(
+def test_elevated_same_day_accept_requires_fresh_acknowledgement(
     session_factory: sessionmaker[Session],
 ) -> None:
     with session_factory() as session:
@@ -285,7 +292,7 @@ def test_new_safety_feedback_invalidates_acceptance_and_delete_does_not_reuse_ca
         workout = service.create(_workout_input())
         stale_command = _accept_command(service, workout)
 
-        feedback = FeedbackCommands(session, user).record_pre_session(
+        FeedbackCommands(session, user).record_pre_session(
             workout.id,
             PreSessionFeedbackInput(
                 motivation=5,
@@ -307,31 +314,216 @@ def test_new_safety_feedback_invalidates_acceptance_and_delete_does_not_reuse_ca
 
         with pytest.raises(WorkoutTransitionError) as stopped:
             service.accept(workout.id, _accept_command(service, workout))
-        assert stopped.value.code == "workout.validation_failed"
-        with session_factory() as evidence_session:
-            validation = evidence_session.scalar(
-                select(WorkoutValidationRun)
-                .where(WorkoutValidationRun.workout_id == workout.id)
-                .order_by(WorkoutValidationRun.id.desc())
+        assert stopped.value.code == "workout.training_fit_acknowledgement_required"
+        session.refresh(workout)
+        assert workout.accepted_revision_id is None
+        assert (
+            session.scalar(
+                select(WorkoutEvent).where(
+                    WorkoutEvent.workout_id == workout.id,
+                    WorkoutEvent.action == "accept",
+                )
             )
-            assert validation is not None
-            assert validation.feedback_ids_json == [f"pre:{feedback.id}"]
-            assert validation.report_json["outcome"] == "safety_stop"
+            is None
+        )
 
-        stopped_fingerprint = service.acceptance_context(workout.id).fingerprint
-        FeedbackCommands(session, user).delete_pre_session(feedback.id)
-        session.commit()
-        assert not any(
-            f"pre:{feedback.id}" in run.feedback_ids_json
-            for run in session.scalars(
-                select(WorkoutValidationRun).where(WorkoutValidationRun.workout_id == workout.id)
+        service.accept(
+            workout.id,
+            _accept_command(service, workout, acknowledge_elevated_warning=True),
+        )
+        event = session.scalar(
+            select(WorkoutEvent).where(
+                WorkoutEvent.workout_id == workout.id,
+                WorkoutEvent.action == "accept",
             )
         )
-        allowed_context = service.acceptance_context(workout.id)
-        assert allowed_context.fingerprint != stopped_fingerprint
-        assert allowed_context.report.outcome == TriageOutcome.ALLOW
-        service.accept(workout.id, _accept_command(service, workout))
+        assert event is not None
+        authorization = event.safe_metadata_json["training_fit_authorization"]
+        assert isinstance(authorization, dict)
+        assert authorization == {
+            "policy_version": authorization["policy_version"],
+            "assessment_fingerprint": authorization["assessment_fingerprint"],
+            "effective_date": date.today().isoformat(),
+            "acknowledged_by_user_id": user.id,
+            "acknowledged_at": authorization["acknowledged_at"],
+            "authorized_revision_id": workout.accepted_revision_id,
+            "local_date": date.today().isoformat(),
+        }
+        assert len(authorization["assessment_fingerprint"]) == 64
         assert workout.approval_status == "accepted"
+
+
+@pytest.mark.parametrize(
+    ("field", "wrong_value"),
+    [
+        ("acknowledged_by_user_id", -1),
+        ("authorized_revision_id", -1),
+        ("effective_date", "2026-01-01"),
+        ("policy_version", "training-fit-stale"),
+        ("assessment_fingerprint", "0" * 64),
+        ("local_date", "2026-01-01"),
+    ],
+)
+def test_mismatched_acknowledgement_cannot_authorize_schedule(
+    session_factory: sessionmaker[Session], field: str, wrong_value: object
+) -> None:
+    with session_factory() as session:
+        user = User(display_name="Runner")
+        session.add(user)
+        session.flush()
+        service = WorkoutService(session, user)
+        workout = service.create(_workout_input())
+        FeedbackCommands(session, user).record_pre_session(
+            workout.id,
+            PreSessionFeedbackInput(illness_signal=IllnessSignal.FEVER),
+        )
+        session.commit()
+        service.accept(
+            workout.id,
+            _accept_command(service, workout, acknowledge_elevated_warning=True),
+        )
+        event = session.scalar(
+            select(WorkoutEvent).where(
+                WorkoutEvent.workout_id == workout.id,
+                WorkoutEvent.action == "accept",
+            )
+        )
+        assert event is not None
+        metadata = dict(event.safe_metadata_json)
+        raw_authorization = metadata["training_fit_authorization"]
+        assert isinstance(raw_authorization, dict)
+        authorization = dict(raw_authorization)
+        authorization[field] = wrong_value
+        event.safe_metadata_json = {**metadata, "training_fit_authorization": authorization}
+        session.commit()
+
+        with pytest.raises(WorkoutTransitionError) as required:
+            service.schedule(
+                workout.id,
+                ScheduleWorkoutCommand(
+                    revision_id=workout.accepted_revision_id or 0,
+                    expected_lock_version=workout.lock_version,
+                    scheduled_for=date.today(),
+                ),
+            )
+
+        assert required.value.code == "workout.training_fit_acknowledgement_required"
+        session.refresh(workout)
+        assert workout.scheduled_for is None
+
+
+def test_matching_acknowledgement_is_reused_until_feedback_changes(
+    session_factory: sessionmaker[Session],
+) -> None:
+    with session_factory() as session:
+        user = User(display_name="Runner")
+        session.add(user)
+        session.flush()
+        service = WorkoutService(session, user)
+        workout = service.create(_workout_input())
+        FeedbackCommands(session, user).record_pre_session(
+            workout.id,
+            PreSessionFeedbackInput(illness_signal=IllnessSignal.FEVER),
+        )
+        session.commit()
+        service.accept(
+            workout.id,
+            _accept_command(service, workout, acknowledge_elevated_warning=True),
+        )
+
+        service.schedule(
+            workout.id,
+            ScheduleWorkoutCommand(
+                revision_id=workout.accepted_revision_id or 0,
+                expected_lock_version=workout.lock_version,
+                scheduled_for=date.today(),
+            ),
+        )
+        schedule_event = session.scalar(
+            select(WorkoutEvent).where(
+                WorkoutEvent.workout_id == workout.id,
+                WorkoutEvent.action == "schedule",
+            )
+        )
+        assert schedule_event is not None
+        assert "training_fit_authorization_event_id" in schedule_event.safe_metadata_json
+
+        service.unschedule(
+            workout.id,
+            UnscheduleWorkoutCommand(
+                revision_id=workout.accepted_revision_id or 0,
+                expected_lock_version=workout.lock_version,
+            ),
+        )
+        FeedbackCommands(session, user).record_pre_session(
+            workout.id,
+            PreSessionFeedbackInput(fatigue=5),
+        )
+        session.commit()
+
+        with pytest.raises(WorkoutTransitionError) as required:
+            service.schedule(
+                workout.id,
+                ScheduleWorkoutCommand(
+                    revision_id=workout.accepted_revision_id or 0,
+                    expected_lock_version=workout.lock_version,
+                    scheduled_for=date.today(),
+                ),
+            )
+        assert required.value.code == "workout.training_fit_acknowledgement_required"
+
+        service.schedule(
+            workout.id,
+            ScheduleWorkoutCommand(
+                revision_id=workout.accepted_revision_id or 0,
+                expected_lock_version=workout.lock_version,
+                scheduled_for=date.today(),
+                acknowledge_elevated_warning=True,
+            ),
+        )
+        assert workout.scheduled_for == date.today()
+
+
+def test_replacing_a_revision_uses_the_existing_same_day_schedule_for_authorization(
+    session_factory: sessionmaker[Session],
+) -> None:
+    with session_factory() as session:
+        user = User(display_name="Runner")
+        session.add(user)
+        session.flush()
+        service = WorkoutService(session, user)
+        workout = service.create(_workout_input())
+        service.accept(workout.id, _accept_command(service, workout))
+        accepted_revision_id = workout.accepted_revision_id
+        assert accepted_revision_id is not None
+        service.schedule(
+            workout.id,
+            ScheduleWorkoutCommand(
+                revision_id=accepted_revision_id,
+                expected_lock_version=workout.lock_version,
+                scheduled_for=date.today(),
+            ),
+        )
+        service.update(workout.id, _workout_input(date.today() + timedelta(days=1)))
+        FeedbackCommands(session, user).record_pre_session(
+            workout.id,
+            PreSessionFeedbackInput(illness_signal=IllnessSignal.FEVER),
+        )
+        session.commit()
+
+        with pytest.raises(WorkoutTransitionError) as required:
+            service.accept(workout.id, _accept_command(service, workout))
+
+        assert required.value.code == "workout.training_fit_acknowledgement_required"
+        session.refresh(workout)
+        assert workout.accepted_revision_id == accepted_revision_id
+
+        service.accept(
+            workout.id,
+            _accept_command(service, workout, acknowledge_elevated_warning=True),
+        )
+        assert workout.accepted_revision_id == workout.current_revision_id
+        assert workout.scheduled_for == date.today()
 
 
 def test_same_day_safety_stop_blocks_delayed_garmin_sync(
@@ -399,6 +591,16 @@ def test_future_sync_does_not_require_unrelated_daily_feedback(
         sync = build_safety_context(session, user.id, future, revision, mode="sync")
         assert acceptance.report.outcome == TriageOutcome.SAFETY_STOP
         assert sync.report.outcome == TriageOutcome.ALLOW
+        service.accept(future.id, _accept_command(service, future))
+        service.schedule(
+            future.id,
+            ScheduleWorkoutCommand(
+                revision_id=future.accepted_revision_id or 0,
+                expected_lock_version=future.lock_version,
+                scheduled_for=date.today() + timedelta(days=2),
+            ),
+        )
+        assert future.scheduled_for == date.today() + timedelta(days=2)
 
 
 def test_feedback_expires_after_versioned_freshness_window(
@@ -651,7 +853,9 @@ def test_german_feedback_forms_routes_and_export(
     assert recorded.status_code == 303
     stopped = client.get(location)
     assert "Sicherheitsstopp" in stopped.text
-    assert "Entwurf bestätigen" not in stopped.text
+    assert 'name="acknowledge_elevated_warning"' in stopped.text
+    assert "Trotz erhöhtem Gesundheitsrisiko mit exakt Revision" in stopped.text
+    assert "Entwurf bestätigen" in stopped.text
 
     with session_factory() as session:
         user = session.scalar(select(User))

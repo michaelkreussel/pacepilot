@@ -339,6 +339,7 @@ class DailyAdaptationService:
         *,
         expected_context_fingerprint: str,
         idempotency_key: str,
+        acknowledge_elevated_warning: bool = False,
     ) -> DailyAdaptationApplyResult:
         if not idempotency_key.strip() or len(idempotency_key) > 200:
             raise DailyAdaptationError(
@@ -410,6 +411,7 @@ class DailyAdaptationService:
                 context_fingerprint=preview.context_fingerprint,
                 expected_identity=identity,
                 idempotency_key=idempotency_key,
+                acknowledge_elevated_warning=acknowledge_elevated_warning,
             )
             return DailyAdaptationApplyResult(result, adaptation_class, False)
         if adaptation_class == DailyAdaptationClass.REST:

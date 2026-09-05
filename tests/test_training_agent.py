@@ -69,13 +69,20 @@ from app.services.coach.tools import (
     update_planning_profile,
 )
 from app.services.planning import workout_proposals as workout_proposals_module
+from app.services.planning.feedback_service import FeedbackCommands
 from app.services.planning.planning_commands import (
     GoalUpdateInput,
     PerformanceAnchorUpdateInput,
     PlanningProfileUpdateInput,
 )
 from app.services.planning.registry import WORKOUT_FORMAT_IDS
-from app.services.planning.safety_triage import IllnessSignal, PainInput
+from app.services.planning.safety_triage import (
+    IllnessSignal,
+    PainInput,
+    PreSessionFeedbackInput,
+)
+from app.services.planning.validator import WorkoutInput
+from app.services.planning.workout_definition import default_definition
 from app.services.planning.workout_proposals import RunningProposalRequest, RunningProposalService
 from app.services.planning.workout_revision import AcceptRevisionCommand, RevisionIdentity
 from app.services.planning.workout_service import WorkoutService
@@ -3351,3 +3358,61 @@ async def test_provider_adapter_maps_missing_answer_to_failed(
     ]
 
     assert events == [CoachEvent("failed", failure_category="missing_final_answer")]
+
+
+def test_coach_card_separates_elevated_acknowledgement_from_acceptance(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+) -> None:
+    with session_factory() as session:
+        user = session.scalar(select(User))
+        assert user is not None
+        conversation = CoachConversation(user_id=user.id, title="BC12")
+        session.add(conversation)
+        session.flush()
+        assistant = CoachMessage(
+            conversation_id=conversation.id,
+            role="assistant",
+            content="Vorschlag",
+            status="completed",
+        )
+        session.add(assistant)
+        session.flush()
+        workout = WorkoutService(session, user).create(
+            WorkoutInput(
+                name="Heutiger Lauf",
+                sport="running",
+                scheduled_for=date.today(),
+                description="Locker",
+                definition=default_definition(),
+            )
+        )
+        workout.source_type = "coach_single"
+        workout.source_assistant_message_id = assistant.id
+        FeedbackCommands(session, user).record_pre_session(
+            workout.id,
+            PreSessionFeedbackInput(illness_signal=IllnessSignal.FEVER),
+        )
+        session.commit()
+        workout_id = workout.id
+        conversation_id = conversation.id
+        assistant_id = assistant.id
+
+        artifact = workout_artifact_presentation(
+            session,
+            user.id,
+            conversation.id,
+            assistant.id,
+        )
+        assert artifact is not None
+        assert artifact.warning_acknowledgement is not None
+        assert artifact.warning_acknowledgement.revision_id == workout.current_revision_id
+        assert artifact.warning_acknowledgement.scheduled_for == date.today()
+        assert artifact.lifecycle_actions[0].key == "accept"
+        assert artifact.lifecycle_actions[0].endpoint == f"/workouts/{workout.id}/confirm"
+
+    card = client.get(f"/coach/{conversation_id}/messages/{assistant_id}/proposal-card")
+    assert card.status_code == 200
+    assert 'name="acknowledge_elevated_warning"' in card.text
+    assert f'action="/workouts/{workout_id}/confirm"' in card.text
+    assert "Vorschlag annehmen" in card.text

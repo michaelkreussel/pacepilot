@@ -26,6 +26,7 @@ class RevisionIdentity:
 class AcceptRevisionCommand:
     identity: RevisionIdentity
     context_fingerprint: str
+    acknowledge_elevated_warning: bool = False
 
 
 @dataclass(frozen=True)
@@ -57,6 +58,7 @@ class ScheduleWorkoutCommand:
     revision_id: int
     scheduled_for: date
     expected_lock_version: int
+    acknowledge_elevated_warning: bool = False
 
 
 @dataclass(frozen=True)

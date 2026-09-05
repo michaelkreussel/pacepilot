@@ -34,6 +34,11 @@ from app.services.planning.safety_triage import (
     ValidationMode,
     build_safety_context,
 )
+from app.services.planning.training_fit import (
+    TrainingFitAssessment,
+    TrainingFitOutcome,
+    assess_training_fit,
+)
 from app.services.planning.validator import WorkoutInput, validate_workout
 from app.services.planning.workout_definition import definition_to_json
 from app.services.planning.workout_revision import (
@@ -59,6 +64,12 @@ class ProposalOrigin:
     model_provider: str
     model_id: str | None
     prompt_template_version: str | None
+
+
+@dataclass(frozen=True)
+class LocalActionTrainingFit:
+    assessment: TrainingFitAssessment
+    acknowledgement_required: bool
 
 
 class WorkoutServiceError(RuntimeError):
@@ -522,6 +533,7 @@ class WorkoutService:
         context_fingerprint: str,
         expected_identity: RevisionIdentity,
         idempotency_key: str,
+        acknowledge_elevated_warning: bool = False,
     ) -> Workout:
         self._ensure_daily_adaptation_enabled()
         workout = self.get(workout_id)
@@ -539,6 +551,12 @@ class WorkoutService:
                 code="adaptation.candidate_already_open",
             )
         self._verify_revision_identity(workout, accepted, expected_identity)
+        authorization = self._authorize_local_action(
+            workout,
+            accepted,
+            workout.scheduled_for,
+            acknowledge_elevated_warning=acknowledge_elevated_warning,
+        )
         result = cast(
             "CursorResult[Any]",
             self.session.execute(
@@ -573,6 +591,7 @@ class WorkoutService:
                 "adaptation_class": "KEEP",
                 "context_fingerprint": context_fingerprint,
                 "request_hash": request_hash,
+                **authorization,
             },
             idempotency_key=idempotency_key,
             skip_existing=False,
@@ -1049,7 +1068,6 @@ class WorkoutService:
         )
         if source_binding is not None:
             self._ensure_garmin_state_known(source_binding)
-        adaptation_validation: WorkoutValidationRun | None = None
         if revision.source_type == "coach_daily_adaptation":
             from app.services.planning.daily_adaptation import (
                 DailyAdaptationError,
@@ -1104,36 +1122,6 @@ class WorkoutService:
                     "Der Kontext dieser Anpassung ist nicht mehr aktuell.",
                     code="adaptation.context_stale",
                 )
-            adaptation_validation = self._validate_context(
-                workout,
-                revision,
-                SafetyContext(
-                    fingerprint=current_adaptation.context_fingerprint,
-                    feedback_ids=safety_context.feedback_ids,
-                    report=safety_context.report,
-                ),
-                validation_kind="daily_adaptation_acceptance",
-                force=True,
-            )
-        validation = self._validate_context(
-            workout,
-            revision,
-            safety_context,
-            validation_kind="acceptance",
-            force=True,
-        )
-        if not validation.valid:
-            outcome = str(validation.report_json.get("outcome", "clarify"))
-            message = (
-                "Ein Sicherheitshinweis blockiert die Annahme dieses Lauftrainings."
-                if outcome == TriageOutcome.SAFETY_STOP.value
-                else "Vor der Annahme fehlen noch eindeutige Sicherheitsangaben."
-            )
-            self.session.commit()
-            raise WorkoutTransitionError(
-                message,
-                code="workout.validation_failed",
-            )
 
         accepted_at = utcnow()
         replacement_date = None
@@ -1168,6 +1156,17 @@ class WorkoutService:
                     "Das zu ersetzende Workout wurde zwischenzeitlich geändert.",
                     code="adaptation.context_stale",
                 )
+        authorization = self._authorize_local_action(
+            workout,
+            revision,
+            (
+                replacement_date
+                if replacement_source is not None
+                else workout.scheduled_for or revision.suggested_for
+            ),
+            acknowledge_elevated_warning=command.acknowledge_elevated_warning,
+        )
+        if replacement_source is not None:
             source_result = cast(
                 "CursorResult[Any]",
                 self.session.execute(
@@ -1275,11 +1274,8 @@ class WorkoutService:
             revision,
             "accept",
             metadata={
-                "validation_run_id": validation.id,
-                "context_fingerprint": validation.context_fingerprint,
-                "adaptation_validation_run_id": (
-                    adaptation_validation.id if adaptation_validation is not None else None
-                ),
+                "context_fingerprint": safety_context.fingerprint,
+                **authorization,
             },
         )
         self.session.commit()
@@ -1378,6 +1374,12 @@ class WorkoutService:
                     "Der Termin entspricht nicht dem geprüften Vorschlagsdatum.",
                     code="workout.schedule_date_mismatch",
                 )
+        authorization = self._authorize_local_action(
+            workout,
+            revision,
+            command.scheduled_for,
+            acknowledge_elevated_warning=command.acknowledge_elevated_warning,
+        )
         binding = self._binding(workout)
         self._ensure_garmin_state_known(binding)
         result = cast(
@@ -1416,6 +1418,7 @@ class WorkoutService:
                 if workout.scheduled_for
                 else None,
                 "scheduled_for": command.scheduled_for.isoformat(),
+                **authorization,
             },
         )
         self.session.commit()
@@ -1693,6 +1696,37 @@ class WorkoutService:
     def acceptance_context(self, workout_id: int) -> SafetyContext:
         workout = self.get(workout_id)
         return self._safety_context(workout, self._current_revision(workout))
+
+    def local_action_training_fit(
+        self,
+        workout_id: int,
+        revision_id: int,
+        effective_date: date,
+    ) -> LocalActionTrainingFit:
+        workout = self.get(workout_id)
+        revision = self._revision(workout, revision_id)
+        now = utcnow()
+        assessment = assess_training_fit(
+            self.session,
+            self.user.id,
+            effective_workout_date=effective_date,
+            revision_fingerprint=revision.content_hash,
+            evaluated_at=now.replace(
+                year=date.today().year,
+                month=date.today().month,
+                day=date.today().day,
+            ),
+        )
+        return LocalActionTrainingFit(
+            assessment=assessment,
+            acknowledgement_required=(
+                assessment.outcome == TrainingFitOutcome.ELEVATED
+                and self._matching_training_fit_authorization(
+                    workout, revision, effective_date, assessment
+                )
+                is None
+            ),
+        )
 
     def sync_context(self, workout_id: int) -> SafetyContext:
         workout = self.get(workout_id)
@@ -2169,6 +2203,78 @@ class WorkoutService:
         )
         self.session.add(run)
         return run
+
+    def _authorize_local_action(
+        self,
+        workout: Workout,
+        revision: WorkoutRevision,
+        effective_date: date | None,
+        *,
+        acknowledge_elevated_warning: bool,
+    ) -> dict[str, object]:
+        if effective_date is None:
+            return {}
+        training_fit = self.local_action_training_fit(workout.id, revision.id, effective_date)
+        assessment = training_fit.assessment
+        if assessment.outcome != TrainingFitOutcome.ELEVATED:
+            return {}
+        matching_event = self._matching_training_fit_authorization(
+            workout, revision, effective_date, assessment
+        )
+        if matching_event is not None:
+            return {"training_fit_authorization_event_id": matching_event.id}
+        if not acknowledge_elevated_warning:
+            raise WorkoutTransitionError(
+                "Für diese heutige Einheit ist zuerst eine ausdrückliche Bestätigung des "
+                "erhöhten Gesundheitsrisikos erforderlich.",
+                code="workout.training_fit_acknowledgement_required",
+            )
+        return {
+            "training_fit_authorization": {
+                **self._training_fit_authorization_identity(revision, effective_date, assessment),
+                "acknowledged_at": utcnow().isoformat(),
+            }
+        }
+
+    def _matching_training_fit_authorization(
+        self,
+        workout: Workout,
+        revision: WorkoutRevision,
+        effective_date: date,
+        assessment: TrainingFitAssessment,
+    ) -> WorkoutEvent | None:
+        expected = self._training_fit_authorization_identity(revision, effective_date, assessment)
+        events = self.session.scalars(
+            select(WorkoutEvent).where(
+                WorkoutEvent.workout_id == workout.id,
+                WorkoutEvent.revision_id == revision.id,
+                WorkoutEvent.owner_user_id == self.user.id,
+            )
+        )
+        for event in events:
+            authorization = event.safe_metadata_json.get("training_fit_authorization")
+            if (
+                isinstance(authorization, dict)
+                and all(authorization.get(key) == value for key, value in expected.items())
+                and isinstance(authorization.get("acknowledged_at"), str)
+            ):
+                return event
+        return None
+
+    def _training_fit_authorization_identity(
+        self,
+        revision: WorkoutRevision,
+        effective_date: date,
+        assessment: TrainingFitAssessment,
+    ) -> dict[str, object]:
+        return {
+            "policy_version": assessment.policy_version,
+            "assessment_fingerprint": assessment.authoritative_input_fingerprint,
+            "effective_date": effective_date.isoformat(),
+            "acknowledged_by_user_id": self.user.id,
+            "authorized_revision_id": revision.id,
+            "local_date": date.today().isoformat(),
+        }
 
     @staticmethod
     def _change_labels(parent: WorkoutRevision, current: WorkoutRevision) -> tuple[str, ...]:

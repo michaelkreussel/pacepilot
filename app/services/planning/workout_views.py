@@ -210,6 +210,10 @@ class WorkoutDetailView:
     garmin_last_error: str | None = None
     safety_report: dict[str, object] | None = None
     sync_safety_report: dict[str, object] | None = None
+    training_fit_outcome: str | None = None
+    training_fit_effective_date: date | None = None
+    training_fit_acknowledgement_required: bool = False
+    training_fit_schedule_acknowledgement_required: bool = False
     garmin_sync_allowed: bool = True
     proposal_actions_allowed: bool = True
     edit_allowed: bool = True
@@ -343,6 +347,10 @@ def workout_detail_view(
     context_fingerprint: str | None = None,
     safety_report: dict[str, object] | None = None,
     sync_safety_report: dict[str, object] | None = None,
+    training_fit_outcome: str | None = None,
+    training_fit_effective_date: date | None = None,
+    training_fit_acknowledgement_required: bool = False,
+    training_fit_schedule_acknowledgement_required: bool = False,
 ) -> WorkoutDetailView:
     if workout.current_revision_id is None:
         raise ValueError("Workout has no current revision")
@@ -460,6 +468,12 @@ def workout_detail_view(
         garmin_last_error=binding.last_error_message if binding else None,
         safety_report=safety_report,
         sync_safety_report=sync_safety_report,
+        training_fit_outcome=training_fit_outcome,
+        training_fit_effective_date=training_fit_effective_date,
+        training_fit_acknowledgement_required=training_fit_acknowledgement_required,
+        training_fit_schedule_acknowledgement_required=(
+            training_fit_schedule_acknowledgement_required
+        ),
         garmin_sync_allowed=(
             not current_is_generated
             or (

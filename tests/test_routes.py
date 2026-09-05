@@ -810,6 +810,144 @@ def test_confirming_does_not_silently_schedule(
         assert workout.local_schedule_status == "unscheduled"
 
 
+def test_elevated_same_day_confirmation_is_distinct_from_acceptance(
+    client: TestClient, session_factory: sessionmaker[Session]
+) -> None:
+    created = client.post(
+        "/workouts",
+        data=_workout_data(scheduled_for=date.today().isoformat()),
+        follow_redirects=False,
+    )
+    location = created.headers["location"]
+    recorded = client.post(
+        f"{location}/feedback/pre-session",
+        data={
+            "illness_signal": "fever",
+            "pain_present": "no",
+            "pain_location": "",
+            "pain_severity": "",
+            "pain_alters_gait": "",
+            "pain_worsens_with_activity": "",
+        },
+        follow_redirects=False,
+    )
+    assert recorded.status_code == 303
+
+    detail = client.get(location)
+    assert 'name="acknowledge_elevated_warning"' in detail.text
+    assert "Trotz erhöhtem Gesundheitsrisiko mit exakt Revision" in detail.text
+    assert "Entwurf bestätigen" in detail.text
+    command = _confirmation_data(client, location)
+
+    blocked = client.post(f"{location}/confirm", data=command, follow_redirects=False)
+
+    assert blocked.status_code == 303
+    assert "error=" in blocked.headers["location"]
+    with session_factory() as session:
+        workout = session.scalar(select(Workout))
+        assert workout is not None
+        assert workout.accepted_revision_id is None
+        assert (
+            session.scalar(
+                select(WorkoutEvent).where(
+                    WorkoutEvent.workout_id == workout.id,
+                    WorkoutEvent.action == "accept",
+                )
+            )
+            is None
+        )
+
+    accepted = client.post(
+        f"{location}/confirm",
+        data={**command, "acknowledge_elevated_warning": "yes"},
+        follow_redirects=False,
+    )
+
+    assert accepted.status_code == 303
+    with session_factory() as session:
+        workout = session.scalar(select(Workout))
+        assert workout is not None
+        assert workout.accepted_revision_id is not None
+        event = session.scalar(
+            select(WorkoutEvent).where(
+                WorkoutEvent.workout_id == workout.id,
+                WorkoutEvent.action == "accept",
+            )
+        )
+        assert event is not None
+        assert "training_fit_authorization" in event.safe_metadata_json
+
+
+def test_elevated_same_day_schedule_has_a_distinct_acknowledgement(
+    client: TestClient, session_factory: sessionmaker[Session]
+) -> None:
+    created = client.post(
+        "/workouts",
+        data=_workout_data(scheduled_for=date.today().isoformat()),
+        follow_redirects=False,
+    )
+    location = created.headers["location"]
+    accepted = client.post(
+        f"{location}/confirm",
+        data=_confirmation_data(client, location),
+        follow_redirects=False,
+    )
+    assert accepted.status_code == 303
+    recorded = client.post(
+        f"{location}/feedback/pre-session",
+        data={
+            "illness_signal": "fever",
+            "pain_present": "no",
+            "pain_location": "",
+            "pain_severity": "",
+            "pain_alters_gait": "",
+            "pain_worsens_with_activity": "",
+        },
+        follow_redirects=False,
+    )
+    assert recorded.status_code == 303
+
+    detail = client.get(location)
+    form_match = re.search(r'<form[^>]+action="[^"]+/schedule"[^>]*>(.*?)</form>', detail.text)
+    assert form_match is not None
+    schedule_form = form_match.group(1)
+    assert 'name="acknowledge_elevated_warning"' in schedule_form
+    fields: dict[str, str] = {}
+    for name in ("revision_id", "lock_version", "scheduled_for"):
+        match = re.search(rf'name="{name}" value="([^"]*)"', schedule_form)
+        assert match is not None
+        fields[name] = match.group(1)
+
+    blocked = client.post(f"{location}/schedule", data=fields, follow_redirects=False)
+
+    assert blocked.status_code == 303
+    assert "error=" in blocked.headers["location"]
+    with session_factory() as session:
+        workout = session.scalar(select(Workout))
+        assert workout is not None
+        assert workout.scheduled_for is None
+
+    scheduled = client.post(
+        f"{location}/schedule",
+        data={**fields, "acknowledge_elevated_warning": "yes"},
+        follow_redirects=False,
+    )
+
+    assert scheduled.status_code == 303
+    with session_factory() as session:
+        workout = session.scalar(select(Workout))
+        assert workout is not None
+        assert workout.scheduled_for == date.today()
+        event = session.scalar(
+            select(WorkoutEvent).where(
+                WorkoutEvent.workout_id == workout.id,
+                WorkoutEvent.action == "schedule",
+            )
+        )
+        assert event is not None
+        assert "training_fit_authorization" in event.safe_metadata_json
+
+
 def test_confirmed_workout_can_be_unscheduled(
     client: TestClient, session_factory: sessionmaker[Session]
 ) -> None:

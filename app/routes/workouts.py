@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from app.auth import CurrentUser
 from app.config import coach_feature_enabled, get_settings
 from app.database import SessionDep
+from app.models import WorkoutRevision
 from app.onboarding import require_planning_access
 from app.services.garmin.client import (
     GarminUnavailableError,
@@ -209,13 +210,65 @@ def _get_workout(service: WorkoutService, workout_id: int) -> WorkoutDetailView:
         workout = service.get(workout_id)
         safety_context = service.acceptance_context(workout_id)
         sync_context = service.sync_context(workout_id)
+        action_revision_id = (
+            workout.current_revision_id
+            if workout.current_revision_id != workout.accepted_revision_id
+            else workout.accepted_revision_id
+        )
+        action_revision = (
+            service.session.get(WorkoutRevision, action_revision_id)
+            if action_revision_id is not None
+            else None
+        )
+        effective_date = (
+            workout.scheduled_for or action_revision.suggested_for
+            if action_revision is not None
+            else None
+        )
+        training_fit = (
+            service.local_action_training_fit(workout.id, action_revision.id, effective_date)
+            if action_revision is not None and effective_date is not None
+            else None
+        )
+        schedule_effective_date = None
+        schedule_training_fit = None
+        if workout.accepted_revision_id is not None:
+            accepted_revision = service.session.get(WorkoutRevision, workout.accepted_revision_id)
+            if (
+                accepted_revision is not None
+                and accepted_revision.suggested_for is not None
+                and workout.scheduled_for != accepted_revision.suggested_for
+            ):
+                schedule_effective_date = accepted_revision.suggested_for
+                schedule_training_fit = service.local_action_training_fit(
+                    workout.id, accepted_revision.id, schedule_effective_date
+                )
         return workout_detail_view(
             service.session,
             workout,
             context_fingerprint=safety_context.fingerprint,
             safety_report=safety_context.report.to_json(),
             sync_safety_report=sync_context.report.to_json(),
+            training_fit_outcome=(
+                training_fit.assessment.outcome.value if training_fit is not None else None
+            ),
+            training_fit_effective_date=effective_date,
+            training_fit_acknowledgement_required=(
+                training_fit.acknowledgement_required if training_fit is not None else False
+            ),
+            training_fit_schedule_acknowledgement_required=(
+                schedule_training_fit.acknowledgement_required
+                if schedule_training_fit is not None
+                else False
+            ),
         )
+    except WorkoutNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+def _ensure_workout_exists(service: WorkoutService, workout_id: int) -> None:
+    try:
+        service.get(workout_id)
     except WorkoutNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -378,7 +431,7 @@ async def confirm_workout(
     request: Request,
     service: WorkoutServiceDep,
 ) -> Response:
-    _get_workout(service, workout_id)
+    _ensure_workout_exists(service, workout_id)
     form = await request.form()
     try:
         revision_id = int(str(form["revision_id"]))
@@ -399,6 +452,9 @@ async def confirm_workout(
                     lock_version=lock_version,
                 ),
                 context_fingerprint=context_fingerprint,
+                acknowledge_elevated_warning=(
+                    str(form.get("acknowledge_elevated_warning", "")) == "yes"
+                ),
             ),
         )
     except WorkoutNotFoundError as exc:
@@ -430,7 +486,7 @@ async def reject_workout(
     request: Request,
     service: WorkoutServiceDep,
 ) -> Response:
-    _get_workout(service, workout_id)
+    _ensure_workout_exists(service, workout_id)
     form = await request.form()
     try:
         command = RejectRevisionCommand(
@@ -458,7 +514,7 @@ async def apply_adaptation(
     request: Request,
     service: WorkoutServiceDep,
 ) -> Response:
-    _get_workout(service, workout_id)
+    _ensure_workout_exists(service, workout_id)
     form = await request.form()
     try:
         adaptation_class = DailyAdaptationClass(str(form["adaptation_class"]))
@@ -479,6 +535,9 @@ async def apply_adaptation(
             adaptation_class,
             expected_context_fingerprint=context_fingerprint,
             idempotency_key=idempotency_key,
+            acknowledge_elevated_warning=(
+                str(form.get("acknowledge_elevated_warning", "")) == "yes"
+            ),
         )
     except DailyAdaptationError as exc:
         query = urlencode({"error": str(exc)})
@@ -502,7 +561,7 @@ async def discard_adaptation(
     request: Request,
     service: WorkoutServiceDep,
 ) -> Response:
-    _get_workout(service, workout_id)
+    _ensure_workout_exists(service, workout_id)
     form = await request.form()
     try:
         command = RejectRevisionCommand(
@@ -528,7 +587,7 @@ async def schedule_workout(
     request: Request,
     service: WorkoutServiceDep,
 ) -> Response:
-    _get_workout(service, workout_id)
+    _ensure_workout_exists(service, workout_id)
     form = await request.form()
     try:
         revision_id = int(str(form["revision_id"]))
@@ -546,6 +605,9 @@ async def schedule_workout(
                 revision_id=revision_id,
                 scheduled_for=scheduled_for,
                 expected_lock_version=lock_version,
+                acknowledge_elevated_warning=(
+                    str(form.get("acknowledge_elevated_warning", "")) == "yes"
+                ),
             ),
         )
     except WorkoutNotFoundError as exc:
@@ -561,7 +623,7 @@ async def unschedule_workout(
     request: Request,
     service: WorkoutServiceDep,
 ) -> Response:
-    _get_workout(service, workout_id)
+    _ensure_workout_exists(service, workout_id)
     form = await request.form()
     try:
         revision_id = int(str(form["revision_id"]))

@@ -35,6 +35,7 @@ from app.services.planning.safety_triage import (
     SafetyReport,
     TriageOutcome,
 )
+from app.services.planning.training_fit import TrainingFitAssessment, TrainingFitOutcome
 from app.services.planning.validator import WorkoutInput
 from app.services.planning.workout_definition import (
     DistanceEnd,
@@ -435,6 +436,66 @@ def _accepted_workout(session, user: User, day: date) -> Workout:
         ),
     )
     return workout
+
+
+def test_elevated_keep_requires_acknowledgement_and_records_authorization(
+    session_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_daily_adaptation_enabled", True)
+    today = date.today()
+    with session_factory() as session:
+        user = User(display_name="Elevated Keep Runner")
+        session.add(user)
+        session.flush()
+        workout = _accepted_workout(session, user, today)
+        preview = DailyAdaptationService(session, user, as_of=today).assess_today(workout.id)
+
+        def elevated_assessment(*_args, **_kwargs) -> TrainingFitAssessment:
+            return TrainingFitAssessment(
+                outcome=TrainingFitOutcome.ELEVATED,
+                policy_version="training-fit-test",
+                evaluated_at=utcnow(),
+                effective_workout_date=today,
+                warning_codes=("safety.test",),
+                evidence=(),
+                coverage=(),
+                feedback_ids=(),
+                authoritative_input_fingerprint="f" * 64,
+            )
+
+        monkeypatch.setattr(
+            "app.services.planning.workout_service.assess_training_fit",
+            elevated_assessment,
+        )
+        adaptation = DailyAdaptationService(session, user, as_of=today)
+        with pytest.raises(WorkoutTransitionError) as required:
+            adaptation.apply(
+                workout.id,
+                DailyAdaptationClass.KEEP,
+                expected_context_fingerprint=preview.context_fingerprint,
+                idempotency_key="elevated-keep",
+            )
+        assert required.value.code == "workout.training_fit_acknowledgement_required"
+
+        result = adaptation.apply(
+            workout.id,
+            DailyAdaptationClass.KEEP,
+            expected_context_fingerprint=preview.context_fingerprint,
+            idempotency_key="elevated-keep",
+            acknowledge_elevated_warning=True,
+        )
+
+        assert result.workout.id == workout.id
+        event = session.scalar(
+            select(WorkoutEvent).where(
+                WorkoutEvent.workout_id == workout.id,
+                WorkoutEvent.action == "adapt_keep",
+            )
+        )
+        assert event is not None
+        authorization = event.safe_metadata_json["training_fit_authorization"]
+        assert authorization["authorized_revision_id"] == workout.accepted_revision_id
+        assert authorization["effective_date"] == today.isoformat()
 
 
 def test_only_owned_accepted_scheduled_running_workout_today_is_eligible(

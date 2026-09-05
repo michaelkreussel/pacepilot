@@ -1,12 +1,13 @@
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import CoachConversation, CoachMessage, Workout, WorkoutRevision
+from app.models import CoachConversation, CoachMessage, User, Workout, WorkoutRevision
 from app.repositories.coach import find_assistant_message
+from app.services.planning.workout_service import WorkoutService
 from app.services.planning.workout_views import (
     WorkoutLifecycleProjection,
     WorkoutRevisionView,
@@ -21,6 +22,10 @@ class ArtifactActionPresentation:
     label: str
     endpoint: str
     revision_id: int
+    revision_number: int
+    content_hash: str
+    lock_version: int
+    context_fingerprint: str
     scheduled_for: date | None
 
 
@@ -56,6 +61,9 @@ class WorkoutArtifactPresentation:
     source_assistant_message_id: int
     revision_id: int
     revision_number: int
+    content_hash: str
+    lock_version: int
+    context_fingerprint: str
     accepted_revision_id: int | None
     name: str
     suggested_for: date | None
@@ -408,7 +416,7 @@ def _warning_presentation(
 
 
 def _action(
-    workout_id: int,
+    workout: Workout,
     key: str,
     label: str,
     revision: WorkoutRevisionView,
@@ -418,8 +426,12 @@ def _action(
     return ArtifactActionPresentation(
         key=key,
         label=label,
-        endpoint=f"/workouts/{workout_id}/{endpoint_action}",
+        endpoint=f"/workouts/{workout.id}/{endpoint_action}",
         revision_id=revision.id,
+        revision_number=revision.revision_number,
+        content_hash=revision.content_hash,
+        lock_version=workout.lock_version,
+        context_fingerprint=revision.context_fingerprint,
         scheduled_for=scheduled_for,
     )
 
@@ -436,7 +448,7 @@ def _available_actions(
     if accepted is None or accepted.id != current.id:
         actions.append(
             _action(
-                workout.id,
+                workout,
                 "accept",
                 ("Angenommenes Workout ersetzen" if accepted is not None else "Vorschlag annehmen"),
                 current,
@@ -446,7 +458,7 @@ def _available_actions(
         if accepted is None:
             actions.append(
                 _action(
-                    workout.id,
+                    workout,
                     "reject",
                     "Vorschlag ablehnen",
                     current,
@@ -460,7 +472,7 @@ def _available_actions(
     if lifecycle.key in {"accepted", "scheduled"}:
         actions.append(
             _action(
-                workout.id,
+                workout,
                 "publish",
                 "An Garmin übertragen",
                 accepted,
@@ -470,7 +482,7 @@ def _available_actions(
     elif lifecycle.key == "published":
         actions.append(
             _action(
-                workout.id,
+                workout,
                 "push",
                 "An meine Uhr senden",
                 accepted,
@@ -480,7 +492,7 @@ def _available_actions(
     if accepted.suggested_for is not None and workout.scheduled_for != accepted.suggested_for:
         actions.append(
             _action(
-                workout.id,
+                workout,
                 "schedule",
                 "Workout einplanen",
                 accepted,
@@ -490,7 +502,7 @@ def _available_actions(
     if workout.scheduled_for is not None:
         actions.append(
             _action(
-                workout.id,
+                workout,
                 "unschedule",
                 "Termin entfernen",
                 accepted,
@@ -541,6 +553,8 @@ def workout_artifact_presentation(
         else None
     )
     return _workout_artifact_presentation(
+        session,
+        user_id,
         message.id,
         workout,
         current_model,
@@ -599,6 +613,8 @@ def workout_artifact_presentations(
         cards.setdefault(
             message_id,
             _workout_artifact_presentation(
+                session,
+                user_id,
                 message_id,
                 workout,
                 current_model,
@@ -609,25 +625,51 @@ def workout_artifact_presentations(
 
 
 def _workout_artifact_presentation(
+    session: Session,
+    user_id: int,
     source_assistant_message_id: int,
     workout: Workout,
     current_model: WorkoutRevision,
     accepted_model: WorkoutRevision | None,
 ) -> WorkoutArtifactPresentation:
-    current = revision_view(current_model)
+    user = session.get(User, user_id)
+    if user is None:
+        raise ValueError("Workout artifact user is missing")
+    service = WorkoutService(session, user)
+    safety_context = service.acceptance_context(workout.id)
+    current = revision_view(current_model, context_fingerprint=safety_context.fingerprint)
     accepted = revision_view(accepted_model) if accepted_model is not None else None
     lifecycle = workout_lifecycle_projection(workout)
     warning = _warning_presentation(current)
+    action_revision = current if accepted is None or accepted.id != current.id else accepted
+    effective_date = workout.scheduled_for or action_revision.suggested_for
+    training_fit = (
+        service.local_action_training_fit(workout.id, action_revision.id, effective_date)
+        if effective_date is not None
+        else None
+    )
+    if training_fit is not None and training_fit.assessment.outcome.value == "elevated":
+        warning = (
+            replace(warning, outcome="elevated")
+            if warning is not None
+            else ArtifactWarningPresentation(
+                outcome="elevated",
+                evidence=None,
+                coverage_percent=None,
+                recommendation="Einheit auslassen oder anpassen.",
+                safer_alternative="Ruhetag oder angepasste Einheit wählen.",
+            )
+        )
     acknowledgement = (
         WarningAcknowledgementPresentation(
             key="acknowledge_warning",
             label="Warnung für diese Revision und dieses Datum bestätigen",
-            revision_id=current.id,
-            scheduled_for=current.suggested_for,
+            revision_id=action_revision.id,
+            scheduled_for=effective_date,
         )
-        if warning is not None
-        and warning.outcome in {"warn", "elevated"}
-        and current.suggested_for is not None
+        if training_fit is not None
+        and training_fit.acknowledgement_required
+        and effective_date is not None
         else None
     )
     return WorkoutArtifactPresentation(
@@ -636,6 +678,9 @@ def _workout_artifact_presentation(
         source_assistant_message_id=source_assistant_message_id,
         revision_id=current.id,
         revision_number=current.revision_number,
+        content_hash=current.content_hash,
+        lock_version=workout.lock_version,
+        context_fingerprint=current.context_fingerprint,
         accepted_revision_id=accepted.id if accepted is not None else None,
         name=current.name,
         suggested_for=current.suggested_for,

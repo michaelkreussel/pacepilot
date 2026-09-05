@@ -636,17 +636,13 @@ def test_proposal_edit_accept_schedule_and_reject_lifecycle(
         service.accept(workout.id, accept_command)
         assert workout.accepted_revision_id == edited.id
         assert workout.scheduled_for is None
-        assert (
-            session.scalar(
-                select(func.count())
-                .select_from(WorkoutValidationRun)
-                .where(
-                    WorkoutValidationRun.workout_id == workout.id,
-                    WorkoutValidationRun.validation_kind == "acceptance",
-                )
+        accept_event = session.scalar(
+            select(WorkoutEvent).where(
+                WorkoutEvent.workout_id == workout.id, WorkoutEvent.action == "accept"
             )
-            == 1
         )
+        assert accept_event is not None
+        assert accept_event.safe_metadata_json["context_fingerprint"] == safety.fingerprint
 
         schedule = ScheduleWorkoutCommand(
             revision_id=edited.id,
