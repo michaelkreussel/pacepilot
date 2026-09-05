@@ -21,6 +21,8 @@ from app.models import (
 from app.services.planning.registry import get_knowledge_registry
 from app.services.planning.validator import WorkoutInput
 from app.services.planning.weekly_plan_service import (
+    WeeklyPlanAcceptanceError,
+    accept_training_plan_revision,
     persist_week_candidate,
     persist_week_candidate_in_transaction,
     plan_proposals_between,
@@ -159,16 +161,25 @@ def test_persist_week_in_transaction_leaves_rollback_to_caller(session_factory) 
         assert session.scalar(select(func.count()).select_from(Workout)) == 0
 
 
-def test_persist_week_accepts_candidate_with_bypassed_history_gates(session_factory) -> None:
+def test_persist_sparse_week_creates_advisory_draft_with_conservative_scope(
+    session_factory,
+) -> None:
     candidate = _candidate(enforce_history_gates=False, sparse_history=True)
     with session_factory() as session:
         user = _user(session)
 
-        persist_week_candidate(session, user, candidate)
+        revision = persist_week_candidate(session, user, candidate)
 
+        advisory = revision.generation_context_json.get("advisory")
+        assert isinstance(advisory, dict)
+        assert advisory["confidence"] == "low"
+        assert "planner.weekly_frequency_low" in advisory["warnings"]
+        assert advisory["evidence"]
+        assert advisory["coverage"]
+        assert advisory["recommendation"]
+        assert advisory["alternative"]
         roles = set(session.scalars(select(TrainingPlanWorkout.role)))
-        assert "long_run" in roles
-        assert len(roles) == 2
+        assert roles == {"easy_run"}
 
 
 def test_persist_week_is_idempotent_and_calendar_is_user_scoped(session_factory) -> None:
@@ -355,3 +366,67 @@ def test_weekly_workout_lifecycle_uses_plan_and_garmin_flags(session_factory, mo
             ),
         )
         assert rejected.approval_status == "rejected"
+
+
+def test_exact_plan_revision_acceptance_leaves_child_lifecycle_unchanged(session_factory) -> None:
+    with session_factory() as session:
+        user = _user(session)
+        revision = persist_week_candidate(session, user, _candidate())
+        plan = session.scalar(select(TrainingPlan))
+        assert plan is not None
+
+        accepted = accept_training_plan_revision(
+            session, user, plan_id=plan.id, revision_id=revision.id
+        )
+
+        assert accepted.id == revision.id
+        assert plan.accepted_revision_id == revision.id
+        assert plan.current_revision_id == revision.id
+        workouts = list(session.scalars(select(Workout)))
+        assert workouts
+        assert all(workout.approval_status == "proposed" for workout in workouts)
+        assert all(workout.accepted_revision_id is None for workout in workouts)
+        assert all(workout.scheduled_for is None for workout in workouts)
+
+
+def test_stale_plan_revision_acceptance_is_rejected(session_factory) -> None:
+    with session_factory() as session:
+        user = _user(session)
+        first = persist_week_candidate(session, user, _candidate())
+        plan = session.scalar(select(TrainingPlan))
+        assert plan is not None
+        second = persist_week_candidate(
+            session, user, replace(_candidate(), input_fingerprint="e" * 64)
+        )
+        assert plan.current_revision_id == second.id
+
+        with pytest.raises(WeeklyPlanAcceptanceError) as stale:
+            accept_training_plan_revision(session, user, plan_id=plan.id, revision_id=first.id)
+        assert stale.value.code == "plan.revision_stale"
+        assert plan.accepted_revision_id is None
+
+        other = User(display_name="Other Runner")
+        session.add(other)
+        session.flush()
+        with pytest.raises(WeeklyPlanAcceptanceError) as missing:
+            accept_training_plan_revision(session, other, plan_id=plan.id, revision_id=second.id)
+        assert missing.value.code == "plan.not_found"
+
+
+def test_newer_draft_keeps_accepted_revision_until_accepted(session_factory) -> None:
+    with session_factory() as session:
+        user = _user(session)
+        first = persist_week_candidate(session, user, _candidate())
+        plan = session.scalar(select(TrainingPlan))
+        assert plan is not None
+        accept_training_plan_revision(session, user, plan_id=plan.id, revision_id=first.id)
+
+        second = persist_week_candidate(
+            session, user, replace(_candidate(), input_fingerprint="f" * 64)
+        )
+
+        assert plan.current_revision_id == second.id
+        assert plan.accepted_revision_id == first.id
+
+        accept_training_plan_revision(session, user, plan_id=plan.id, revision_id=second.id)
+        assert plan.accepted_revision_id == second.id

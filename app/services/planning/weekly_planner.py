@@ -1,11 +1,10 @@
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 
 from sqlalchemy.orm import Session
 
-from app.config import deferred_quality_templates_enabled, get_settings
 from app.models import User
 from app.repositories.activities import activities_between
 from app.services.analytics.activity_semantics import is_running_sport
@@ -14,6 +13,7 @@ from app.services.planning.planning_queries import get_planning_inputs
 from app.services.planning.registry import get_knowledge_registry
 from app.services.planning.registry_models import ContinuousStructure
 from app.services.planning.safety_triage import build_proposal_safety_context
+from app.services.planning.training_fit import assess_training_fit
 from app.services.planning.workout_templates import (
     ExpandedWorkoutTemplate,
     TemplateEligibilityContext,
@@ -206,12 +206,121 @@ def _assign_strides_day(
     return None, skips
 
 
+def _weekly_history_advisory(snapshot: WeeklyPlannerSnapshot) -> dict[str, object]:
+    warnings: list[str] = []
+    evidence: list[dict[str, object]] = []
+    typical = snapshot.typical_weekly_runs_median
+    if typical is None or typical < MIN_TYPICAL_WEEKLY_RUNS:
+        warnings.append("planner.weekly_frequency_low")
+        evidence.append(
+            {
+                "code": "planner.weekly_frequency_low",
+                "source": "running.frequency",
+                "observed_on": snapshot.as_of.isoformat(),
+                "value": typical,
+                "unit": "runs_per_week",
+                "severe": False,
+            }
+        )
+    if snapshot.baseline_confidence == "insufficient":
+        warnings.append("planner.baseline_confidence_insufficient")
+        evidence.append(
+            {
+                "code": "planner.baseline_confidence_insufficient",
+                "source": "running.history",
+                "observed_on": snapshot.as_of.isoformat(),
+                "value": snapshot.baseline_confidence,
+                "unit": "confidence",
+                "severe": False,
+            }
+        )
+    elif snapshot.baseline_confidence == "low":
+        warnings.append("planner.baseline_confidence_low")
+        evidence.append(
+            {
+                "code": "planner.baseline_confidence_low",
+                "source": "running.history",
+                "observed_on": snapshot.as_of.isoformat(),
+                "value": snapshot.baseline_confidence,
+                "unit": "confidence",
+                "severe": False,
+            }
+        )
+    if snapshot.effective_reentry:
+        warnings.append("planner.reentry_conservative")
+        evidence.append(
+            {
+                "code": "planner.reentry_conservative",
+                "source": "running.reentry",
+                "observed_on": snapshot.as_of.isoformat(),
+                "value": True,
+                "unit": "reentry",
+                "severe": False,
+            }
+        )
+    if snapshot.consistent_running_weeks < LONG_RUN_REQUIRED_CONSISTENT_WEEKS:
+        warnings.append("planner.consistent_weeks_sparse")
+        evidence.append(
+            {
+                "code": "planner.consistent_weeks_sparse",
+                "source": "running.consistency",
+                "observed_on": snapshot.as_of.isoformat(),
+                "value": snapshot.consistent_running_weeks,
+                "unit": "weeks",
+                "severe": False,
+            }
+        )
+    if (
+        typical is None
+        or typical < MIN_TYPICAL_WEEKLY_RUNS
+        or snapshot.baseline_confidence in {"insufficient", "low"}
+        or snapshot.effective_reentry
+    ):
+        confidence = "low"
+    else:
+        confidence = snapshot.baseline_confidence
+    coverage: list[dict[str, object]] = [
+        {
+            "metric": "running_history_28_days",
+            "current_day": snapshot.as_of.isoformat(),
+            "baseline_sample_count": snapshot.consistent_running_weeks,
+            "minimum_baseline_samples": LONG_RUN_REQUIRED_CONSISTENT_WEEKS,
+            "sufficient_for_elevation": False,
+        },
+        {
+            "metric": "weekly_frequency",
+            "current_day": snapshot.as_of.isoformat(),
+            "baseline_sample_count": int(typical) if typical is not None else 0,
+            "minimum_baseline_samples": MIN_TYPICAL_WEEKLY_RUNS,
+            "sufficient_for_elevation": False,
+        },
+    ]
+    if warnings:
+        recommendation = (
+            "Der angeforderte Wochenentwurf bleibt verfügbar; prüfe vor der Annahme die "
+            "konservativere Alternative."
+        )
+    else:
+        recommendation = "Der angeforderte Wochenentwurf passt zu den aktuell verfügbaren Daten."
+    return {
+        "confidence": confidence,
+        "warnings": warnings,
+        "evidence": evidence,
+        "coverage": coverage,
+        "recommendation": recommendation,
+        "alternative": {"type": "conservative_week", "code": "reduced_frequency"},
+    }
+
+
 def compose_week(
     snapshot: WeeklyPlannerSnapshot,
     *,
     enforce_history_gates: bool = True,
     enable_deferred_quality: bool = False,
 ) -> WeeklyPlanCandidate:
+    # Advisory mode: sparse history, low frequency, and re-entry are warnings,
+    # never refusals. The flag stays for caller compatibility.
+    _ = enforce_history_gates
     registry = get_knowledge_registry()
     available_days = snapshot.availability
     if not available_days:
@@ -220,35 +329,21 @@ def compose_week(
             code="planner.no_available_days",
         )
     typical = snapshot.typical_weekly_runs_median
-    if enforce_history_gates and (typical is None or typical < MIN_TYPICAL_WEEKLY_RUNS):
-        raise WeeklyPlannerError(
-            "Für eine Wochenplanung fehlt eine beobachtete wöchentliche Laufroutine "
-            "(weniger als zwei Läufe pro Woche in den letzten 28 Tagen).",
-            code="planner.insufficient_frequency_history",
-        )
-    if snapshot.baseline_confidence == "insufficient":
-        raise WeeklyPlannerError(
-            "Die Datenqualität deiner Baseline reicht für eine Wochenplanung noch nicht aus.",
-            code="planner.insufficient_data",
-        )
+    advisory = _weekly_history_advisory(snapshot)
 
     effective_consistent_weeks = snapshot.consistent_running_weeks
     effective_runs_per_week = max(round(snapshot.observed_runs_per_week), 1)
-    if enforce_history_gates:
-        assert typical is not None
-        frequency_cap = max(int(typical), MIN_TYPICAL_WEEKLY_RUNS)
-        if snapshot.baseline_confidence == "low" or snapshot.effective_reentry:
-            frequency_cap = min(frequency_cap, CONSERVATIVE_FREQUENCY_CAP)
-    else:
+    if enable_deferred_quality:
         frequency_cap = MAX_PLAN_DAYS
-        effective_consistent_weeks = max(
-            effective_consistent_weeks,
-            8 if enable_deferred_quality else LONG_RUN_REQUIRED_CONSISTENT_WEEKS,
-        )
-        effective_runs_per_week = max(
-            effective_runs_per_week,
-            3 if enable_deferred_quality else MIN_TYPICAL_WEEKLY_RUNS,
-        )
+        effective_consistent_weeks = max(effective_consistent_weeks, 8)
+        effective_runs_per_week = max(effective_runs_per_week, 3)
+    else:
+        if typical is None:
+            frequency_cap = MIN_TYPICAL_WEEKLY_RUNS
+        else:
+            frequency_cap = max(int(typical), MIN_TYPICAL_WEEKLY_RUNS)
+        if snapshot.baseline_confidence in {"insufficient", "low"} or snapshot.effective_reentry:
+            frequency_cap = min(frequency_cap, CONSERVATIVE_FREQUENCY_CAP)
     target_days = min(frequency_cap, len(available_days), MAX_PLAN_DAYS)
 
     long_decision = _long_run_decision(snapshot)
@@ -425,7 +520,7 @@ def compose_week(
             {"code": "planner.budget.respected", "result": "pass"},
             {
                 "code": "planner.history_gates",
-                "result": "pass" if enforce_history_gates else "bypassed",
+                "result": "advisory" if advisory["warnings"] else "pass",
             },
             {"code": "planner.quality_spacing", "result": "pass" if spacing_ok else "fail"},
             {
@@ -438,29 +533,13 @@ def compose_week(
     generation_context = _generation_context(
         snapshot,
         target_days,
-        enforce_history_gates=enforce_history_gates,
+        advisory=advisory,
         effective_consistent_weeks=effective_consistent_weeks,
         effective_runs_per_week=effective_runs_per_week,
-        enable_deferred_quality=enable_deferred_quality,
     )
-    fingerprint_input = {
-        **json.loads(json.dumps(generation_context, sort_keys=True, separators=(",", ":"))),
-        "planner_version": WEEKLY_PLANNER_VERSION,
-        "knowledge_base_version": snapshot.knowledge_base_version,
-        "sessions": [
-            {
-                "scheduled_for": session.scheduled_for.isoformat(),
-                "role": session.role,
-                "template_version": session.template_version,
-                "planned_minutes": session.planned_minutes,
-                "warnings": list(session.warnings),
-            }
-            for session in session_candidates
-        ],
-    }
-    encoded = json.dumps(
-        fingerprint_input, sort_keys=True, separators=(",", ":"), allow_nan=False, default=str
-    ).encode()
+    fingerprint = _fingerprint_candidate(
+        generation_context, tuple(session_candidates), snapshot.knowledge_base_version
+    )
     return WeeklyPlanCandidate(
         week_start=snapshot.week_start,
         week_end=snapshot.week_start + timedelta(days=6),
@@ -469,7 +548,7 @@ def compose_week(
         skipped_days=skipped_tuple,
         validation_report=validation_report,
         generation_context=generation_context,
-        input_fingerprint=hashlib.sha256(encoded).hexdigest(),
+        input_fingerprint=fingerprint,
         planner_version=WEEKLY_PLANNER_VERSION,
         knowledge_base_version=snapshot.knowledge_base_version,
     )
@@ -493,14 +572,39 @@ def _rationale(role: str) -> str:
     return rationales[role]
 
 
+def _fingerprint_candidate(
+    generation_context: dict[str, object],
+    sessions: tuple[PlannedSessionCandidate, ...],
+    knowledge_base_version: str,
+) -> str:
+    fingerprint_input = {
+        **json.loads(json.dumps(generation_context, sort_keys=True, separators=(",", ":"))),
+        "planner_version": WEEKLY_PLANNER_VERSION,
+        "knowledge_base_version": knowledge_base_version,
+        "sessions": [
+            {
+                "scheduled_for": session.scheduled_for.isoformat(),
+                "role": session.role,
+                "template_version": session.template_version,
+                "planned_minutes": session.planned_minutes,
+                "warnings": list(session.warnings),
+            }
+            for session in sessions
+        ],
+    }
+    encoded = json.dumps(
+        fingerprint_input, sort_keys=True, separators=(",", ":"), allow_nan=False, default=str
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _generation_context(
     snapshot: WeeklyPlannerSnapshot,
     target_days: int,
     *,
-    enforce_history_gates: bool,
+    advisory: dict[str, object],
     effective_consistent_weeks: int,
     effective_runs_per_week: int,
-    enable_deferred_quality: bool,
 ) -> dict[str, object]:
     return {
         "schema_version": PLANNER_SCHEMA_VERSION,
@@ -509,11 +613,12 @@ def _generation_context(
         "week_end": (snapshot.week_start + timedelta(days=6)).isoformat(),
         "target_days": target_days,
         "history_gates": {
-            "enabled": enforce_history_gates,
+            "enabled": False,
+            "mode": "advisory",
             "effective_consistent_running_weeks": effective_consistent_weeks,
             "effective_runs_per_week": effective_runs_per_week,
         },
-        "deferred_quality_test_mode": enable_deferred_quality,
+        "advisory": advisory,
         "safety": {"outcome": snapshot.safety_outcome},
         "availability": [
             {"weekday": day.weekday, "available_minutes": day.available_minutes}
@@ -553,7 +658,12 @@ def _generation_context(
 
 
 def plan_shadow_week(
-    session: Session, user: User, *, week_start: date, as_of: date
+    session: Session,
+    user: User,
+    *,
+    week_start: date,
+    as_of: date,
+    availability: tuple[DayAvailability, ...] | list[DayAvailability] | None = None,
 ) -> WeeklyPlanCandidate:
     if week_start.weekday() != 0:
         raise WeeklyPlannerError(
@@ -561,11 +671,6 @@ def plan_shadow_week(
             code="planner.week_start_invalid",
         )
     safety = build_proposal_safety_context(session, user.id, now=datetime.combine(as_of, time.max))
-    if not safety.report.valid:
-        raise WeeklyPlannerError(
-            "Ein aktueller Sicherheitshinweis blockiert die Wochenplanung.",
-            code="planner.safety_blocked",
-        )
     planning_inputs = get_planning_inputs(session, user.id, as_of=as_of)
     profile = planning_inputs.profile
     shadow = AthleteDataService(session, user.id, as_of=as_of).get_running_shadow_analysis(
@@ -573,13 +678,31 @@ def plan_shadow_week(
     )
     window28 = shadow.baseline.window(28)
     window56 = shadow.baseline.window(56)
+    resolved_availability = (
+        tuple(availability)
+        if availability is not None
+        else tuple(
+            DayAvailability(weekday=row.weekday, available_minutes=int(row.available_minutes or 0))
+            for row in planning_inputs.availability
+        )
+    )
+    if not resolved_availability:
+        raise WeeklyPlannerError(
+            "Für diese Woche sind keine verfügbaren Lauftage erfasst.",
+            code="planner.no_available_days",
+        )
+    if any(
+        day.weekday < 0 or day.weekday > 6 or day.available_minutes <= 0
+        for day in resolved_availability
+    ):
+        raise WeeklyPlannerError(
+            "Die angegebene Verfügbarkeit ist ungültig.",
+            code="planner.availability_invalid",
+        )
     snapshot = WeeklyPlannerSnapshot(
         week_start=week_start,
         as_of=as_of,
-        availability=tuple(
-            DayAvailability(weekday=row.weekday, available_minutes=int(row.available_minutes or 0))
-            for row in planning_inputs.availability
-        ),
+        availability=resolved_availability,
         preferred_long_run_weekday=(
             profile.preferred_long_run_weekday if profile is not None else None
         ),
@@ -625,12 +748,82 @@ def plan_shadow_week(
         knowledge_base_version=get_knowledge_registry().version,
         safety_outcome=safety.report.outcome.value,
     )
-    quality_test_mode = deferred_quality_templates_enabled()
-    return compose_week(
-        snapshot,
-        enforce_history_gates=get_settings().coach_planner_history_gates_enabled,
-        enable_deferred_quality=quality_test_mode,
+    candidate = compose_week(snapshot)
+    assessment = assess_training_fit(
+        session,
+        user.id,
+        effective_workout_date=as_of,
+        revision_fingerprint=f"weekly-plan:{week_start.isoformat()}:{as_of.isoformat()}",
+        evaluated_at=datetime.combine(as_of, time.max),
     )
+    context = dict(candidate.generation_context)
+    raw_advisory = context.get("advisory")
+    advisory = dict(raw_advisory) if isinstance(raw_advisory, dict) else {}
+    raw_warnings = advisory.get("warnings", [])
+    raw_evidence = advisory.get("evidence", [])
+    raw_coverage = advisory.get("coverage", [])
+    warnings = list(raw_warnings) if isinstance(raw_warnings, list) else []
+    evidence = list(raw_evidence) if isinstance(raw_evidence, list) else []
+    coverage = list(raw_coverage) if isinstance(raw_coverage, list) else []
+    for code in assessment.warning_codes:
+        if code not in warnings:
+            warnings.append(code)
+    for item in assessment.evidence:
+        evidence.append(
+            {
+                "code": item.code,
+                "source": item.source,
+                "observed_on": item.observed_on.isoformat(),
+                "value": item.value,
+                "unit": item.unit,
+                "severe": item.severe,
+            }
+        )
+    for item in assessment.coverage:
+        coverage.append(
+            {
+                "metric": item.metric,
+                "current_day": item.current_day.isoformat() if item.current_day else None,
+                "baseline_sample_count": item.baseline_sample_count,
+                "minimum_baseline_samples": item.minimum_baseline_samples,
+                "sufficient_for_elevation": item.sufficient_for_elevation,
+            }
+        )
+    confidence = str(advisory.get("confidence", "medium"))
+    if assessment.outcome.value == "elevated":
+        confidence = "low"
+    elif assessment.outcome.value == "caution" and confidence in {"high", "medium"}:
+        confidence = "low" if warnings else confidence
+    if warnings:
+        recommendation = (
+            "Der angeforderte Wochenentwurf bleibt verfügbar; prüfe vor der Annahme die "
+            "konservativere Alternative."
+        )
+    else:
+        recommendation = "Der angeforderte Wochenentwurf passt zu den aktuell verfügbaren Daten."
+    alternative = advisory.get("alternative")
+    if not isinstance(alternative, dict):
+        alternative = {"type": "conservative_week", "code": "reduced_frequency"}
+    advisory = {
+        **advisory,
+        "confidence": confidence,
+        "warnings": warnings,
+        "evidence": evidence,
+        "coverage": coverage,
+        "recommendation": recommendation,
+        "alternative": alternative,
+        "training_fit": {
+            "outcome": assessment.outcome.value,
+            "policy_version": assessment.policy_version,
+            "authoritative_input_fingerprint": assessment.authoritative_input_fingerprint,
+        },
+    }
+    context["advisory"] = advisory
+    fingerprint = _fingerprint_candidate(
+        context, candidate.sessions, candidate.knowledge_base_version
+    )
+
+    return replace(candidate, generation_context=context, input_fingerprint=fingerprint)
 
 
 def _count_consistent_weeks(session: Session, user_id: int, as_of: date) -> int:

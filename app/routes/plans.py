@@ -24,6 +24,8 @@ from app.services.planning.planning_queries import (
     list_training_cycles,
 )
 from app.services.planning.weekly_plan_service import (
+    WeeklyPlanAcceptanceError,
+    accept_training_plan_revision,
     persist_week_candidate,
     plan_proposals_between,
 )
@@ -121,6 +123,24 @@ def generate_week_plan(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     current_monday = today - timedelta(days=today.weekday())
     week_offset = (starts_on - current_monday).days // 7
+    return RedirectResponse(f"/plans?view=week&week={week_offset}", status_code=303)
+
+
+@router.post("/weeks/{plan_id}/revisions/{revision_id}/accept")
+def accept_week_plan(
+    plan_id: int, revision_id: int, session: SessionDep, user: CurrentUser
+) -> RedirectResponse:
+    if not coach_feature_enabled(get_settings().coach_plan_generation_enabled, user.id):
+        raise HTTPException(status_code=404, detail="Seite nicht gefunden")
+    try:
+        revision = accept_training_plan_revision(
+            session, user, plan_id=plan_id, revision_id=revision_id
+        )
+    except WeeklyPlanAcceptanceError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    today = date.today()
+    current_monday = today - timedelta(days=today.weekday())
+    week_offset = (revision.week_start - current_monday).days // 7
     return RedirectResponse(f"/plans?view=week&week={week_offset}", status_code=303)
 
 

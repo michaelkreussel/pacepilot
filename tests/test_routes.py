@@ -23,6 +23,8 @@ from app.models import (
     GarminSyncState,
     SyncEvent,
     SyncRun,
+    TrainingPlan,
+    TrainingPlanRevision,
     User,
     Workout,
     WorkoutEvent,
@@ -1878,6 +1880,49 @@ def test_plan_persistence_requires_flag_and_csrf(
     finally:
         client.headers["X-CSRF-Token"] = csrf_token
     assert response.status_code == 403
+
+
+def test_week_plan_acceptance_is_exact_and_flagged(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
+    monday = _seed_shadow_week_history(session_factory)
+    generated = client.post(
+        "/plans/generate-week",
+        data={"week_start": monday.isoformat()},
+        follow_redirects=False,
+    )
+    assert generated.status_code == 303
+
+    with session_factory() as session:
+        plan = session.scalar(select(TrainingPlan))
+        assert plan is not None
+        revision = session.scalar(select(TrainingPlanRevision))
+        assert revision is not None
+        plan_id, revision_id = plan.id, revision.id
+
+    accepted = client.post(
+        f"/plans/weeks/{plan_id}/revisions/{revision_id}/accept",
+        follow_redirects=False,
+    )
+    assert accepted.status_code == 303
+    assert accepted.headers["location"] == "/plans?view=week&week=0"
+
+    with session_factory() as session:
+        plan = session.get(TrainingPlan, plan_id)
+        assert plan is not None
+        assert plan.accepted_revision_id == revision_id
+
+    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", False)
+    assert (
+        client.post(
+            f"/plans/weeks/{plan_id}/revisions/{revision_id}/accept",
+            follow_redirects=False,
+        ).status_code
+        == 404
+    )
 
 
 def test_multiweek_plan_page_is_flagged_and_lists_active_goals(

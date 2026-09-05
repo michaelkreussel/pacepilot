@@ -33,6 +33,41 @@ class WeeklyPlanPersistenceError(ValueError):
         self.code = code
 
 
+class WeeklyPlanAcceptanceError(ValueError):
+    def __init__(self, message: str, *, code: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def accept_training_plan_revision(
+    session: Session,
+    user: User,
+    *,
+    plan_id: int,
+    revision_id: int,
+) -> TrainingPlanRevision:
+    plan = session.scalar(
+        select(TrainingPlan).where(TrainingPlan.id == plan_id, TrainingPlan.user_id == user.id)
+    )
+    revision = session.scalar(
+        select(TrainingPlanRevision).where(
+            TrainingPlanRevision.id == revision_id,
+            TrainingPlanRevision.plan_id == plan_id,
+            TrainingPlanRevision.owner_user_id == user.id,
+        )
+    )
+    if plan is None or revision is None:
+        raise WeeklyPlanAcceptanceError("Planrevision nicht gefunden.", code="plan.not_found")
+    if plan.current_revision_id != revision.id:
+        raise WeeklyPlanAcceptanceError(
+            "Diese Planrevision ist nicht mehr die aktuelle Vorschau.",
+            code="plan.revision_stale",
+        )
+    plan.accepted_revision_id = revision.id
+    session.commit()
+    return revision
+
+
 def persist_week_candidate(
     session: Session,
     user: User,

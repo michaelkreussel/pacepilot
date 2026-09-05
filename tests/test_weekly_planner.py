@@ -124,7 +124,7 @@ def test_long_run_requires_consistent_running_weeks() -> None:
     assert len(candidate.sessions) == candidate.target_days
 
 
-def test_history_gate_test_mode_uses_availability_and_unlocks_templates() -> None:
+def test_sparse_history_produces_advisory_draft_with_conservative_scope() -> None:
     candidate = compose_week(
         _snapshot(
             typical_weekly_runs_median=1.0,
@@ -134,24 +134,33 @@ def test_history_gate_test_mode_uses_availability_and_unlocks_templates() -> Non
         enforce_history_gates=False,
     )
 
-    assert candidate.target_days == 4
-    assert {session.role for session in candidate.sessions} == {
-        "easy_run",
-        "long_run",
-        "strides",
-    }
-    assert candidate.generation_context["history_gates"] == {
-        "enabled": False,
-        "effective_consistent_running_weeks": 4,
-        "effective_runs_per_week": 2,
-    }
+    assert candidate.target_days == 2
+    assert len(candidate.sessions) == 2
+    raw_advisory = candidate.generation_context.get("advisory")
+    assert isinstance(raw_advisory, dict)
+    assert raw_advisory["confidence"] == "low"
+    raw_warnings = raw_advisory.get("warnings")
+    assert isinstance(raw_warnings, list)
+    assert "planner.weekly_frequency_low" in raw_warnings
+    assert "planner.consistent_weeks_sparse" in raw_warnings
+    assert raw_advisory["recommendation"]
+    assert raw_advisory["alternative"]
+    raw_evidence = raw_advisory.get("evidence")
+    assert isinstance(raw_evidence, list)
+    assert any(
+        isinstance(item, dict) and item.get("observed_on") == "2026-08-26" for item in raw_evidence
+    )
+    assert raw_advisory["coverage"]
+    raw_gates = candidate.generation_context.get("history_gates")
+    assert isinstance(raw_gates, dict)
+    assert raw_gates["mode"] == "advisory"
     checks = candidate.validation_report["checks"]
     assert isinstance(checks, list)
     assert {
         check["result"]
         for check in checks
         if isinstance(check, dict) and check.get("code") == "planner.history_gates"
-    } == {"bypassed"}
+    } == {"advisory"}
 
 
 def test_consistent_history_counter_reaches_eight_weeks(session_factory) -> None:
@@ -263,19 +272,28 @@ def test_identical_inputs_produce_identical_candidates() -> None:
     assert first.input_fingerprint == second.input_fingerprint
 
 
-def test_insufficient_baseline_refuses_to_plan() -> None:
-    with pytest.raises(WeeklyPlannerError) as confidence_error:
-        compose_week(_snapshot(baseline_confidence="insufficient"))
-    assert confidence_error.value.code == "planner.insufficient_data"
-    with pytest.raises(WeeklyPlannerError) as frequency_error:
-        compose_week(_snapshot(typical_weekly_runs_median=1.0))
-    assert frequency_error.value.code == "planner.insufficient_frequency_history"
+def test_sparse_baseline_produces_advisory_draft_and_only_availability_blocks() -> None:
+    insufficient = compose_week(_snapshot(baseline_confidence="insufficient"))
+    assert insufficient.sessions
+    raw_insufficient = insufficient.generation_context.get("advisory")
+    assert isinstance(raw_insufficient, dict)
+    assert raw_insufficient["confidence"] == "low"
+    insufficient_warnings = raw_insufficient.get("warnings")
+    assert isinstance(insufficient_warnings, list)
+    assert "planner.baseline_confidence_insufficient" in insufficient_warnings
+    sparse = compose_week(_snapshot(typical_weekly_runs_median=1.0))
+    assert sparse.sessions
+    raw_sparse = sparse.generation_context.get("advisory")
+    assert isinstance(raw_sparse, dict)
+    sparse_warnings = raw_sparse.get("warnings")
+    assert isinstance(sparse_warnings, list)
+    assert "planner.weekly_frequency_low" in sparse_warnings
     with pytest.raises(WeeklyPlannerError) as availability_error:
         compose_week(_snapshot(availability=()))
     assert availability_error.value.code == "planner.no_available_days"
 
 
-def test_safety_stop_blocks_the_whole_shadow_week(session_factory) -> None:
+def test_health_concern_produces_advisory_draft_instead_of_blocking(session_factory) -> None:
     today = date.today()
     with session_factory() as session:
         user = User(display_name="Blocked Runner")
@@ -312,15 +330,80 @@ def test_safety_stop_blocks_the_whole_shadow_week(session_factory) -> None:
                 content_hash="c" * 64,
             )
         )
+        session.add_all(
+            [
+                AthleteAvailability(
+                    user_id=user.id, weekday=0, available=True, available_minutes=60
+                ),
+                AthleteAvailability(
+                    user_id=user.id, weekday=2, available=True, available_minutes=75
+                ),
+            ]
+        )
         session.commit()
 
-        with pytest.raises(WeeklyPlannerError) as blocked:
-            plan_shadow_week(session, user, week_start=MONDAY, as_of=today)
-        assert blocked.value.code == "planner.safety_blocked"
+        candidate = plan_shadow_week(session, user, week_start=MONDAY, as_of=today)
+
+        assert candidate.sessions
+        raw_health = candidate.generation_context.get("advisory")
+        assert isinstance(raw_health, dict)
+        assert raw_health["warnings"]
+        assert raw_health["evidence"]
+        assert raw_health["coverage"]
+        assert raw_health["recommendation"]
+        assert raw_health["alternative"]
+        raw_fit = raw_health.get("training_fit")
+        assert isinstance(raw_fit, dict)
+        assert raw_fit["policy_version"]
+        assert raw_fit["authoritative_input_fingerprint"]
 
         with pytest.raises(WeeklyPlannerError) as invalid_week:
             plan_shadow_week(session, user, week_start=date(2026, 9, 1), as_of=today)
         assert invalid_week.value.code == "planner.week_start_invalid"
+
+
+def test_supplied_availability_is_validated(session_factory) -> None:
+    today = date.today()
+    monday = today - timedelta(days=today.weekday())
+    with session_factory() as session:
+        user = User(display_name="Invalid Availability Runner")
+        session.add(user)
+        session.flush()
+        session.commit()
+
+        with pytest.raises(WeeklyPlannerError) as invalid:
+            plan_shadow_week(
+                session,
+                user,
+                week_start=monday,
+                as_of=today,
+                availability=(DayAvailability(weekday=9, available_minutes=60),),
+            )
+        assert invalid.value.code == "planner.availability_invalid"
+
+
+def test_supplied_availability_slot_generates_direct_draft(session_factory) -> None:
+    today = date.today()
+    monday = today - timedelta(days=today.weekday())
+    with session_factory() as session:
+        user = User(display_name="Supplied Availability Runner")
+        session.add(user)
+        session.flush()
+        session.commit()
+
+        candidate = plan_shadow_week(
+            session,
+            user,
+            week_start=monday,
+            as_of=today,
+            availability=(DayAvailability(weekday=1, available_minutes=60),),
+        )
+
+        assert candidate.sessions
+        raw_supplied = candidate.generation_context.get("advisory")
+        assert isinstance(raw_supplied, dict)
+        assert raw_supplied["confidence"]
+        assert {session.weekday for session in candidate.sessions} == {1}
 
 
 def test_planning_writes_no_rows(session_factory) -> None:
