@@ -1,5 +1,5 @@
 from dataclasses import replace
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
 from sqlalchemy import func, select, update
@@ -8,6 +8,8 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.models import (
+    Activity,
+    AthleteAvailability,
     AthleteGoal,
     CoachConversation,
     CoachMessage,
@@ -42,6 +44,7 @@ from app.services.planning.weekly_planner import (
     DayAvailability,
     GoalSummary,
     WeeklyPlanCandidate,
+    WeeklyPlannerError,
     WeeklyPlannerSnapshot,
     compose_week,
 )
@@ -232,7 +235,7 @@ def test_cycle_handles_low_confidence_without_wearable_metrics() -> None:
     assert all("wearable" not in week.weekly_plan.generation_context for week in cycle.weeks)
 
 
-def test_cycle_rejects_excess_quality_density() -> None:
+def test_cycle_quality_density_produces_warnings_instead_of_refusal() -> None:
     candidates = list(_weekly_candidates())
     first = candidates[0]
     candidates[0] = replace(
@@ -250,7 +253,10 @@ def test_cycle_rejects_excess_quality_density() -> None:
         event_type="half_marathon",
     )
 
-    assert cycle.validation_report["valid"] is False
+    assert cycle.validation_report["valid"] is True
+    assert "cycle.quality_density_elevated" in cycle.warnings
+    assert cycle.confidence == "low"
+    assert cycle.alternative == {"type": "conservative_cycle", "code": "reduced_volume"}
     checks = cycle.validation_report["checks"]
     assert isinstance(checks, list)
     quality_check = next(
@@ -258,19 +264,91 @@ def test_cycle_rejects_excess_quality_density() -> None:
         for check in checks
         if isinstance(check, dict) and check.get("code") == "cycle.long_run_and_quality_density"
     )
-    assert quality_check["result"] == "fail"
+    assert quality_check["result"] == "warn"
 
 
-def test_cycle_rejects_unrealistic_horizons_and_incomplete_inputs() -> None:
-    with pytest.raises(MultiweekPlannerError) as too_short:
-        compose_training_cycle(
-            _weekly_candidates(4),
-            start_date=START,
-            target_date=START + timedelta(weeks=3, days=6),
-            event_type="half_marathon",
-        )
-    assert too_short.value.code == "cycle.goal_horizon_too_short"
+def test_short_horizon_produces_advisory_draft_instead_of_refusal() -> None:
+    cycle = compose_training_cycle(
+        _weekly_candidates(4),
+        start_date=START,
+        target_date=START + timedelta(weeks=3, days=6),
+        event_type="half_marathon",
+    )
 
+    assert cycle.validation_report["valid"] is True
+    assert "cycle.goal_horizon_short" in cycle.warnings
+    assert cycle.confidence == "low"
+    assert cycle.alternative == {"type": "conservative_cycle", "code": "reduced_volume"}
+    assert cycle.assumptions["horizon_shortfall_weeks"] == 4
+    checks = cycle.validation_report["checks"]
+    assert isinstance(checks, list)
+    horizon_check = next(
+        check
+        for check in checks
+        if isinstance(check, dict) and check.get("code") == "cycle.goal_horizon"
+    )
+    assert horizon_check["result"] == "warn"
+
+
+def test_long_horizon_produces_advisory_draft_instead_of_refusal() -> None:
+    cycle = compose_training_cycle(
+        _weekly_candidates(53),
+        start_date=START,
+        target_date=START + timedelta(weeks=52, days=6),
+        event_type="general_fitness",
+    )
+
+    assert cycle.validation_report["valid"] is True
+    assert "cycle.goal_horizon_long" in cycle.warnings
+    assert cycle.confidence == "low"
+    assert cycle.alternative == {"type": "conservative_cycle", "code": "reduced_volume"}
+    assert cycle.assumptions["horizon_excess_weeks"] == 1
+
+
+def test_history_limited_weeks_produce_cycle_level_warning() -> None:
+    candidates = []
+    for position, weekly in enumerate(_weekly_candidates(6)):
+        if position in {0, 3}:
+            context = dict(weekly.generation_context)
+            raw_advisory = context.get("advisory")
+            assert isinstance(raw_advisory, dict)
+            advisory = dict(raw_advisory)
+            advisory["warnings"] = ["planner.baseline_confidence_low"]
+            context["advisory"] = advisory
+            weekly = replace(weekly, generation_context=context)
+        candidates.append(weekly)
+
+    cycle = compose_training_cycle(
+        tuple(candidates),
+        start_date=START,
+        target_date=START + timedelta(weeks=5, days=6),
+        event_type="5k",
+    )
+
+    assert cycle.validation_report["valid"] is True
+    assert "cycle.history_limited" in cycle.warnings
+    assert cycle.assumptions["weeks_with_history_warnings"] == [0, 3]
+    assert cycle.confidence == "low"
+    assert cycle.alternative == {"type": "conservative_cycle", "code": "reduced_volume"}
+
+
+def test_existing_quality_spacing_produces_warning_instead_of_refusal() -> None:
+    cycle = compose_training_cycle(
+        _weekly_candidates(enable_deferred_quality=True),
+        start_date=START,
+        target_date=START + timedelta(weeks=7, days=6),
+        event_type="10k",
+        enable_deferred_quality=True,
+        existing_quality_check=lambda _day: True,
+    )
+
+    assert cycle.validation_report["valid"] is True
+    assert "cycle.existing_quality_spacing" in cycle.warnings
+    conflicts = cycle.assumptions["existing_quality_spacing_conflicts"]
+    assert isinstance(conflicts, list) and len(conflicts) > 0
+
+
+def test_cycle_rejects_incomplete_inputs() -> None:
     with pytest.raises(MultiweekPlannerError) as incomplete:
         compose_training_cycle(
             _weekly_candidates(4),
@@ -279,6 +357,75 @@ def test_cycle_rejects_unrealistic_horizons_and_incomplete_inputs() -> None:
             event_type="half_marathon",
         )
     assert incomplete.value.code == "cycle.week_candidates_incomplete"
+
+
+def test_cycle_rejects_invalid_chronology() -> None:
+    with pytest.raises(MultiweekPlannerError) as bad_start:
+        compose_training_cycle(
+            (),
+            start_date=START + timedelta(days=1),
+            target_date=START + timedelta(weeks=7, days=6),
+            event_type="half_marathon",
+        )
+    assert bad_start.value.code == "cycle.start_date_invalid"
+
+    with pytest.raises(MultiweekPlannerError) as bad_target:
+        compose_training_cycle(
+            (),
+            start_date=START,
+            target_date=START,
+            event_type="half_marathon",
+        )
+    assert bad_target.value.code == "cycle.target_date_invalid"
+
+
+def test_cycle_rejects_goal_mismatch_and_target_drift(session_factory) -> None:
+    target = START + timedelta(weeks=7, days=6)
+    with session_factory() as session:
+        user = _user(session)
+        goal = AthleteGoal(user_id=user.id, event_type="10k", target_date=target)
+        session.add(goal)
+        session.commit()
+
+        with pytest.raises(MultiweekPlannerError) as mismatch:
+            plan_training_cycle(
+                session,
+                user,
+                start_date=START,
+                target_date=target,
+                as_of=date(2026, 8, 26),
+                goal_id=goal.id,
+                event_type="half_marathon",
+            )
+        assert mismatch.value.code == "cycle.goal_mismatch"
+
+        with pytest.raises(MultiweekPlannerError) as drift:
+            plan_training_cycle(
+                session,
+                user,
+                start_date=START,
+                target_date=target + timedelta(weeks=1),
+                as_of=date(2026, 8, 26),
+                goal_id=goal.id,
+            )
+        assert drift.value.code == "cycle.target_date_mismatch"
+
+
+def test_cycle_requires_recurring_availability(session_factory) -> None:
+    with session_factory() as session:
+        user = _user(session)
+        session.commit()
+
+        with pytest.raises(WeeklyPlannerError) as missing:
+            plan_training_cycle(
+                session,
+                user,
+                start_date=START,
+                target_date=START + timedelta(weeks=7, days=6),
+                as_of=date(2026, 8, 26),
+                purpose="Allgemeine Fitness",
+            )
+        assert missing.value.code == "planner.no_available_days"
 
 
 def test_cycle_rule_profiles_are_goal_specific() -> None:
@@ -370,6 +517,148 @@ def test_training_cycle_propagates_one_date_to_every_week(
     assert {week.weekly_plan.generation_context["as_of"] for week in cycle.weeks} == {
         as_of.isoformat()
     }
+
+
+def _seed_cycle_availability(session: Session, user: User) -> None:
+    for weekday, minutes in ((0, 60), (2, 75), (5, 120), (6, 90)):
+        session.add(
+            AthleteAvailability(
+                user_id=user.id,
+                weekday=weekday,
+                available=True,
+                available_minutes=minutes,
+            )
+        )
+
+
+def _seed_cycle_history(
+    session: Session, user: User, as_of: date, *, runs_per_week: int = 1, weeks: int = 4
+) -> None:
+    index = 0
+    for week_offset in range(weeks):
+        for run_offset in range(runs_per_week):
+            started = as_of - timedelta(days=7 * week_offset + run_offset)
+            session.add(
+                Activity(
+                    user_id=user.id,
+                    garmin_activity_id=f"cycle-history-{index}",
+                    name=f"Cycle run {index}",
+                    activity_type="running",
+                    started_at=datetime.combine(started, datetime.min.time()),
+                    duration_s=5400,
+                    distance_m=12000,
+                    workout_rpe=8 if index == 0 else 4,
+                )
+            )
+            index += 1
+
+
+def test_explicit_purpose_generates_draft_without_goal(session_factory) -> None:
+    as_of = date(2026, 8, 26)
+    with session_factory() as session:
+        user = _user(session)
+        _seed_cycle_availability(session, user)
+        _seed_cycle_history(session, user, as_of, runs_per_week=2, weeks=3)
+        session.commit()
+
+        candidate = plan_training_cycle(
+            session,
+            user,
+            start_date=START,
+            target_date=START + timedelta(weeks=7, days=6),
+            as_of=as_of,
+            purpose="Allgemeine Fitness",
+        )
+
+    assert candidate.event_type == "general_fitness"
+    assert candidate.goal_id is None
+    assert candidate.assumptions["purpose"] == "Allgemeine Fitness"
+    assert candidate.validation_report["valid"] is True
+    assert "cycle.history_limited" in candidate.warnings
+    assert candidate.confidence in {"low", "insufficient"}
+    assert candidate.alternative == {"type": "conservative_cycle", "code": "reduced_volume"}
+
+
+def test_cycle_requires_goal_or_purpose(session_factory) -> None:
+    as_of = date(2026, 8, 26)
+    with session_factory() as session:
+        user = _user(session)
+        session.commit()
+
+        with pytest.raises(MultiweekPlannerError) as missing:
+            plan_training_cycle(
+                session,
+                user,
+                start_date=START,
+                target_date=START + timedelta(weeks=7, days=6),
+                as_of=as_of,
+            )
+        assert missing.value.code == "cycle.goal_required"
+
+        with pytest.raises(MultiweekPlannerError) as blank:
+            plan_training_cycle(
+                session,
+                user,
+                start_date=START,
+                target_date=START + timedelta(weeks=7, days=6),
+                as_of=as_of,
+                purpose="   ",
+            )
+        assert blank.value.code == "cycle.goal_required"
+
+
+def test_plan_spacing_conflicts_produce_warnings_instead_of_refusal(
+    session_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "app.services.planning.workout_proposals.quality_density_conflicts",
+        lambda *args, **kwargs: (1,),
+    )
+    as_of = date(2026, 8, 26)
+    with session_factory() as session:
+        user = _user(session)
+        _seed_cycle_availability(session, user)
+        _seed_cycle_history(session, user, as_of, runs_per_week=4, weeks=5)
+        goal = AthleteGoal(
+            user_id=user.id,
+            event_type="half_marathon",
+            target_date=START + timedelta(weeks=7, days=6),
+        )
+        session.add(goal)
+        session.commit()
+
+        candidate = plan_training_cycle(
+            session,
+            user,
+            start_date=START,
+            target_date=START + timedelta(weeks=7, days=6),
+            as_of=as_of,
+            goal_id=goal.id,
+        )
+
+    assert candidate.goal_id == goal.id
+    assert candidate.validation_report["valid"] is True
+    assert "cycle.existing_quality_spacing" in candidate.warnings
+    assert candidate.assumptions["existing_quality_spacing_conflicts"]
+
+
+def test_persist_advisory_cycle_succeeds(session_factory) -> None:
+    candidate = compose_training_cycle(
+        _weekly_candidates(4),
+        start_date=START,
+        target_date=START + timedelta(weeks=3, days=6),
+        event_type="half_marathon",
+    )
+    with session_factory() as session:
+        user = _user(session)
+        session.commit()
+
+        revision = persist_training_cycle(session, user, candidate)
+
+        assert revision.confidence == candidate.confidence
+        assert revision.validation_report_json["warnings"] == list(candidate.warnings)
+        assert revision.validation_report_json["alternative"] == candidate.alternative
+        assert revision.assumptions_json["horizon_shortfall_weeks"] == 4
 
 
 def test_cycle_requires_exact_active_goal_when_selected(session_factory) -> None:

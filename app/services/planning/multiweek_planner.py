@@ -1,5 +1,6 @@
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from math import ceil
@@ -43,6 +44,7 @@ MIN_CYCLE_WEEKS = {
     "marathon": 12,
 }
 MAX_CYCLE_WEEKS = 52
+CYCLE_QUALITY_TEMPLATE_IDS = frozenset({"strides", "threshold_cruise", "vo2_intervals"})
 
 
 @dataclass(frozen=True)
@@ -101,6 +103,8 @@ class TrainingCycleCandidate:
     assumptions: dict[str, object]
     impact: dict[str, object]
     validation_report: dict[str, object]
+    warnings: tuple[str, ...]
+    alternative: dict[str, object]
     input_fingerprint: str
     planner_version: str
     knowledge_base_version: str
@@ -119,6 +123,16 @@ def minimum_cycle_weeks(event_type: str) -> int:
 def _week_count(start_date: date, target_date: date) -> int:
     target_week_start = target_date - timedelta(days=target_date.weekday())
     return ((target_week_start - start_date).days // 7) + 1
+
+
+def _weekly_advisory_warnings(weekly: WeeklyPlanCandidate) -> list[object]:
+    advisory = weekly.generation_context.get("advisory")
+    if not isinstance(advisory, dict):
+        return []
+    warnings = advisory.get("warnings")
+    if not isinstance(warnings, list):
+        return []
+    return warnings
 
 
 def _phase_for_week(
@@ -442,6 +456,8 @@ def compose_training_cycle(
     effective_reentry: bool = False,
     interrupted_weeks: frozenset[int] = frozenset(),
     enable_deferred_quality: bool = False,
+    purpose: str | None = None,
+    existing_quality_check: Callable[[date], bool] | None = None,
 ) -> TrainingCycleCandidate:
     if start_date.weekday() != 0:
         raise MultiweekPlannerError(
@@ -455,16 +471,13 @@ def compose_training_cycle(
     minimum = minimum_cycle_weeks(event_type)
     profile = CYCLE_RULE_PROFILES[event_type]
     week_count = _week_count(start_date, target_date)
+    # Advisory mode: horizon, history, aggressiveness, and quality density are
+    # warnings, never refusals, where a structurally valid cycle is representable.
+    warnings: list[str] = []
     if week_count < minimum:
-        raise MultiweekPlannerError(
-            f"Für dieses Ziel werden mindestens {minimum} Wochen benötigt.",
-            code="cycle.goal_horizon_too_short",
-        )
-    if week_count > MAX_CYCLE_WEEKS:
-        raise MultiweekPlannerError(
-            f"Ein Mehrwochenplan darf höchstens {MAX_CYCLE_WEEKS} Wochen umfassen.",
-            code="cycle.goal_horizon_too_long",
-        )
+        warnings.append("cycle.goal_horizon_short")
+    elif week_count > MAX_CYCLE_WEEKS:
+        warnings.append("cycle.goal_horizon_long")
     if len(weekly_candidates) != week_count:
         raise MultiweekPlannerError(
             "Die Wochenkandidaten decken den vollständigen Planzeitraum nicht ab.",
@@ -594,20 +607,40 @@ def compose_training_cycle(
         item.scheduled_for <= target_date for week in weeks for item in week.weekly_plan.sessions
     )
     phases_ok = all(week.phase in SUPPORTED_PHASES for week in weeks)
-    valid = (
-        weekly_candidates_ok
-        and weekly_increase_ok
-        and long_run_ok
-        and quality_density_ok
-        and taper_ok
-        and target_ok
-        and phases_ok
-    )
+    history_positions = [
+        week.position for week in weeks if _weekly_advisory_warnings(week.weekly_plan)
+    ]
+    if history_positions:
+        warnings.append("cycle.history_limited")
+    if not long_run_ok:
+        warnings.append("cycle.long_run_progression_elevated")
+    if not quality_density_ok:
+        warnings.append("cycle.quality_density_elevated")
+    spacing_conflicts: list[str] = []
+    if existing_quality_check is not None:
+        for week in weeks:
+            for item in week.weekly_plan.sessions:
+                if item.template_id not in CYCLE_QUALITY_TEMPLATE_IDS:
+                    continue
+                if existing_quality_check(item.scheduled_for):
+                    spacing_conflicts.append(item.scheduled_for.isoformat())
+        spacing_conflicts = sorted(set(spacing_conflicts))
+    if spacing_conflicts:
+        warnings.append("cycle.existing_quality_spacing")
+    valid = weekly_candidates_ok and weekly_increase_ok and taper_ok and target_ok and phases_ok
     confidence = _cycle_confidence(weekly_candidates)
+    if warnings and confidence in {"medium", "high"}:
+        confidence = "low"
+    alternative = {"type": "conservative_cycle", "code": "reduced_volume"}
     assumptions = {
         "schema_version": MULTIWEEK_SCHEMA_VERSION,
         "goal_type": event_type,
+        "purpose": purpose,
         "minimum_weeks_for_goal": minimum,
+        "horizon_shortfall_weeks": max(minimum - week_count, 0),
+        "horizon_excess_weeks": max(week_count - MAX_CYCLE_WEEKS, 0),
+        "weeks_with_history_warnings": history_positions,
+        "existing_quality_spacing_conflicts": spacing_conflicts,
         "effective_reentry": effective_reentry,
         "interrupted_weeks": sorted(interrupted_weeks),
         "unsupported_templates_are_not_introduced": not enable_deferred_quality,
@@ -631,13 +664,18 @@ def compose_training_cycle(
         ],
         "changed_weeks": list(range(len(weeks))) if weeks else [],
     }
+    horizon_advisory = (
+        "cycle.goal_horizon_short" in warnings or "cycle.goal_horizon_long" in warnings
+    )
     report = {
         "valid": valid,
         "rule_set_version": MULTIWEEK_PLANNER_VERSION,
+        "warnings": list(warnings),
+        "alternative": dict(alternative),
         "checks": [
             {
                 "code": "cycle.goal_horizon",
-                "result": "pass",
+                "result": "warn" if horizon_advisory else "pass",
                 "weeks": week_count,
             },
             {
@@ -646,7 +684,7 @@ def compose_training_cycle(
             },
             {
                 "code": "cycle.long_run_and_quality_density",
-                "result": "pass" if long_run_ok and quality_density_ok else "fail",
+                "result": "pass" if long_run_ok and quality_density_ok else "warn",
             },
             {"code": "cycle.taper", "result": "pass" if taper_ok else "fail"},
             {
@@ -663,7 +701,7 @@ def compose_training_cycle(
     }
     generation_context = {
         "schema_version": MULTIWEEK_SCHEMA_VERSION,
-        "goal": {"id": goal_id, "event_type": event_type},
+        "goal": {"id": goal_id, "event_type": event_type, "purpose": purpose},
         "start_date": start_date.isoformat(),
         "target_date": target_date.isoformat(),
         "weeks": [
@@ -701,6 +739,8 @@ def compose_training_cycle(
         assumptions=assumptions,
         impact=impact,
         validation_report=report,
+        warnings=tuple(warnings),
+        alternative=alternative,
         input_fingerprint=fingerprint,
         planner_version=MULTIWEEK_PLANNER_VERSION,
         knowledge_base_version=get_knowledge_registry().version,
@@ -716,6 +756,7 @@ def plan_training_cycle(
     as_of: date,
     goal_id: int | None = None,
     event_type: str | None = None,
+    purpose: str | None = None,
     interrupted_weeks: frozenset[int] = frozenset(),
 ) -> TrainingCycleCandidate:
     goal = get_active_goal(session, user.id, goal_id=goal_id) if goal_id is not None else None
@@ -723,12 +764,17 @@ def plan_training_cycle(
         raise MultiweekPlannerError("Aktives Ziel nicht gefunden.", code="cycle.goal_not_found")
     if goal_id is None:
         goal = get_active_goal(session, user.id, event_type=event_type)
+    recorded_purpose = purpose.strip() if isinstance(purpose, str) else ""
+    recorded_purpose = recorded_purpose or None
     selected_type = event_type or (goal.event_type if goal is not None else None)
     if selected_type is None:
-        raise MultiweekPlannerError(
-            "Für einen Mehrwochenplan muss ein aktives Ziel erfasst sein.",
-            code="cycle.goal_required",
-        )
+        if recorded_purpose is None:
+            raise MultiweekPlannerError(
+                "Für einen Mehrwochenplan muss ein aktives Ziel oder ein expliziter "
+                "Trainingszweck erfasst sein.",
+                code="cycle.goal_required",
+            )
+        selected_type = "general_fitness"
     if goal is not None and goal.event_type != selected_type:
         raise MultiweekPlannerError(
             "Zieltyp und ausgewähltes Ziel passen nicht zusammen.", code="cycle.goal_mismatch"
@@ -755,7 +801,12 @@ def plan_training_cycle(
             if isinstance(profile_context, dict) and profile_context.get("effective_reentry"):
                 effective_reentry = True
                 break
-    candidate = compose_training_cycle(
+    from app.services.planning.workout_proposals import quality_density_conflicts
+
+    def _existing_quality_conflict(day: date) -> bool:
+        return bool(quality_density_conflicts(session, user.id, day))
+
+    return compose_training_cycle(
         weekly_candidates,
         start_date=start_date,
         target_date=target_date,
@@ -764,19 +815,9 @@ def plan_training_cycle(
         effective_reentry=effective_reentry,
         interrupted_weeks=interrupted_weeks,
         enable_deferred_quality=deferred_quality_templates_enabled(),
+        purpose=recorded_purpose,
+        existing_quality_check=_existing_quality_conflict,
     )
-    from app.services.planning.workout_proposals import quality_density_conflicts
-
-    for week in candidate.weeks:
-        for item in week.weekly_plan.sessions:
-            if item.template_id not in {"strides", "threshold_cruise", "vo2_intervals"}:
-                continue
-            if quality_density_conflicts(session, user.id, item.scheduled_for):
-                raise MultiweekPlannerError(
-                    "Der Plan kollidiert mit einer bereits angenommenen Qualitätseinheit.",
-                    code="cycle.existing_quality_spacing_violation",
-                )
-    return candidate
 
 
 def persist_training_cycle(
