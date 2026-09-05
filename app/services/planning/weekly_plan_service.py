@@ -13,9 +13,14 @@ from app.models import (
     User,
     Workout,
 )
+from app.services.planning.planning_commands import WeekPlanRevisionInput
 from app.services.planning.registry import get_knowledge_registry
 from app.services.planning.validator import WorkoutInput
-from app.services.planning.weekly_planner import WeeklyPlanCandidate
+from app.services.planning.weekly_planner import (
+    DayAvailability,
+    WeeklyPlanCandidate,
+    plan_shadow_week,
+)
 from app.services.planning.workout_revision import RevisionMetadata
 from app.services.planning.workout_service import WorkoutService
 from app.services.planning.workout_templates import (
@@ -37,6 +42,51 @@ class WeeklyPlanAcceptanceError(ValueError):
     def __init__(self, message: str, *, code: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+class WeekPlanRevisionError(ValueError):
+    def __init__(self, message: str, *, code: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def revise_week_plan(
+    session: Session,
+    user: User,
+    *,
+    plan_id: int,
+    data: WeekPlanRevisionInput,
+    source_assistant_message_id: int | None = None,
+) -> TrainingPlanRevision:
+    plan = session.scalar(
+        select(TrainingPlan).where(TrainingPlan.id == plan_id, TrainingPlan.user_id == user.id)
+    )
+    if plan is None:
+        raise WeekPlanRevisionError("Wochenplan nicht gefunden.", code="plan.not_found")
+    availability = (
+        tuple(
+            DayAvailability(
+                weekday=item.weekday, available_minutes=int(item.available_minutes or 0)
+            )
+            for item in data.availability
+            if item.available
+        )
+        if data.availability is not None
+        else None
+    )
+    candidate = plan_shadow_week(
+        session,
+        user,
+        week_start=data.week_start or plan.week_start,
+        as_of=data.as_of or date.today(),
+        availability=availability,
+    )
+    return persist_week_candidate(
+        session,
+        user,
+        candidate,
+        source_assistant_message_id=source_assistant_message_id,
+    )
 
 
 def accept_training_plan_revision(

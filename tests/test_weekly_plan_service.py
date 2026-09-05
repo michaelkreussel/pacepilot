@@ -2,6 +2,7 @@ from dataclasses import replace
 from datetime import date, timedelta
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -18,19 +19,23 @@ from app.models import (
     WorkoutGarminOperation,
     WorkoutRevision,
 )
+from app.services.planning.planning_commands import AvailabilityInput, WeekPlanRevisionInput
 from app.services.planning.registry import get_knowledge_registry
 from app.services.planning.validator import WorkoutInput
 from app.services.planning.weekly_plan_service import (
     WeeklyPlanAcceptanceError,
+    WeekPlanRevisionError,
     accept_training_plan_revision,
     persist_week_candidate,
     persist_week_candidate_in_transaction,
     plan_proposals_between,
+    revise_week_plan,
 )
 from app.services.planning.weekly_planner import (
     DayAvailability,
     GoalSummary,
     WeeklyPlanCandidate,
+    WeeklyPlannerError,
     WeeklyPlannerSnapshot,
     compose_week,
 )
@@ -430,3 +435,142 @@ def test_newer_draft_keeps_accepted_revision_until_accepted(session_factory) -> 
 
         accept_training_plan_revision(session, user, plan_id=plan.id, revision_id=second.id)
         assert plan.accepted_revision_id == second.id
+
+
+def _revision_availability() -> list[AvailabilityInput]:
+    return [
+        AvailabilityInput(weekday=0, available=True, available_minutes=90),
+        AvailabilityInput(weekday=2, available=True, available_minutes=90),
+        AvailabilityInput(weekday=4, available=True, available_minutes=90),
+        AvailabilityInput(weekday=6, available=True, available_minutes=120),
+    ]
+
+
+def test_revise_week_plan_with_availability_change_creates_new_current_revision(
+    session_factory,
+) -> None:
+    with session_factory() as session:
+        user = _user(session)
+        first = persist_week_candidate(session, user, _candidate())
+        plan = session.scalar(select(TrainingPlan))
+        assert plan is not None
+        accept_training_plan_revision(session, user, plan_id=plan.id, revision_id=first.id)
+
+        second = revise_week_plan(
+            session,
+            user,
+            plan_id=plan.id,
+            data=WeekPlanRevisionInput(
+                availability=_revision_availability(), as_of=date(2026, 8, 26)
+            ),
+        )
+
+        assert second.id != first.id
+        assert second.revision_number == 2
+        assert plan.current_revision_id == second.id
+        assert plan.accepted_revision_id == first.id
+        assert all(
+            workout.approval_status == "proposed" for workout in session.scalars(select(Workout))
+        )
+
+
+def test_revise_week_plan_with_week_start_change_addresses_other_week(
+    session_factory,
+) -> None:
+    other_monday = MONDAY + timedelta(weeks=1)
+    with session_factory() as session:
+        user = _user(session)
+        first = persist_week_candidate(session, user, _candidate())
+        plan = session.scalar(select(TrainingPlan))
+        assert plan is not None
+        accept_training_plan_revision(session, user, plan_id=plan.id, revision_id=first.id)
+
+        second = revise_week_plan(
+            session,
+            user,
+            plan_id=plan.id,
+            data=WeekPlanRevisionInput(
+                week_start=other_monday,
+                availability=_revision_availability(),
+                as_of=date(2026, 8, 26),
+            ),
+        )
+
+        assert second.id != first.id
+        assert second.week_start == other_monday
+        assert plan.current_revision_id == first.id
+        assert plan.accepted_revision_id == first.id
+        other_plan = session.scalar(
+            select(TrainingPlan).where(
+                TrainingPlan.user_id == user.id, TrainingPlan.week_start == other_monday
+            )
+        )
+        assert other_plan is not None
+        assert other_plan.current_revision_id == second.id
+
+
+def test_revise_week_plan_is_deterministic(session_factory) -> None:
+    with session_factory() as session:
+        user = _user(session)
+        first = persist_week_candidate(session, user, _candidate())
+        plan = session.scalar(select(TrainingPlan))
+        assert plan is not None
+        data = WeekPlanRevisionInput(availability=_revision_availability(), as_of=date(2026, 8, 26))
+
+        second = revise_week_plan(session, user, plan_id=plan.id, data=data)
+        third = revise_week_plan(session, user, plan_id=plan.id, data=data)
+
+        assert second.id != first.id
+        assert third.id == second.id
+        assert session.scalar(select(func.count()).select_from(TrainingPlanRevision)) == 2
+
+
+def test_revise_week_plan_rejects_unknown_plan_and_unsupported_fields(
+    session_factory,
+) -> None:
+    with session_factory() as session:
+        _user(session)
+        other = User(display_name="Other Runner")
+        session.add(other)
+        session.flush()
+
+        with pytest.raises(WeekPlanRevisionError) as missing:
+            revise_week_plan(
+                session,
+                other,
+                plan_id=999_999,
+                data=WeekPlanRevisionInput(as_of=date(2026, 8, 26)),
+            )
+        assert missing.value.code == "plan.not_found"
+        assert session.scalar(select(func.count()).select_from(TrainingPlanRevision)) == 0
+
+        with pytest.raises(ValidationError) as unsupported:
+            WeekPlanRevisionInput.model_validate(
+                {"as_of": "2026-08-26", "workout_steps": [{"kind": "step"}]}
+            )
+        assert unsupported.value.errors()[0]["type"] == "extra_forbidden"
+
+        with pytest.raises(ValidationError):
+            WeekPlanRevisionInput()
+
+
+def test_revise_week_plan_invalid_change_persists_nothing(session_factory) -> None:
+    with session_factory() as session:
+        user = _user(session)
+        first = persist_week_candidate(session, user, _candidate())
+        plan = session.scalar(select(TrainingPlan))
+        assert plan is not None
+
+        with pytest.raises(WeeklyPlannerError) as invalid:
+            revise_week_plan(
+                session,
+                user,
+                plan_id=plan.id,
+                data=WeekPlanRevisionInput(
+                    availability=[AvailabilityInput(weekday=0, available=False)],
+                    as_of=date(2026, 8, 26),
+                ),
+            )
+        assert invalid.value.code == "planner.no_available_days"
+        assert session.scalar(select(func.count()).select_from(TrainingPlanRevision)) == 1
+        assert plan.current_revision_id == first.id

@@ -17,6 +17,7 @@ from app.models import (
     TrainingPlanRevision,
     User,
 )
+from app.services.planning.planning_commands import CycleRevisionInput
 from app.services.planning.planning_queries import get_active_goal, get_planning_profile
 from app.services.planning.registry import get_knowledge_registry
 from app.services.planning.registry_models import ContinuousStructure
@@ -76,6 +77,89 @@ class TrainingCyclePersistenceError(ValueError):
     def __init__(self, message: str, *, code: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+class CycleRevisionError(ValueError):
+    def __init__(self, message: str, *, code: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def _current_cycle_assumptions(
+    session: Session, user: User, cycle: TrainingCycle
+) -> dict[str, object]:
+    if cycle.current_revision_id is None:
+        return {}
+    revision = session.scalar(
+        select(TrainingCycleRevision).where(
+            TrainingCycleRevision.id == cycle.current_revision_id,
+            TrainingCycleRevision.cycle_id == cycle.id,
+            TrainingCycleRevision.owner_user_id == user.id,
+        )
+    )
+    if revision is None or not isinstance(revision.assumptions_json, dict):
+        return {}
+    return revision.assumptions_json
+
+
+def revise_training_cycle(
+    session: Session,
+    user: User,
+    *,
+    cycle_id: int,
+    data: CycleRevisionInput,
+    source_assistant_message_id: int | None = None,
+) -> TrainingCycleRevision:
+    cycle = session.scalar(
+        select(TrainingCycle).where(TrainingCycle.id == cycle_id, TrainingCycle.user_id == user.id)
+    )
+    if cycle is None:
+        raise CycleRevisionError("Mehrwochenplan nicht gefunden.", code="cycle.not_found")
+    if data.goal_id is not None:
+        goal_id: int | None = data.goal_id
+        event_type = data.event_type
+    elif data.event_type is not None:
+        goal_id = None
+        event_type = data.event_type
+    elif cycle.goal_id is not None:
+        goal_id = cycle.goal_id
+        event_type = None
+    else:
+        goal_id = None
+        event_type = cycle.event_type
+    current_assumptions = _current_cycle_assumptions(session, user, cycle)
+    raw_purpose = current_assumptions.get("purpose")
+    requested_purpose = data.purpose.strip() if isinstance(data.purpose, str) else ""
+    purpose = requested_purpose or (raw_purpose if isinstance(raw_purpose, str) else None)
+    raw_interrupted = current_assumptions.get("interrupted_weeks")
+    interrupted_weeks = (
+        frozenset(week for week in raw_interrupted if isinstance(week, int))
+        if isinstance(raw_interrupted, list)
+        else frozenset()
+    )
+    candidate = plan_training_cycle(
+        session,
+        user,
+        start_date=data.start_date or cycle.start_date,
+        target_date=data.target_date or cycle.target_date,
+        as_of=data.as_of or date.today(),
+        goal_id=goal_id,
+        event_type=event_type,
+        purpose=purpose,
+        interrupted_weeks=interrupted_weeks,
+    )
+    if candidate.goal_id == cycle.goal_id and candidate.start_date == cycle.start_date:
+        # Revision-driven identity evolution: the new current revision carries the
+        # revised target while accepted revisions keep their immutable values.
+        # A changed goal or start addresses a different cycle row instead.
+        cycle.event_type = candidate.event_type
+        cycle.target_date = candidate.target_date
+    return persist_training_cycle(
+        session,
+        user,
+        candidate,
+        source_assistant_message_id=source_assistant_message_id,
+    )
 
 
 @dataclass(frozen=True)

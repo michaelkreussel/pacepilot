@@ -2,6 +2,7 @@ from dataclasses import replace
 from datetime import date, datetime, timedelta
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -24,13 +25,16 @@ from app.models import (
 )
 from app.services.planning import multiweek_planner as multiweek_planner_module
 from app.services.planning.multiweek_planner import (
+    CycleRevisionError,
     MultiweekPlannerError,
     TrainingCyclePersistenceError,
     accept_training_cycle_revision,
     compose_training_cycle,
     persist_training_cycle,
     plan_training_cycle,
+    revise_training_cycle,
 )
+from app.services.planning.planning_commands import CycleRevisionInput
 from app.services.planning.planning_queries import (
     get_accepted_training_cycle,
     get_current_training_cycle,
@@ -659,6 +663,140 @@ def test_persist_advisory_cycle_succeeds(session_factory) -> None:
         assert revision.validation_report_json["warnings"] == list(candidate.warnings)
         assert revision.validation_report_json["alternative"] == candidate.alternative
         assert revision.assumptions_json["horizon_shortfall_weeks"] == 4
+
+
+def _seed_revision_cycle(session: Session, user: User, as_of: date):
+    _seed_cycle_availability(session, user)
+    _seed_cycle_history(session, user, as_of, runs_per_week=2, weeks=3)
+    session.commit()
+    candidate = plan_training_cycle(
+        session,
+        user,
+        start_date=START,
+        target_date=START + timedelta(weeks=7, days=6),
+        as_of=as_of,
+        purpose="Allgemeine Fitness",
+    )
+    return persist_training_cycle(session, user, candidate)
+
+
+def test_revise_cycle_with_target_change_creates_new_current_revision(
+    session_factory,
+) -> None:
+    as_of = date(2026, 8, 26)
+    with session_factory() as session:
+        user = _user(session)
+        first = _seed_revision_cycle(session, user, as_of)
+        cycle = session.get(TrainingCycle, first.cycle_id)
+        assert cycle is not None
+        accept_training_cycle_revision(session, user, cycle_id=cycle.id, revision_id=first.id)
+
+        second = revise_training_cycle(
+            session,
+            user,
+            cycle_id=cycle.id,
+            data=CycleRevisionInput(target_date=START + timedelta(weeks=9, days=6), as_of=as_of),
+        )
+
+        assert second.id != first.id
+        assert second.revision_number == 2
+        assert cycle.current_revision_id == second.id
+        assert cycle.accepted_revision_id == first.id
+        assert second.assumptions_json["purpose"] == "Allgemeine Fitness"
+        assert cycle.target_date == START + timedelta(weeks=9, days=6)
+        assert second.target_date == START + timedelta(weeks=9, days=6)
+        assert first.target_date == START + timedelta(weeks=7, days=6)
+
+
+def test_revise_cycle_with_start_change_creates_new_cycle_and_preserves_source(
+    session_factory,
+) -> None:
+    as_of = date(2026, 8, 26)
+    new_start = START + timedelta(weeks=1)
+    with session_factory() as session:
+        user = _user(session)
+        first = _seed_revision_cycle(session, user, as_of)
+        source = session.get(TrainingCycle, first.cycle_id)
+        assert source is not None
+        accept_training_cycle_revision(session, user, cycle_id=source.id, revision_id=first.id)
+
+        second = revise_training_cycle(
+            session,
+            user,
+            cycle_id=source.id,
+            data=CycleRevisionInput(
+                start_date=new_start,
+                target_date=new_start + timedelta(weeks=7, days=6),
+                as_of=as_of,
+            ),
+        )
+
+        assert second.cycle_id != source.id
+        assert source.current_revision_id == first.id
+        assert source.accepted_revision_id == first.id
+        assert source.target_date == START + timedelta(weeks=7, days=6)
+        assert session.scalar(select(func.count()).select_from(TrainingCycle)) == 2
+        assert second.assumptions_json["purpose"] == "Allgemeine Fitness"
+
+
+def test_revise_cycle_is_deterministic_and_keeps_accepted(session_factory) -> None:
+    as_of = date(2026, 8, 26)
+    with session_factory() as session:
+        user = _user(session)
+        first = _seed_revision_cycle(session, user, as_of)
+        cycle = session.get(TrainingCycle, first.cycle_id)
+        assert cycle is not None
+        accept_training_cycle_revision(session, user, cycle_id=cycle.id, revision_id=first.id)
+        data = CycleRevisionInput(target_date=START + timedelta(weeks=9, days=6), as_of=as_of)
+
+        second = revise_training_cycle(session, user, cycle_id=cycle.id, data=data)
+        third = revise_training_cycle(session, user, cycle_id=cycle.id, data=data)
+
+        assert second.id != first.id
+        assert third.id == second.id
+        assert cycle.current_revision_id == second.id
+        assert cycle.accepted_revision_id == first.id
+        assert session.scalar(select(func.count()).select_from(TrainingCycleRevision)) == 2
+
+
+def test_revise_cycle_rejects_other_user_unsupported_and_invalid(
+    session_factory,
+) -> None:
+    as_of = date(2026, 8, 26)
+    with session_factory() as session:
+        user = _user(session)
+        first = _seed_revision_cycle(session, user, as_of)
+        other = _user(session)
+        session.commit()
+
+        with pytest.raises(CycleRevisionError) as missing:
+            revise_training_cycle(
+                session,
+                other,
+                cycle_id=first.cycle_id,
+                data=CycleRevisionInput(as_of=as_of, purpose="Anderer Zweck"),
+            )
+        assert missing.value.code == "cycle.not_found"
+
+        with pytest.raises(MultiweekPlannerError) as invalid:
+            revise_training_cycle(
+                session,
+                user,
+                cycle_id=first.cycle_id,
+                data=CycleRevisionInput(target_date=START, as_of=as_of),
+            )
+        assert invalid.value.code == "cycle.target_date_invalid"
+
+        with pytest.raises(ValidationError) as unsupported:
+            CycleRevisionInput.model_validate(
+                {"as_of": "2026-08-26", "membership_steps": [{"role": "long_run"}]}
+            )
+        assert unsupported.value.errors()[0]["type"] == "extra_forbidden"
+
+        with pytest.raises(ValidationError):
+            CycleRevisionInput()
+
+        assert session.scalar(select(func.count()).select_from(TrainingCycleRevision)) == 1
 
 
 def test_cycle_requires_exact_active_goal_when_selected(session_factory) -> None:

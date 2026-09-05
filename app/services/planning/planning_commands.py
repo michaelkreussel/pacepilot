@@ -116,6 +116,40 @@ class PerformanceAnchorCreateInput(PlanningCommandInput):
         return value
 
 
+class WeekPlanRevisionInput(PlanningCommandInput):
+    week_start: date | None = None
+    availability: list[AvailabilityInput] | None = None
+    as_of: date | None = None
+
+    @model_validator(mode="after")
+    def require_change(self) -> Self:
+        if not self.model_fields_set:
+            raise ValueError("at least one plan revision field is required")
+        return self
+
+
+class CycleRevisionInput(PlanningCommandInput):
+    start_date: date | None = None
+    target_date: date | None = None
+    event_type: GoalEventType | None = None
+    goal_id: int | None = Field(default=None, gt=0)
+    purpose: str | None = Field(default=None, max_length=200)
+    as_of: date | None = None
+
+    @field_validator("event_type")
+    @classmethod
+    def validate_event_type(cls, value: str | None) -> str | None:
+        if value is not None and value not in GOAL_EVENT_TYPES:
+            raise ValueError("unsupported goal event type")
+        return value
+
+    @model_validator(mode="after")
+    def require_change(self) -> Self:
+        if not self.model_fields_set:
+            raise ValueError("at least one cycle revision field is required")
+        return self
+
+
 class PerformanceAnchorUpdateInput(PlanningCommandInput):
     kind: AnchorKind | None = None
     distance_m: float | None = Field(default=None, gt=0)
