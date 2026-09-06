@@ -66,12 +66,6 @@ class CoachMessage(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime)
 
     conversation: Mapped[CoachConversation] = relationship(back_populates="messages")
-    tool_calls: Mapped[list["CoachToolCall"]] = relationship(
-        back_populates="message",
-        cascade="all, delete-orphan",
-        passive_deletes=True,
-        order_by="CoachToolCall.id",
-    )
     generated_run: Mapped["CoachAssistantRun | None"] = relationship(
         back_populates="assistant_message",
         foreign_keys="CoachAssistantRun.assistant_message_id",
@@ -112,23 +106,3 @@ class CoachAssistantRun(Base):
         back_populates="generated_run", foreign_keys=[assistant_message_id]
     )
     workout: Mapped["Workout | None"] = relationship()
-
-
-class CoachToolCall(Base):
-    __tablename__ = "coach_tool_calls"
-    __table_args__ = (UniqueConstraint("message_id", "call_id"),)
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    message_id: Mapped[int] = mapped_column(
-        ForeignKey("coach_messages.id", ondelete="CASCADE"), index=True
-    )
-    call_id: Mapped[str] = mapped_column(String(100))
-    tool_name: Mapped[str] = mapped_column(String(100))
-    label: Mapped[str] = mapped_column(String(200))
-    input_summary: Mapped[str | None] = mapped_column(String(500))
-    status: Mapped[str] = mapped_column(String(20), default="running")
-    started_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime)
-    error_message: Mapped[str | None] = mapped_column(String(500))
-
-    message: Mapped[CoachMessage] = relationship(back_populates="tool_calls")

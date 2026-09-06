@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import get_settings
-from app.models import Activity, GarminAccount, User
+from app.models import Activity, CoachConversation, CoachMessage, GarminAccount, User
 from app.rate_limits import limiter
 from app.services.account_lifecycle import (
     collect_user_rows,
@@ -37,6 +37,26 @@ def test_complete_export_is_user_scoped_and_excludes_tokens(
         session.flush()
         account = GarminAccount(user_id=first.id, email="athlete@example.invalid")
         session.add(account)
+        exported_conversation = CoachConversation(user_id=first.id, title="Exportierter Chat")
+        private_conversation = CoachConversation(user_id=second.id, title="Privater Chat")
+        session.add_all([exported_conversation, private_conversation])
+        session.flush()
+        session.add_all(
+            [
+                CoachMessage(
+                    conversation=exported_conversation,
+                    role="assistant",
+                    content="Gespeicherte Antwort",
+                    status="completed",
+                ),
+                CoachMessage(
+                    conversation=private_conversation,
+                    role="assistant",
+                    content="Private Antwort",
+                    status="completed",
+                ),
+            ]
+        )
         raw = tmp_path / "data" / "raw" / "activities" / f"user-{first.id}" / "2026"
         raw.mkdir(parents=True)
         raw_file = raw / "synthetic-1.json.gz"
@@ -72,6 +92,8 @@ def test_complete_export_is_user_scoped_and_excludes_tokens(
                 names = set(archive.namelist())
                 users = json.loads(archive.read("database/users.json"))
                 activities = json.loads(archive.read("database/activities.json"))
+                conversations = json.loads(archive.read("database/coach_conversations.json"))
+                messages = json.loads(archive.read("database/coach_messages.json"))
                 manifest = json.loads(archive.read("manifest.json"))
 
                 assert users == [
@@ -85,13 +107,17 @@ def test_complete_export_is_user_scoped_and_excludes_tokens(
                     }
                 ]
                 assert [item["name"] for item in activities] == ["Synthetic Run"]
+                assert [item["title"] for item in conversations] == ["Exportierter Chat"]
+                assert [item["content"] for item in messages] == ["Gespeicherte Antwort"]
                 assert activities[0]["raw_file"] == "raw/activities/2026/synthetic-1.json.gz"
                 assert str(tmp_path) not in json.dumps(activities)
                 assert "raw/activities/2026/synthetic-1.json.gz" in names
                 assert all("token" not in name for name in names)
+                assert "database/coach_tool_calls.json" not in names
                 assert manifest["schema_version"] == 1
                 assert manifest["table_counts"]["users"] == 1
-                assert len(manifest["table_counts"]) == 40
+                assert "coach_tool_calls" not in manifest["table_counts"]
+                assert len(manifest["table_counts"]) == 39
         finally:
             remove_export(export_path)
 
@@ -124,6 +150,16 @@ def test_account_deletion_removes_database_rows_files_and_tokens(
         session.flush()
         account = GarminAccount(user_id=deleted_user.id, email="delete@example.invalid")
         session.add(account)
+        conversation = CoachConversation(user_id=deleted_user.id, title="Zu löschender Chat")
+        session.add(conversation)
+        session.flush()
+        message = CoachMessage(
+            conversation=conversation,
+            role="assistant",
+            content="Zu löschende Antwort",
+            status="completed",
+        )
+        session.add(message)
         session.add(
             Activity(
                 user_id=deleted_user.id,
@@ -136,6 +172,8 @@ def test_account_deletion_removes_database_rows_files_and_tokens(
         session.commit()
         deleted_id = deleted_user.id
         retained_id = retained_user.id
+        conversation_id = conversation.id
+        message_id = message.id
 
         raw = tmp_path / "data" / "raw" / "activities" / f"user-{deleted_id}"
         raw.mkdir(parents=True)
@@ -146,9 +184,12 @@ def test_account_deletion_removes_database_rows_files_and_tokens(
 
         result = delete_user_account(session, deleted_user)
 
+        session.expire_all()
         assert result.user_id == deleted_id
         assert session.get(User, deleted_id) is None
         assert session.get(User, retained_id) is not None
+        assert session.get(CoachConversation, conversation_id) is None
+        assert session.get(CoachMessage, message_id) is None
         assert not raw.exists()
         assert not tokens.exists()
 

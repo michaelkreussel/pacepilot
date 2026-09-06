@@ -32,7 +32,6 @@ def test_initial_migration_matches_models(tmp_path: Path) -> None:
         "coach_conversations",
         "coach_assistant_runs",
         "coach_messages",
-        "coach_tool_calls",
         "daily_data_statuses",
         "daily_fitness",
         "daily_health",
@@ -196,7 +195,7 @@ def test_feedback_owner_migration_upgrades_applied_revision_22(tmp_path: Path) -
         ).one() == (1, 1)
         assert connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
-        ).scalar_one() == ("20260906_38")
+        ).scalar_one() == ("20260906_39")
 
 
 def test_application_migration_uses_absolute_project_paths(tmp_path: Path, monkeypatch) -> None:
@@ -256,7 +255,7 @@ def test_workout_revision_migration_resumes_after_added_columns(tmp_path: Path) 
             "SELECT version_num FROM alembic_version"
         ).scalar_one()
         integrity = connection.exec_driver_sql("PRAGMA integrity_check").scalar_one()
-    assert revision == "20260906_38"
+    assert revision == "20260906_39"
     assert integrity == "ok"
     assert "workout_revisions" in inspector.get_table_names()
 
@@ -285,7 +284,7 @@ def test_reverted_athlete_profile_revision_upgrades_to_head(tmp_path: Path) -> N
         revision = connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
         ).scalar_one()
-    assert revision == "20260906_38"
+    assert revision == "20260906_39"
 
 
 def test_principal_fingerprint_migration_upgrades_applied_phase_4_schema(
@@ -733,7 +732,7 @@ def test_athlete_planning_inputs_fresh_and_filled_upgrade(tmp_path: Path) -> Non
         legacy = connection.exec_driver_sql("SELECT name FROM workouts WHERE id = 1").scalar()
     engine.dispose()
 
-    assert version == "20260906_38"
+    assert version == "20260906_39"
     assert {
         "athlete_planning_profiles",
         "athlete_goals",
@@ -1024,7 +1023,7 @@ def test_coach_message_lineage_migration_preserves_runs_and_workouts(tmp_path: P
         )
         assert (
             connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one()
-            == "20260906_38"
+            == "20260906_39"
         )
         assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
     source_key = next(
@@ -1303,7 +1302,7 @@ def test_plan_message_lineage_migration_preserves_artifacts_and_enforces_ownersh
         assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
         assert connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
-        ).scalar_one() == ("20260906_38")
+        ).scalar_one() == ("20260906_39")
 
     for table in ("training_plan_revisions", "training_cycle_revisions"):
         source_key = next(
@@ -1555,7 +1554,7 @@ def test_single_active_coach_response_migration_repairs_duplicates_and_enforces_
         ).all() == [(1, 3), (2, 6)]
         assert (
             connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one()
-            == "20260906_38"
+            == "20260906_39"
         )
         assert connection.exec_driver_sql(
             "SELECT DISTINCT artifacts_json FROM coach_messages"
@@ -1798,4 +1797,121 @@ def test_garmin_fit_authorization_upgrade_preserves_operations_and_constraints(
             "(1, 1, 'upload', 1, NULL, ?, 'invalid', '2026-09-01')",
             ("i" * 64,),
         )
+    engine.dispose()
+
+
+def test_drop_coach_tool_calls_preserves_coach_state_and_recreates_schema_on_downgrade(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "drop-coach-tool-calls.db"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    config = Config("alembic.ini")
+    config.attributes["database_url"] = database_url
+    command.upgrade(config, "20260906_38")
+    engine = create_engine(database_url)
+
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "INSERT INTO users (id, display_name, created_at) VALUES (1, 'Runner', '2026-09-06')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO coach_conversations (id, user_id, title, created_at, updated_at) "
+            "VALUES (1, 1, 'Training', '2026-09-06', '2026-09-06')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO coach_messages "
+            "(id, conversation_id, role, content, status, model_id, request_id, "
+            "prompt_template_version, operation_contract_version, failure_category, "
+            "artifacts_json, created_at, completed_at) VALUES "
+            "(1, 1, 'user', 'Plane meinen Lauf', 'completed', NULL, NULL, NULL, NULL, NULL, "
+            "'[]', '2026-09-06 08:00:00', '2026-09-06 08:00:00'), "
+            "(2, 1, 'assistant', 'Hier ist dein Plan.', 'completed', 'model-a', 'request-1', "
+            "'coach-prompt-v2', 'coach-operations-v1', NULL, "
+            '\'[{"type": "workout", "id": 7}]\', '
+            "'2026-09-06 08:00:01', '2026-09-06 08:00:02')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO coach_assistant_runs "
+            "(id, conversation_id, user_message_id, assistant_message_id, workout_id, status, "
+            "model_id, request_id, created_at, completed_at) VALUES "
+            "(1, 1, 1, 2, NULL, 'completed', 'model-a', 'request-1', "
+            "'2026-09-06 08:00:01', '2026-09-06 08:00:02')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO coach_tool_calls "
+            "(id, message_id, call_id, tool_name, label, input_summary, status, started_at, "
+            "completed_at, error_message) VALUES "
+            "(1, 2, 'completed-call', 'get_health_day', 'Gesundheit geprüft', NULL, "
+            "'completed', '2026-09-06 08:00:01', '2026-09-06 08:00:02', NULL), "
+            "(2, 2, 'unresolved-call', 'get_progress', 'Fortschritt geprüft', NULL, "
+            "'running', '2026-09-06 08:00:02', NULL, NULL)"
+        )
+    engine.dispose()
+
+    command.upgrade(config, "head")
+    command.check(config)
+    engine = create_engine(database_url)
+    inspector = inspect(engine)
+
+    assert "coach_tool_calls" not in inspector.get_table_names()
+    with engine.connect() as connection:
+        assert connection.exec_driver_sql(
+            "SELECT id, user_id, title FROM coach_conversations"
+        ).one() == (1, 1, "Training")
+        assert connection.exec_driver_sql(
+            "SELECT id, role, content, status, artifacts_json FROM coach_messages ORDER BY id"
+        ).all() == [
+            (1, "user", "Plane meinen Lauf", "completed", "[]"),
+            (
+                2,
+                "assistant",
+                "Hier ist dein Plan.",
+                "completed",
+                '[{"type": "workout", "id": 7}]',
+            ),
+        ]
+        assert connection.exec_driver_sql(
+            "SELECT conversation_id, user_message_id, assistant_message_id, status, request_id "
+            "FROM coach_assistant_runs"
+        ).one() == (1, 1, 2, "completed", "request-1")
+        assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
+        assert (
+            connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one()
+            == "20260906_39"
+        )
+    engine.dispose()
+
+    command.downgrade(config, "20260906_38")
+    engine = create_engine(database_url)
+    inspector = inspect(engine)
+    assert {column["name"] for column in inspector.get_columns("coach_tool_calls")} == {
+        "id",
+        "message_id",
+        "call_id",
+        "tool_name",
+        "label",
+        "input_summary",
+        "status",
+        "started_at",
+        "completed_at",
+        "error_message",
+    }
+    assert {
+        tuple(constraint["column_names"])
+        for constraint in inspector.get_unique_constraints("coach_tool_calls")
+    } == {("message_id", "call_id")}
+    assert {
+        (index["name"], tuple(index["column_names"]))
+        for index in inspector.get_indexes("coach_tool_calls")
+    } == {("ix_coach_tool_calls_message_id", ("message_id",))}
+    assert inspector.get_foreign_keys("coach_tool_calls") == [
+        {
+            "name": None,
+            "constrained_columns": ["message_id"],
+            "referred_schema": None,
+            "referred_table": "coach_messages",
+            "referred_columns": ["id"],
+            "options": {"ondelete": "CASCADE"},
+        }
+    ]
     engine.dispose()

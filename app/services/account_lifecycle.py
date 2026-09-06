@@ -129,9 +129,8 @@ def collect_user_rows(session: Session, user_id: int) -> dict[str, list[dict[str
 
     conversations = add("coach_conversations", "user_id", [user_id])
     conversation_ids = _ids(conversations)
-    messages = add("coach_messages", "conversation_id", conversation_ids)
+    add("coach_messages", "conversation_id", conversation_ids)
     add("coach_assistant_runs", "conversation_id", conversation_ids)
-    add("coach_tool_calls", "message_id", _ids(messages))
 
     add("pre_session_feedback", "user_id", [user_id])
     add("post_session_feedback", "user_id", [user_id])

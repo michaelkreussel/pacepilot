@@ -27,7 +27,6 @@ from app.models import (
     AthleteGoal,
     CoachConversation,
     CoachMessage,
-    CoachToolCall,
     DailyHealth,
     GarminSyncState,
     PerformanceAnchor,
@@ -832,19 +831,6 @@ def test_coach_streams_and_persists_conversation(
         ]
         assert messages[1].content.endswith("leicht über deinem Basiswert.")
         assert session.scalar(select(Workout)) is None
-        session.add(
-            CoachToolCall(
-                message=messages[1],
-                call_id="historical-call",
-                tool_name="legacy_tool",
-                label="Veraltete Werkzeugaktivität",
-                input_summary="Veraltete Eingabezusammenfassung",
-                status="completed",
-                completed_at=utcnow(),
-            )
-        )
-        session.commit()
-
     page = client.get(f"/coach/{conversation_id}").text
     assert 'aria-label="Neuen Chat starten"' in page
     assert 'aria-label="Chat löschen"' in page
@@ -853,10 +839,6 @@ def test_coach_streams_and_persists_conversation(
     assert "Vorschläge möglich" not in page
     assert "data-coach-activity" not in page
     assert "data-tool-call" not in page
-    assert "Veraltete Werkzeugaktivität" not in page
-    assert "Veraltete Eingabezusammenfassung" not in page
-    assert "Schritte ausgeführt" not in page
-    assert "nachgedacht" not in page
     assert "Antwort abgeschlossen" in page
     assert cast(str, started["user_html"]) in page
     assert cast(str, completed["html"]) in page
@@ -960,7 +942,6 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
         assistant_message = session.get(CoachMessage, assistant_message_id)
         assert assistant_message is not None
         assert assistant_message.status == "completed"
-        assert session.scalar(select(func.count(CoachToolCall.id))) == 0
         workout = session.scalar(
             select(Workout).where(Workout.source_assistant_message_id == assistant_message_id)
         )
@@ -3012,18 +2993,8 @@ def test_delete_conversation_cascades_and_preserves_selection(
         )
         session.add(assistant)
         session.flush()
-        tool_call = CoachToolCall(
-            message=assistant,
-            call_id="delete-test",
-            tool_name="get_health_day",
-            label="Gesundheitstag geprüft",
-            status="completed",
-            completed_at=utcnow(),
-        )
-        session.add(tool_call)
         session.commit()
         message_id = assistant.id
-        tool_call_id = tool_call.id
 
     response = client.post(
         f"/coach/{deleted_id}/delete",
@@ -3036,7 +3007,6 @@ def test_delete_conversation_cascades_and_preserves_selection(
     with session_factory() as session:
         assert session.get(CoachConversation, deleted_id) is None
         assert session.get(CoachMessage, message_id) is None
-        assert session.get(CoachToolCall, tool_call_id) is None
 
     response = client.post(
         f"/coach/{selected_id}/delete",
