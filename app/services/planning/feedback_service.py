@@ -7,7 +7,6 @@ from app.models import (
     PreSessionFeedback,
     User,
     Workout,
-    WorkoutValidationRun,
 )
 from app.models.user import utcnow
 from app.services.planning.safety_triage import (
@@ -106,7 +105,6 @@ class FeedbackCommands:
         if feedback is None:
             raise FeedbackNotFoundError("Feedback nicht gefunden")
         workout_id = feedback.workout_id
-        self._purge_validation_evidence(f"pre:{feedback.id}")
         self.session.delete(feedback)
         self._invalidate_context(workout_ids={workout_id} if workout_id else set())
         return workout_id
@@ -122,22 +120,11 @@ class FeedbackCommands:
             raise FeedbackNotFoundError("Feedback nicht gefunden")
         activity_id = feedback.activity_id
         workout_ids = {feedback.workout_id} if feedback.workout_id else set()
-        self._purge_validation_evidence(f"post:{feedback.id}")
         self.session.delete(feedback)
         self._invalidate_context(workout_ids=workout_ids)
         return activity_id
 
     def _invalidate_context(self, *, workout_ids: set[int]) -> None:
-        now = utcnow()
-        user_workout_ids = select(Workout.id).where(Workout.user_id == self.user.id)
-        self.session.execute(
-            update(WorkoutValidationRun)
-            .where(
-                WorkoutValidationRun.workout_id.in_(user_workout_ids),
-                WorkoutValidationRun.expires_at > now,
-            )
-            .values(expires_at=now)
-        )
         if workout_ids:
             self.session.execute(
                 update(Workout)
@@ -155,18 +142,6 @@ class FeedbackCommands:
             )
             .values(lock_version=Workout.lock_version + 1)
         )
-
-    def _purge_validation_evidence(self, feedback_reference: str) -> None:
-        runs = list(
-            self.session.scalars(
-                select(WorkoutValidationRun)
-                .join(Workout, Workout.id == WorkoutValidationRun.workout_id)
-                .where(Workout.user_id == self.user.id)
-            )
-        )
-        for run in runs:
-            if feedback_reference in run.feedback_ids_json:
-                self.session.delete(run)
 
 
 class FeedbackQueries:

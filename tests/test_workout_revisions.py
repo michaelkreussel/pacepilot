@@ -13,6 +13,7 @@ from app.models import (
     WorkoutEvent,
     WorkoutGarminBinding,
     WorkoutRevision,
+    WorkoutValidationRun,
 )
 from app.models.user import utcnow
 from app.services.planning.validator import WorkoutInput
@@ -507,27 +508,41 @@ def test_edit_creates_next_revision(session_factory: sessionmaker[Session]) -> N
         assert revisions[1].name == "Revision 2"
 
 
-def test_changed_context_creates_validation_run(
+def test_commands_store_structural_reports_without_validation_runs(
     session_factory: sessionmaker[Session],
 ) -> None:
     with session_factory() as session:
         service, _user = _service(session)
         workout = service.create(_input("Context"))
-        assert workout.current_revision_id is not None
-        revision_id = workout.current_revision_id
-        command = _accept_command(session, workout.id)
-
-        service.validate_revision_context(
+        service.update(workout.id, _input("Updated context"))
+        service.accept(workout.id, _accept_command(session, workout.id))
+        assert workout.accepted_revision_id is not None
+        service.schedule(
             workout.id,
-            revision_id,
-            command.context_fingerprint,
+            ScheduleWorkoutCommand(
+                revision_id=workout.accepted_revision_id,
+                scheduled_for=date(2026, 8, 23),
+                expected_lock_version=workout.lock_version,
+            ),
         )
-        assert len(workout.revisions[0].validation_runs) == 2
-        service.validate_revision_context(workout.id, revision_id, "a" * 64)
-        session.expire_all()
-        revision = session.get(WorkoutRevision, revision_id)
-        assert revision is not None
-        assert len(revision.validation_runs) == 3
+
+        revisions = list(
+            session.scalars(select(WorkoutRevision).where(WorkoutRevision.workout_id == workout.id))
+        )
+        assert len(revisions) == 2
+        assert all(
+            revision.validation_report_json is not None
+            and revision.validation_report_json["valid"] is True
+            for revision in revisions
+        )
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(WorkoutValidationRun)
+                .where(WorkoutValidationRun.workout_id == workout.id)
+            )
+            == 0
+        )
 
 
 def test_delete_tombstones_workout(session_factory: sessionmaker[Session]) -> None:

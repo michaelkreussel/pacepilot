@@ -1,7 +1,7 @@
 import hashlib
 import json
 from dataclasses import dataclass, replace
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from typing import Any, cast
 
 from sqlalchemy import func, select, update
@@ -18,7 +18,6 @@ from app.models import (
     WorkoutGarminOperation,
     WorkoutGarminRemoteIdentity,
     WorkoutRevision,
-    WorkoutValidationRun,
 )
 from app.models.user import utcnow
 from app.repositories.users import get_or_create_garmin_account
@@ -29,13 +28,7 @@ from app.services.garmin.workout_operations import (
     GarminTrainingFitAuthorization,
     GarminWorkoutOperations,
 )
-from app.services.planning.safety_triage import (
-    SAFETY_RULE_SET_VERSION,
-    SafetyContext,
-    TriageOutcome,
-    ValidationMode,
-    build_safety_context,
-)
+from app.services.planning.safety_triage import SafetyContext, ValidationMode, build_safety_context
 from app.services.planning.training_fit import (
     TrainingFitAssessment,
     TrainingFitOutcome,
@@ -44,7 +37,6 @@ from app.services.planning.training_fit import (
 from app.services.planning.validator import WorkoutInput, validate_workout
 from app.services.planning.workout_definition import definition_to_json
 from app.services.planning.workout_revision import (
-    STRUCTURAL_RULE_SET_VERSION,
     AcceptedWorkoutExecution,
     AcceptRevisionCommand,
     RejectRevisionCommand,
@@ -138,12 +130,10 @@ class WorkoutService:
         self.session.flush()
         revision = self._create_revision(workout, data, revision_number=1, parent_revision_id=None)
         self.session.flush()
-        self._record_structural_validation(workout, revision)
         workout.current_revision_id = revision.id
         workout.materialized_revision_id = revision.id
         self.session.add(WorkoutGarminBinding(workout_id=workout.id))
         self._event(workout, revision, "create")
-        self._validate_context(workout, revision, self._safety_context(workout, revision))
         self.session.commit()
         return workout
 
@@ -202,7 +192,6 @@ class WorkoutService:
             metadata=revision_metadata,
         )
         self.session.flush()
-        self._record_structural_validation(workout, revision)
         workout.current_revision_id = revision.id
         workout.materialized_revision_id = revision.id
         self.session.add(WorkoutGarminBinding(workout_id=workout.id))
@@ -219,20 +208,6 @@ class WorkoutService:
             skip_existing=False,
         )
         try:
-            validation = self._validate_context(
-                workout, revision, self._safety_context(workout, revision)
-            )
-            if metadata.source_type != "coach_single" and not validation.valid:
-                outcome = str(validation.report_json.get("outcome", "clarify"))
-                self.session.rollback()
-                raise WorkoutTransitionError(
-                    (
-                        "Ein Sicherheitshinweis blockiert diesen Trainingsvorschlag."
-                        if outcome == TriageOutcome.SAFETY_STOP.value
-                        else "Vor einem Trainingsvorschlag fehlen eindeutige Sicherheitsangaben."
-                    ),
-                    code="workout.proposal_safety_blocked",
-                )
             if commit:
                 self.session.commit()
             else:
@@ -314,7 +289,6 @@ class WorkoutService:
             metadata=metadata,
         )
         self.session.flush()
-        self._record_structural_validation(workout, revision)
         result = cast(
             "CursorResult[Any]",
             self.session.execute(
@@ -358,7 +332,6 @@ class WorkoutService:
             idempotency_key=idempotency_key,
             skip_existing=False,
         )
-        self._validate_context(workout, revision, self._safety_context(workout, revision))
         try:
             self.session.commit()
         except IntegrityError:
@@ -463,7 +436,6 @@ class WorkoutService:
             metadata=metadata,
         )
         self.session.flush()
-        self._record_structural_validation(replacement, revision)
         replacement.current_revision_id = revision.id
         replacement.materialized_revision_id = revision.id
         self.session.add(WorkoutGarminBinding(workout_id=replacement.id))
@@ -516,7 +488,6 @@ class WorkoutService:
             idempotency_key=idempotency_key,
             skip_existing=False,
         )
-        self._validate_context(replacement, revision, self._safety_context(replacement, revision))
         try:
             self.session.commit()
         except IntegrityError:
@@ -927,7 +898,6 @@ class WorkoutService:
             metadata=metadata,
         )
         self.session.flush()
-        self._record_structural_validation(workout, revision)
         change_labels = self._change_labels(current, revision)
         if current.source_type == "coach_single":
             result = cast(
@@ -1003,7 +973,6 @@ class WorkoutService:
                 },
                 idempotency_key=idempotency_key,
             )
-            self._validate_context(workout, revision, self._safety_context(workout, revision))
             self.session.commit()
             self.session.refresh(workout)
             return workout
@@ -1018,7 +987,6 @@ class WorkoutService:
             workout.materialized_revision_id = revision.id
             self._materialize(workout, revision)
         self._event(workout, revision, "revise")
-        self._validate_context(workout, revision, self._safety_context(workout, revision))
         self.session.commit()
         return workout
 
@@ -1717,24 +1685,6 @@ class WorkoutService:
         self._event(workout, revision, "delete")
         self.session.commit()
 
-    def validate_revision_context(
-        self, workout_id: int, revision_id: int, context_fingerprint: str
-    ) -> WorkoutValidationRun:
-        workout = self.get(workout_id)
-        revision = self._revision(workout, revision_id)
-        safety_context = self._safety_context(workout, revision)
-        run = self._validate_context(
-            workout,
-            revision,
-            SafetyContext(
-                fingerprint=context_fingerprint,
-                feedback_ids=safety_context.feedback_ids,
-                report=safety_context.report,
-            ),
-        )
-        self.session.commit()
-        return run
-
     def acceptance_context(self, workout_id: int) -> SafetyContext:
         workout = self.get(workout_id)
         return self._safety_context(workout, self._current_revision(workout))
@@ -2178,66 +2128,6 @@ class WorkoutService:
             revision,
             mode=mode,
         )
-
-    def _validate_context(
-        self,
-        workout: Workout,
-        revision: WorkoutRevision,
-        safety_context: SafetyContext,
-        validation_kind: str = "contextual",
-        force: bool = False,
-    ) -> WorkoutValidationRun:
-        now = utcnow()
-        existing = (
-            None
-            if force
-            else self.session.scalar(
-                select(WorkoutValidationRun)
-                .where(
-                    WorkoutValidationRun.workout_id == workout.id,
-                    WorkoutValidationRun.revision_id == revision.id,
-                    WorkoutValidationRun.validation_kind == validation_kind,
-                    WorkoutValidationRun.rule_set_version == SAFETY_RULE_SET_VERSION,
-                    WorkoutValidationRun.context_fingerprint == safety_context.fingerprint,
-                    WorkoutValidationRun.expires_at > now,
-                )
-                .order_by(WorkoutValidationRun.evaluated_at.desc())
-            )
-        )
-        if existing is not None:
-            return existing
-        run = WorkoutValidationRun(
-            workout_id=workout.id,
-            revision_id=revision.id,
-            validation_kind=validation_kind,
-            rule_set_version=SAFETY_RULE_SET_VERSION,
-            context_fingerprint=safety_context.fingerprint,
-            feedback_ids_json=list(safety_context.feedback_ids),
-            evaluated_at=now,
-            expires_at=now + timedelta(hours=1),
-            valid=safety_context.report.valid,
-            report_json=safety_context.report.to_json(),
-        )
-        self.session.add(run)
-        return run
-
-    def _record_structural_validation(
-        self, workout: Workout, revision: WorkoutRevision
-    ) -> WorkoutValidationRun:
-        run = WorkoutValidationRun(
-            workout_id=workout.id,
-            revision_id=revision.id,
-            validation_kind="structural",
-            rule_set_version=STRUCTURAL_RULE_SET_VERSION,
-            context_fingerprint=revision.content_hash,
-            feedback_ids_json=[],
-            evaluated_at=utcnow(),
-            expires_at=None,
-            valid=True,
-            report_json=revision.validation_report_json or structural_validation_report(),
-        )
-        self.session.add(run)
-        return run
 
     def _authorize_local_action(
         self,

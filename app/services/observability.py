@@ -8,7 +8,6 @@ from app.models import (
     WorkoutEvent,
     WorkoutGarminOperation,
     WorkoutRevision,
-    WorkoutValidationRun,
 )
 
 
@@ -36,9 +35,9 @@ def _evidence_refs(revision: WorkoutRevision) -> list[str]:
     return sorted({value for value in values if isinstance(value, str) and 0 < len(value) <= 100})
 
 
-def decision_trace(revision: WorkoutRevision, runs: list[WorkoutValidationRun]) -> dict[str, Any]:
+def decision_trace(revision: WorkoutRevision) -> dict[str, Any]:
     return {
-        "schema_version": "decision-trace.v1",
+        "schema_version": "decision-trace.v2",
         "workout_id": revision.workout_id,
         "revision_id": revision.id,
         "revision_number": revision.revision_number,
@@ -57,27 +56,11 @@ def decision_trace(revision: WorkoutRevision, runs: list[WorkoutValidationRun]) 
         },
         "evidence_refs": _evidence_refs(revision),
         "revision_rule_codes": _safe_codes(revision.validation_report_json),
-        "validations": [
-            {
-                "kind": run.validation_kind,
-                "rule_set_version": run.rule_set_version,
-                "evaluated_at": run.evaluated_at.isoformat() + "Z",
-                "valid": run.valid,
-                "rule_codes": _safe_codes(run.report_json),
-            }
-            for run in sorted(runs, key=lambda item: (item.evaluated_at, item.id))
-        ],
     }
 
 
 def operational_metrics(session: Session) -> dict[str, Any]:
     event_counts = Counter(session.scalars(select(WorkoutEvent.action)))
-    validation_counts = Counter(
-        (kind, "valid" if valid else "invalid")
-        for kind, valid in session.execute(
-            select(WorkoutValidationRun.validation_kind, WorkoutValidationRun.valid)
-        )
-    )
     garmin_counts = Counter(
         (operation_type, status)
         for operation_type, status in session.execute(
@@ -98,12 +81,8 @@ def operational_metrics(session: Session) -> dict[str, Any]:
         "adapt_replace_propose",
     )
     return {
-        "schema_version": "operational-metrics.v1",
+        "schema_version": "operational-metrics.v2",
         "lifecycle": {action: event_counts[action] for action in lifecycle_actions},
-        "validation": {
-            f"{kind}.{outcome}": count
-            for (kind, outcome), count in sorted(validation_counts.items())
-        },
         "garmin_operations": {
             f"{operation_type}.{status}": count
             for (operation_type, status), count in sorted(garmin_counts.items())

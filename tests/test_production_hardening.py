@@ -175,7 +175,7 @@ def test_prompt_injection_corpus_cannot_expand_coach_mutation_authority() -> Non
     )
 
 
-def _revision_graph(session: Session) -> tuple[WorkoutRevision, list[WorkoutValidationRun]]:
+def _revision_graph(session: Session) -> WorkoutRevision:
     user = User(display_name="Trace Athlete")
     session.add(user)
     session.flush()
@@ -240,25 +240,28 @@ def _revision_graph(session: Session) -> tuple[WorkoutRevision, list[WorkoutVali
         )
     )
     session.commit()
-    return revision, [run]
+    return revision
 
 
 def test_decision_trace_and_metrics_exclude_sensitive_payloads(
     session_factory: sessionmaker[Session],
 ) -> None:
     with session_factory() as session:
-        revision, runs = _revision_graph(session)
+        revision = _revision_graph(session)
 
-        trace = decision_trace(revision, runs)
+        trace = decision_trace(revision)
         metrics = operational_metrics(session)
 
     serialized = json.dumps(trace)
+    assert trace["schema_version"] == "decision-trace.v2"
     assert trace["evidence_refs"] == ["EVIDENCE-SYNTHETIC-001"]
     assert trace["revision_rule_codes"] == ["validation.synthetic"]
     assert "Private" not in serialized
     assert "private_health_value" not in serialized
     assert "feedback" not in serialized
+    assert "validations" not in trace
     assert metrics["lifecycle"]["propose"] == 1
+    assert "validation" not in metrics
 
 
 def test_metrics_endpoint_is_hidden_without_valid_bearer_token(
@@ -273,7 +276,7 @@ def test_metrics_endpoint_is_hidden_without_valid_bearer_token(
 
     assert hidden.status_code == 404
     assert visible.status_code == 200
-    assert visible.json()["schema_version"] == "operational-metrics.v1"
+    assert visible.json()["schema_version"] == "operational-metrics.v2"
 
 
 @pytest.mark.parametrize(

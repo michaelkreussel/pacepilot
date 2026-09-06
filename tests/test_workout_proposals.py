@@ -164,7 +164,7 @@ def test_easy_run_proposal_is_deterministic_revisioned_and_unscheduled(
                 .select_from(WorkoutValidationRun)
                 .where(WorkoutValidationRun.workout_id == workout.id)
             )
-            == 2
+            == 0
         )
         session.add(
             PreSessionFeedback(

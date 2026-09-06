@@ -6,7 +6,7 @@ from sqlalchemy import select
 from app.auth import CurrentUser
 from app.config import get_settings
 from app.database import SessionDep
-from app.models import Workout, WorkoutRevision, WorkoutValidationRun
+from app.models import Workout, WorkoutRevision
 from app.services.observability import decision_trace, operational_metrics
 
 router = APIRouter(prefix="/api")
@@ -30,15 +30,7 @@ def workout_decision_trace(
     )
     if revision is None:
         raise HTTPException(status_code=404, detail="Revision nicht gefunden")
-    runs = list(
-        session.scalars(
-            select(WorkoutValidationRun).where(
-                WorkoutValidationRun.workout_id == workout_id,
-                WorkoutValidationRun.revision_id == revision_id,
-            )
-        )
-    )
-    return decision_trace(revision, runs)
+    return decision_trace(revision)
 
 
 @router.get("/metrics")
