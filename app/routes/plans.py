@@ -13,6 +13,7 @@ from app.repositories.workouts import workouts_between
 from app.services.planning.multiweek_planner import (
     TrainingCyclePersistenceError,
     accept_training_cycle_revision,
+    delete_training_cycle,
     persist_training_cycle,
     plan_training_cycle,
 )
@@ -176,9 +177,39 @@ def accept_training_cycle(
     return RedirectResponse(f"/plans/cycles/{cycle_id}", status_code=303)
 
 
+@router.post("/cycles/{cycle_id}/delete")
+def delete_training_cycle_route(
+    cycle_id: int,
+    session: SessionDep,
+    user: CurrentUser,
+    confirm: Annotated[bool, Form()] = False,
+) -> RedirectResponse:
+    if not confirm:
+        params = urlencode({"error": "Bitte das Löschen ausdrücklich bestätigen."})
+        return RedirectResponse(
+            f"/plans/cycles/{cycle_id}?{params}",
+            status_code=303,
+        )
+    try:
+        delete_training_cycle(session, user, cycle_id=cycle_id)
+    except TrainingCyclePersistenceError as exc:
+        if exc.code == "cycle.not_found":
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return RedirectResponse(
+            f"/plans/cycles/{cycle_id}?{urlencode({'error': str(exc)})}",
+            status_code=303,
+        )
+    return RedirectResponse("/plans", status_code=303)
+
+
 @router.get("/cycles/{cycle_id}", response_class=HTMLResponse)
 def training_cycle_detail(
-    cycle_id: int, request: Request, session: SessionDep, user: CurrentUser
+    cycle_id: int,
+    request: Request,
+    session: SessionDep,
+    user: CurrentUser,
+    error: Annotated[str | None, Query(max_length=500)] = None,
+    notice: Annotated[str | None, Query(max_length=500)] = None,
 ) -> HTMLResponse:
     loaded = get_current_training_cycle(session, user.id, cycle_id)
     if loaded is None:
@@ -197,6 +228,8 @@ def training_cycle_detail(
             weeks=weeks,
             goal_type_label=GOAL_TYPE_LABELS.get(cycle.event_type, cycle.event_type),
             is_accepted=cycle.accepted_revision_id == revision.id,
+            error=error,
+            notice=notice,
         ),
     )
 

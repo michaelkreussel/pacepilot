@@ -30,6 +30,7 @@ EXPERIENCE_LEVELS = ("novice", "intermediate", "advanced")
 GOAL_EVENT_TYPES = ("general_fitness", "5k", "10k", "half_marathon", "marathon")
 GOAL_STATUSES = ("active", "achieved", "archived")
 ANCHOR_KINDS = ("race", "time_trial", "manual")
+ANCHOR_SOURCES = ("manual", "garmin")
 CYCLE_STATUSES = ("active", "archived")
 
 
@@ -113,6 +114,10 @@ class PerformanceAnchor(Base):
             "kind IN ('race', 'time_trial', 'manual')",
             name="ck_performance_anchors_kind",
         ),
+        CheckConstraint(
+            "source IN ('manual', 'garmin')",
+            name="ck_performance_anchors_source",
+        ),
         CheckConstraint("distance_m > 0", name="ck_performance_anchors_distance_positive"),
         CheckConstraint("duration_s > 0", name="ck_performance_anchors_duration_positive"),
         Index("ix_performance_anchors_user_achieved", "user_id", "achieved_on"),
@@ -121,6 +126,7 @@ class PerformanceAnchor(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     kind: Mapped[str] = mapped_column(String(20))
+    source: Mapped[str] = mapped_column(String(20), default="manual")
     distance_m: Mapped[float] = mapped_column(Float)
     duration_s: Mapped[float] = mapped_column(Float)
     achieved_on: Mapped[date] = mapped_column(Date)

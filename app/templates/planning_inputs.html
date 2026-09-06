@@ -1,0 +1,305 @@
+{% extends "base.html" %}
+{% block title %}Trainingsgrundlagen · PacePilot{% endblock %}
+{% block content %}
+<div class="mx-auto w-full max-w-3xl space-y-6">
+  <header class="space-y-2">
+    <p class="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">Planung</p>
+    <h1 class="font-display text-3xl font-semibold tracking-tight">Trainingsgrundlagen</h1>
+    <p class="max-w-2xl text-sm leading-6 text-muted-foreground">Leistungsanker, Ziele und Trainingsprofil einsehen und bearbeiten. Dieselben Angaben kann auch der KI-Coach im Chat pflegen.</p>
+  </header>
+
+  {% if error %}<div class="rounded-xl border border-danger/25 bg-danger-subtle p-4 text-sm text-danger-emphasis" role="alert"><strong>Änderung nicht gespeichert.</strong><p class="mt-1">{{ error }}</p></div>{% endif %}
+  {% if notice %}<div class="rounded-xl border border-success/25 bg-success-subtle p-4 text-sm text-success-emphasis" role="status">{{ notice }}</div>{% endif %}
+
+  <section class="space-y-4 rounded-xl border border-border bg-surface p-5" aria-labelledby="anchors-title">
+    <div>
+      <h2 class="text-lg font-semibold" id="anchors-title">Leistungsanker</h2>
+      <p class="mt-1 text-sm text-muted-foreground">Bestleistungen mit Datum. Anker außerhalb des 180-Tage-Fensters oder als unzuverlässig markierte Anker fließen nicht in die Intensitätssteuerung ein.</p>
+    </div>
+    {% if anchors %}
+    <ul class="space-y-4">
+      {% for anchor in anchors %}
+      <li class="rounded-lg border border-border p-4">
+        <div class="flex flex-wrap items-baseline justify-between gap-2">
+          <p class="text-sm font-semibold">{{ anchor_kind_labels.get(anchor.kind, anchor.kind) }} · {{ '%.2f' % (anchor.distance_m / 1000) }} km · {{ anchor.duration_s|precise_duration }}{% if anchor.source == 'garmin' %} · Garmin{% endif %}</p>
+          <p class="text-xs text-muted-foreground">{{ anchor.achieved_on|date }}{% if not anchor.reliable %} · Unzuverlässig{% endif %}</p>
+        </div>
+        {% if anchor.notes %}<p class="mt-1 text-sm text-muted-foreground">{{ anchor.notes }}</p>{% endif %}
+        <details class="mt-3">
+          <summary class="cursor-pointer text-sm font-semibold text-primary-emphasis">Bearbeiten</summary>
+          <form method="post" action="/planning-inputs/anchors/{{ anchor.id }}" class="mt-3 space-y-3">
+            {{ csrf_field() }}
+            <div class="grid gap-3 sm:grid-cols-2">
+              <div>
+                <label class="block text-sm font-semibold" for="anchor-kind-{{ anchor.id }}">Art</label>
+                <select class="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2" id="anchor-kind-{{ anchor.id }}" name="kind">
+                  {% for value in anchor_kinds %}
+                  <option value="{{ value }}"{% if value == anchor.kind %} selected{% endif %}>{{ anchor_kind_labels.get(value, value) }}</option>
+                  {% endfor %}
+                </select>
+              </div>
+              <div>
+                <label class="block text-sm font-semibold" for="anchor-date-{{ anchor.id }}">Datum</label>
+                <input class="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2" id="anchor-date-{{ anchor.id }}" name="achieved_on" type="date" value="{{ anchor.achieved_on.isoformat() }}" max="{{ today }}" required>
+              </div>
+              <div>
+                <label class="block text-sm font-semibold" for="anchor-dist-{{ anchor.id }}">Distanz (km)</label>
+                <input class="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2" id="anchor-dist-{{ anchor.id }}" name="distance_km" type="text" inputmode="decimal" value="{{ anchor.distance_m / 1000 }}" required>
+              </div>
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-semibold" for="anchor-min-{{ anchor.id }}">Minuten</label>
+                  <input class="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2" id="anchor-min-{{ anchor.id }}" name="minutes" type="number" min="0" value="{{ (anchor.duration_s // 60)|int }}" required>
+                </div>
+                <div>
+                  <label class="block text-sm font-semibold" for="anchor-sec-{{ anchor.id }}">Sekunden</label>
+                  <input class="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2" id="anchor-sec-{{ anchor.id }}" name="seconds" type="number" min="0" max="59" value="{{ ((anchor.duration_s % 60)|int) }}" required>
+                </div>
+              </div>
+            </div>
+            <div>
+              <label class="block text-sm font-semibold" for="anchor-notes-{{ anchor.id }}">Notiz (optional)</label>
+              <input class="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2" id="anchor-notes-{{ anchor.id }}" name="notes" type="text" maxlength="2000" value="{{ anchor.notes or '' }}">
+            </div>
+            <label class="flex items-center gap-2 text-sm"><input type="checkbox" name="reliable" value="true"{% if anchor.reliable %} checked{% endif %}> Verlässlich</label>
+            <div class="flex flex-wrap items-center justify-between gap-3">
+              <button class="inline-flex items-center justify-center rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:bg-primary-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" type="submit">Speichern</button>
+            </div>
+          </form>
+          <form method="post" action="/planning-inputs/anchors/{{ anchor.id }}/deactivate" class="mt-2">
+            {{ csrf_field() }}
+            <button class="text-sm font-semibold text-muted-foreground hover:text-foreground" type="submit">Deaktivieren</button>
+          </form>
+          <form method="post" action="/planning-inputs/anchors/{{ anchor.id }}/delete" class="mt-2 space-x-3">
+            {{ csrf_field() }}
+            <label class="text-sm"><input type="checkbox" name="confirm" value="true"> Endgültig löschen</label>
+            <button class="text-sm font-semibold text-danger-emphasis hover:text-foreground" type="submit">Löschen</button>
+          </form>
+        </details>
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="text-sm text-muted-foreground">Noch keine Leistungsanker erfasst.</p>
+    {% endif %}
+    <details class="rounded-lg border border-border p-4">
+      <summary class="cursor-pointer text-sm font-semibold text-primary-emphasis">Neuen Leistungsanker erfassen</summary>
+      <form method="post" action="/planning-inputs/anchors" class="mt-3 space-y-3">
+        {{ csrf_field() }}
+        <div class="grid gap-3 sm:grid-cols-2">
+          <div>
+            <label class="block text-sm font-semibold" for="anchor-new-kind">Art</label>
+            <select class="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2" id="anchor-new-kind" name="kind">
+              {% for value in anchor_kinds %}
+              <option value="{{ value }}"{% if value == 'manual' %} selected{% endif %}>{{ anchor_kind_labels.get(value, value) }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div>
+            <label class="block text-sm font-semibold" for="anchor-new-date">Datum</label>
+            <input class="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2" id="anchor-new-date" name="achieved_on" type="date" value="{{ today }}" max="{{ today }}" required>
+          </div>
+          <div>
+            <label class="block text-sm font-semibold" for="anchor-new-dist">Distanz (km)</label>
+            <input class="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2" id="anchor-new-dist" name="distance_km" type="text" inputmode="decimal" placeholder="z. B. 5" required>
+          </div>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-sm font-semibold" for="anchor-new-min">Minuten</label>
+              <input class="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2" id="anchor-new-min" name="minutes" type="number" min="0" required>
+            </div>
+            <div>
+              <label class="block text-sm font-semibold" for="anchor-new-sec">Sekunden</label>
+              <input class="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2" id="anchor-new-sec" name="seconds" type="number" min="0" max="59" value="0" required>
+            </div>
+          </div>
+        </div>
+        <div>
+          <label class="block text-sm font-semibold" for="anchor-new-notes">Notiz (optional)</label>
+          <input class="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2" id="anchor-new-notes" name="notes" type="text" maxlength="2000">
+        </div>
+        <button class="inline-flex items-center justify-center rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:bg-primary-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" type="submit">Speichern</button>
+      </form>
+    </details>
+  </section>
+
+  <section class="space-y-4 rounded-xl border border-border bg-surface p-5" aria-labelledby="garmin-title">
+    <div>
+      <h2 class="text-lg font-semibold" id="garmin-title">Garmin-Bestzeiten</h2>
+      <p class="mt-1 text-sm text-muted-foreground">Lauf-Bestzeiten aus deinem Garmin-Konto als Vorschläge laden. Übernommen wird nur, was du ausdrücklich auswählst und bestätigst.</p>
+    </div>
+    <form method="post" action="/planning-inputs/garmin-records">
+      {{ csrf_field() }}
+      <button class="inline-flex items-center justify-center rounded-lg border border-border bg-surface px-4 py-2 text-sm font-semibold text-foreground transition hover:bg-secondary focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" type="submit">Bestzeiten aus Garmin laden</button>
+    </form>
+    {% if record_candidates %}
+    <form method="post" action="/planning-inputs/garmin-records/confirm" class="space-y-3">
+      {{ csrf_field() }}
+      <ul class="space-y-2">
+        {% for candidate in record_candidates %}
+        {% set already = candidate.record_type_id in existing_record_types %}
+        <li class="flex flex-wrap items-center gap-3 rounded-lg border border-border p-3">
+          <label class="flex min-w-40 items-center gap-2 text-sm font-semibold"><input type="checkbox" name="record_{{ candidate.record_type_id }}" value="on"{% if not already %} checked{% endif %}> {{ record_type_labels.get(candidate.record_type_id, candidate.record_type_id) }} · {{ candidate.duration_s|precise_duration }}</label>
+          <span class="text-xs text-muted-foreground">{{ candidate.achieved_on|date }}{% if candidate.activity_name %} · {{ candidate.activity_name }}{% endif %}{% if already %} · Bereits erfasst{% endif %}</span>
+          <label class="flex items-center gap-2 text-sm">Art
+            <select class="rounded-lg border border-border bg-background px-2 py-1" name="kind_{{ candidate.record_type_id }}">
+              {% for value in anchor_kinds %}
+              <option value="{{ value }}"{% if value == 'manual' %} selected{% endif %}>{{ anchor_kind_labels.get(value, value) }}</option>
+              {% endfor %}
+            </select>
+          </label>
+        </li>
+        {% endfor %}
+      </ul>
+      <button class="inline-flex items-center justify-center rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:bg-primary-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" type="submit">Auswahl als Leistungsanker übernehmen</button>
+    </form>
+    {% endif %}
+  </section>
+
+  <section class="space-y-4 rounded-xl border border-border bg-surface p-5" aria-labelledby="goals-title">
+    <div>
+      <h2 class="text-lg font-semibold" id="goals-title">Ziele</h2>
+      <p class="mt-1 text-sm text-muted-foreground">Änderungen an Zielen, die bereits in einem angenommenen Mehrwochenplan verwendet werden, müssen ausdrücklich bestätigt werden.</p>
+    </div>
+    {% if goals %}
+    <ul class="space-y-4">
+      {% for goal in goals %}
+      <li class="rounded-lg border border-border p-4">
+        <div class="flex flex-wrap items-baseline justify-between gap-2">
+          <p class="text-sm font-semibold">{{ goal_type_labels.get(goal.event_type, goal.event_type) }}{% if goal.event_name %} · {{ goal.event_name }}{% endif %}</p>
+          <p class="text-xs text-muted-foreground">{{ goal_status_labels.get(goal.status, goal.status) }}{% if goal.target_date %} · {{ goal.target_date|date }}{% endif %}</p>
+        </div>
+        {% if goal.status != 'archived' %}
+        <details class="mt-3">
+          <summary class="cursor-pointer text-sm font-semibold text-primary-emphasis">Bearbeiten</summary>
+          <form method="post" action="/planning-inputs/goals/{{ goal.id }}" class="mt-3 space-y-3">
+            {{ csrf_field() }}
+            <div class="grid gap-3 sm:grid-cols-2">
+              <div>
+                <label class="block text-sm font-semibold" for="goal-type-{{ goal.id }}">Distanz</label>
+                <select class="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2" id="goal-type-{{ goal.id }}" name="event_type">
+                  {% for value in goal_event_types %}
+                  <option value="{{ value }}"{% if value == goal.event_type %} selected{% endif %}>{{ goal_type_labels.get(value, value) }}</option>
+                  {% endfor %}
+                </select>
+              </div>
+              <div>
+                <label class="block text-sm font-semibold" for="goal-date-{{ goal.id }}">Zieldatum</label>
+                <input class="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2" id="goal-date-{{ goal.id }}" name="target_date" type="date" value="{% if goal.target_date %}{{ goal.target_date.isoformat() }}{% endif %}">
+              </div>
+            </div>
+            <div>
+              <label class="block text-sm font-semibold" for="goal-name-{{ goal.id }}">Name (optional)</label>
+              <input class="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2" id="goal-name-{{ goal.id }}" name="event_name" type="text" maxlength="200" value="{{ goal.event_name or '' }}">
+            </div>
+            <label class="flex items-center gap-2 text-sm"><input type="checkbox" name="confirm" value="true"> Ich bestätige die Änderung ausdrücklich (nötig bei verwendetem Ziel).</label>
+            <button class="inline-flex items-center justify-center rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:bg-primary-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" type="submit">Speichern</button>
+          </form>
+          <form method="post" action="/planning-inputs/goals/{{ goal.id }}/deactivate" class="mt-2 space-x-3">
+            {{ csrf_field() }}
+            <label class="text-sm"><input type="checkbox" name="confirm" value="true"> Ausdrücklich bestätigen</label>
+            <button class="text-sm font-semibold text-muted-foreground hover:text-foreground" type="submit">Archivieren</button>
+          </form>
+          <form method="post" action="/planning-inputs/goals/{{ goal.id }}/delete" class="mt-2 space-x-3">
+            {{ csrf_field() }}
+            <label class="text-sm"><input type="checkbox" name="confirm" value="true"> Endgültig löschen</label>
+            <button class="text-sm font-semibold text-danger-emphasis hover:text-foreground" type="submit">Löschen</button>
+          </form>
+        </details>
+        {% else %}
+        <form method="post" action="/planning-inputs/goals/{{ goal.id }}/delete" class="mt-3 space-x-3">
+          {{ csrf_field() }}
+          <label class="text-sm"><input type="checkbox" name="confirm" value="true"> Endgültig löschen</label>
+          <button class="text-sm font-semibold text-danger-emphasis hover:text-foreground" type="submit">Löschen</button>
+        </form>
+        {% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="text-sm text-muted-foreground">Noch keine Ziele erfasst.</p>
+    {% endif %}
+    <details class="rounded-lg border border-border p-4">
+      <summary class="cursor-pointer text-sm font-semibold text-primary-emphasis">Neues Ziel erfassen</summary>
+      <form method="post" action="/planning-inputs/goals" class="mt-3 space-y-3">
+        {{ csrf_field() }}
+        <div class="grid gap-3 sm:grid-cols-2">
+          <div>
+            <label class="block text-sm font-semibold" for="goal-new-type">Distanz</label>
+            <select class="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2" id="goal-new-type" name="event_type">
+              {% for value in goal_event_types %}
+              <option value="{{ value }}">{{ goal_type_labels.get(value, value) }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div>
+            <label class="block text-sm font-semibold" for="goal-new-date">Zieldatum</label>
+            <input class="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2" id="goal-new-date" name="target_date" type="date">
+          </div>
+        </div>
+        <div>
+          <label class="block text-sm font-semibold" for="goal-new-name">Name (optional)</label>
+          <input class="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2" id="goal-new-name" name="event_name" type="text" maxlength="200" placeholder="z. B. Halbmarathon Regensburg">
+        </div>
+        <button class="inline-flex items-center justify-center rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:bg-primary-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" type="submit">Speichern</button>
+      </form>
+    </details>
+  </section>
+
+  <section class="space-y-4 rounded-xl border border-border bg-surface p-5" aria-labelledby="profile-title">
+    <div>
+      <h2 class="text-lg font-semibold" id="profile-title">Trainingsprofil</h2>
+      <p class="mt-1 text-sm text-muted-foreground">Erfahrung, Longrun-Tag, Wiedereinstieg und Hinweise für die Planung.</p>
+    </div>
+    <form method="post" action="/planning-inputs/profile" class="space-y-3">
+      {{ csrf_field() }}
+      <div class="grid gap-3 sm:grid-cols-2">
+        <div>
+          <label class="block text-sm font-semibold" for="profile-experience">Erfahrung</label>
+          <select class="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2" id="profile-experience" name="experience_level">
+            <option value="">–</option>
+            {% for value in experience_levels %}
+            <option value="{{ value }}"{% if profile and profile.experience_level == value %} selected{% endif %}>{{ experience_level_labels.get(value, value) }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div>
+          <label class="block text-sm font-semibold" for="profile-longrun">Longrun-Tag</label>
+          <select class="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2" id="profile-longrun" name="preferred_long_run_weekday">
+            <option value="">–</option>
+            {% for index in range(7) %}
+            <option value="{{ index }}"{% if profile and profile.preferred_long_run_weekday == index %} selected{% endif %}>{{ weekday_labels[index] }}</option>
+            {% endfor %}
+          </select>
+        </div>
+      </div>
+      <label class="flex items-center gap-2 text-sm"><input type="checkbox" name="self_declared_reentry" value="true"{% if profile and profile.self_declared_reentry %} checked{% endif %}> Wiedereinstieg</label>
+      <div>
+        <label class="block text-sm font-semibold" for="profile-note">Hinweis (optional)</label>
+        <textarea class="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2" id="profile-note" name="constraint_note" rows="2" maxlength="2000">{{ profile.constraint_note if profile and profile.constraint_note else '' }}</textarea>
+      </div>
+      <button class="inline-flex items-center justify-center rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:bg-primary-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" type="submit">Speichern</button>
+    </form>
+  </section>
+
+  <section class="space-y-4 rounded-xl border border-border bg-surface p-5" aria-labelledby="availability-title">
+    <div>
+      <h2 class="text-lg font-semibold" id="availability-title">Verfügbarkeiten</h2>
+      <p class="mt-1 text-sm text-muted-foreground">An welchen Wochentagen und wie lange trainiert werden kann.</p>
+    </div>
+    <form method="post" action="/planning-inputs/availability" class="space-y-3">
+      {{ csrf_field() }}
+      <ul class="space-y-2">
+        {% for index in range(7) %}
+        {% set entry = availability[index] %}
+        <li class="flex flex-wrap items-center gap-3 rounded-lg border border-border p-3">
+          <label class="flex min-w-32 items-center gap-2 text-sm font-semibold"><input type="checkbox" name="available_{{ index }}" value="on"{% if entry and entry.available %} checked{% endif %}> {{ weekday_labels[index] }}</label>
+          <label class="flex items-center gap-2 text-sm">Minuten <input class="w-24 rounded-lg border border-border bg-background px-3 py-2" name="minutes_{{ index }}" type="number" min="1" max="1440" value="{% if entry and entry.available_minutes %}{{ entry.available_minutes }}{% endif %}"></label>
+        </li>
+        {% endfor %}
+      </ul>
+      <button class="inline-flex items-center justify-center rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:bg-primary-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" type="submit">Speichern</button>
+    </form>
+  </section>
+</div>
+{% endblock %}

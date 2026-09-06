@@ -48,6 +48,7 @@ class AvailabilityFact:
 class PerformanceAnchorFact:
     id: int
     kind: str
+    source: str
     distance_m: float
     duration_s: float
     achieved_on: date
@@ -285,6 +286,7 @@ def list_performance_anchors(session: Session, user_id: int) -> tuple[Performanc
         PerformanceAnchorFact(
             id=anchor.id,
             kind=anchor.kind,
+            source=anchor.source,
             distance_m=anchor.distance_m,
             duration_s=anchor.duration_s,
             achieved_on=anchor.achieved_on,

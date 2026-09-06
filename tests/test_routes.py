@@ -24,6 +24,8 @@ from app.models import (
     SyncEvent,
     SyncRun,
     TrainingCycle,
+    TrainingCycleRevision,
+    TrainingCycleWeek,
     TrainingPlan,
     TrainingPlanRevision,
     User,
@@ -1944,6 +1946,72 @@ def test_multiweek_plan_generate_detail_and_accept(
     assert accepted.status_code == 303
     accepted_detail = client.get(accepted.headers["location"])
     assert "Planrevision angenommen" in accepted_detail.text
+
+
+def test_multiweek_plan_delete_removes_cycle_and_keeps_week_plans(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+) -> None:
+    current_monday = _seed_planning_history(session_factory)
+    start = current_monday + timedelta(days=7)
+    target = start + timedelta(weeks=7, days=6)
+    with session_factory() as session:
+        user = session.scalar(select(User))
+        assert user is not None
+        goal = AthleteGoal(user_id=user.id, event_type="10k", target_date=target)
+        session.add(goal)
+        session.commit()
+        goal_id = goal.id
+
+    generated = client.post(
+        "/plans/generate-cycle",
+        data={
+            "start_date": start.isoformat(),
+            "target_date": target.isoformat(),
+            "goal_id": str(goal_id),
+        },
+        follow_redirects=False,
+    )
+    assert generated.status_code == 303
+    cycle_location = generated.headers["location"]
+    assert re.fullmatch(r"/plans/cycles/\d+", cycle_location)
+    cycle_id = int(cycle_location.rsplit("/", 1)[1])
+    detail = client.get(cycle_location)
+    assert detail.status_code == 200
+    assert "Mehrwochenplan löschen" in detail.text
+
+    unconfirmed = client.post(f"/plans/cycles/{cycle_id}/delete", follow_redirects=False)
+    assert unconfirmed.status_code == 303
+    assert "error" in unconfirmed.headers["location"]
+    with session_factory() as session:
+        assert session.get(TrainingCycle, cycle_id) is not None
+
+    deleted = client.post(
+        f"/plans/cycles/{cycle_id}/delete",
+        data={"confirm": "true"},
+        follow_redirects=False,
+    )
+    assert deleted.status_code == 303
+    assert deleted.headers["location"] == "/plans"
+    with session_factory() as session:
+        assert session.get(TrainingCycle, cycle_id) is None
+        assert session.scalar(select(func.count()).select_from(TrainingCycleRevision)) == 0
+        assert session.scalar(select(func.count()).select_from(TrainingCycleWeek)) == 0
+        assert (session.scalar(select(func.count()).select_from(TrainingPlan)) or 0) > 0
+
+    removed_goal = client.post(
+        f"/planning-inputs/goals/{goal_id}/delete",
+        data={"confirm": "true"},
+        follow_redirects=False,
+    )
+    assert removed_goal.status_code == 303
+    with session_factory() as session:
+        assert session.scalar(select(AthleteGoal).where(AthleteGoal.id == goal_id)) is None
+
+    missing = client.post(
+        "/plans/cycles/9999/delete", data={"confirm": "true"}, follow_redirects=False
+    )
+    assert missing.status_code == 404
 
 
 def test_plan_acceptance_targets_exact_revision_and_requires_csrf(

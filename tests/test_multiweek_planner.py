@@ -1212,3 +1212,80 @@ def test_current_plans_and_cycle_revisions_are_user_scoped(session_factory) -> N
             revision.id
         ]
         assert list_accepted_training_cycles(session, other.id) == ()
+
+
+def test_delete_training_cycle_removes_cycle_rows_but_keeps_week_plans(session_factory) -> None:
+    from app.services.planning.multiweek_planner import delete_training_cycle
+
+    as_of = date(2026, 8, 26)
+    with session_factory() as session:
+        user = _user(session)
+        first = _seed_revision_cycle(session, user, as_of)
+        cycle = session.get(TrainingCycle, first.cycle_id)
+        assert cycle is not None
+        accept_training_cycle_revision(session, user, cycle_id=cycle.id, revision_id=first.id)
+        second = revise_training_cycle(
+            session,
+            user,
+            cycle_id=cycle.id,
+            data=CycleRevisionInput(target_date=START + timedelta(weeks=9, days=6), as_of=as_of),
+        )
+        plan_count = session.scalar(select(func.count()).select_from(TrainingPlan))
+        assert session.scalar(select(func.count()).select_from(TrainingCycleRevision)) == 2
+
+        delete_training_cycle(session, user, cycle_id=cycle.id)
+
+        assert session.get(TrainingCycle, cycle.id) is None
+        assert session.scalar(select(func.count()).select_from(TrainingCycleRevision)) == 0
+        assert session.scalar(select(func.count()).select_from(TrainingCycleWeek)) == 0
+        assert session.scalar(select(func.count()).select_from(TrainingPlan)) == plan_count
+        assert second.id != first.id
+
+
+def test_delete_training_cycle_rejects_foreign_cycle(session_factory) -> None:
+    from app.services.planning.multiweek_planner import delete_training_cycle
+
+    as_of = date(2026, 8, 26)
+    with session_factory() as session:
+        user = _user(session)
+        first = _seed_revision_cycle(session, user, as_of)
+        other = _user(session)
+        session.commit()
+
+        with pytest.raises(TrainingCyclePersistenceError) as exc_info:
+            delete_training_cycle(session, other, cycle_id=first.cycle_id)
+
+        assert exc_info.value.code == "cycle.not_found"
+        assert session.get(TrainingCycle, first.cycle_id) is not None
+
+
+def test_delete_training_cycle_then_goal_is_deletable(session_factory) -> None:
+    from app.services.planning.multiweek_planner import delete_training_cycle
+    from app.services.planning.planning_commands import PlanningInputCommands
+
+    as_of = date(2026, 8, 26)
+    with session_factory() as session:
+        user = _user(session)
+        _seed_cycle_availability(session, user)
+        _seed_cycle_history(session, user, as_of, runs_per_week=2, weeks=3)
+        goal = AthleteGoal(
+            user_id=user.id,
+            event_type="half_marathon",
+            target_date=START + timedelta(weeks=7, days=6),
+        )
+        session.add(goal)
+        session.commit()
+        candidate = plan_training_cycle(
+            session,
+            user,
+            start_date=START,
+            target_date=START + timedelta(weeks=7, days=6),
+            as_of=as_of,
+            goal_id=goal.id,
+        )
+        revision = persist_training_cycle(session, user, candidate)
+
+        delete_training_cycle(session, user, cycle_id=revision.cycle_id)
+        PlanningInputCommands(session, user).delete_goal(goal.id)
+
+        assert session.get(AthleteGoal, goal.id) is None

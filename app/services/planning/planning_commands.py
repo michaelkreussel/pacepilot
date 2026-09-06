@@ -13,7 +13,7 @@ from app.models import (
     TrainingCycle,
     User,
 )
-from app.models.planning import ANCHOR_KINDS, EXPERIENCE_LEVELS, GOAL_EVENT_TYPES
+from app.models.planning import ANCHOR_KINDS, ANCHOR_SOURCES, EXPERIENCE_LEVELS, GOAL_EVENT_TYPES
 from app.services.planning.planning_queries import (
     AvailabilityFact,
     GoalFact,
@@ -107,12 +107,20 @@ class PerformanceAnchorCreateInput(PlanningCommandInput):
     achieved_on: date
     reliable: bool = True
     notes: str | None = Field(default=None, max_length=2000)
+    source: str = "manual"
 
     @field_validator("kind")
     @classmethod
     def validate_kind(cls, value: str) -> str:
         if value not in ANCHOR_KINDS:
             raise ValueError("unsupported performance anchor kind")
+        return value
+
+    @field_validator("source")
+    @classmethod
+    def validate_source(cls, value: str) -> str:
+        if value not in ANCHOR_SOURCES:
+            raise ValueError("unsupported performance anchor source")
         return value
 
 
@@ -233,6 +241,7 @@ def _performance_anchor_fact(anchor: PerformanceAnchor) -> PerformanceAnchorFact
     return PerformanceAnchorFact(
         id=anchor.id,
         kind=anchor.kind,
+        source=anchor.source,
         distance_m=anchor.distance_m,
         duration_s=anchor.duration_s,
         achieved_on=anchor.achieved_on,
@@ -308,6 +317,24 @@ class PlanningInputCommands:
             self._commit()
         return _goal_fact(goal)
 
+    def delete_goal(self, goal_id: int) -> None:
+        goal = self._goal(goal_id)
+        referenced = self.session.scalar(
+            select(TrainingCycle.id)
+            .where(
+                TrainingCycle.user_id == self.user_id,
+                TrainingCycle.goal_id == goal.id,
+            )
+            .limit(1)
+        )
+        if referenced is not None:
+            raise PlanningInputCommandError(
+                "Das Ziel wird in einem Mehrwochenplan verwendet und kann nicht gelöscht werden.",
+                code="planning.goal_referenced",
+            )
+        self.session.delete(goal)
+        self._commit()
+
     def update_profile(self, data: PlanningProfileUpdateInput) -> PlanningProfileFact:
         profile = self.session.get(AthletePlanningProfile, self.user_id)
         if profile is None:
@@ -360,6 +387,7 @@ class PlanningInputCommands:
         anchor = PerformanceAnchor(
             user_id=self.user_id,
             kind=data.kind,
+            source=data.source,
             distance_m=data.distance_m,
             duration_s=data.duration_s,
             achieved_on=data.achieved_on,
@@ -397,6 +425,11 @@ class PlanningInputCommands:
             anchor.reliable = False
             self._commit()
         return _performance_anchor_fact(anchor)
+
+    def delete_performance_anchor(self, anchor_id: int) -> None:
+        anchor = self._performance_anchor(anchor_id)
+        self.session.delete(anchor)
+        self._commit()
 
     def referenced_goal_change_confirmation(
         self,

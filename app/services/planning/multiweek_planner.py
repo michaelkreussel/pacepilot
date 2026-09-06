@@ -5,7 +5,7 @@ from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from math import ceil
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -1081,6 +1081,53 @@ def accept_training_cycle_revision(
     cycle.accepted_revision_id = revision.id
     session.commit()
     return revision
+
+
+def delete_training_cycle(session: Session, user: User, *, cycle_id: int) -> None:
+    """Delete a training cycle with its revisions and week memberships.
+
+    Weekly plans (TrainingPlan and its revisions) are shared artifacts with
+    their own lifecycle and are preserved; only the cycle's own rows are
+    removed. Revisions are deleted leaves-first so the parent chain never
+    violates its foreign key.
+    """
+    cycle = session.scalar(
+        select(TrainingCycle).where(TrainingCycle.id == cycle_id, TrainingCycle.user_id == user.id)
+    )
+    if cycle is None:
+        raise TrainingCyclePersistenceError(
+            "Mehrwochenplan nicht gefunden.", code="cycle.not_found"
+        )
+    try:
+        revision_ids = session.scalars(
+            select(TrainingCycleRevision.id)
+            .where(
+                TrainingCycleRevision.cycle_id == cycle.id,
+                TrainingCycleRevision.owner_user_id == user.id,
+            )
+            .order_by(TrainingCycleRevision.revision_number.desc())
+        ).all()
+        for revision_id in revision_ids:
+            session.execute(
+                delete(TrainingCycleWeek).where(
+                    TrainingCycleWeek.cycle_revision_id == revision_id,
+                    TrainingCycleWeek.owner_user_id == user.id,
+                )
+            )
+            session.execute(
+                delete(TrainingCycleRevision).where(
+                    TrainingCycleRevision.id == revision_id,
+                    TrainingCycleRevision.cycle_id == cycle.id,
+                    TrainingCycleRevision.owner_user_id == user.id,
+                )
+            )
+        session.delete(cycle)
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        raise TrainingCyclePersistenceError(
+            "Der Mehrwochenplan konnte nicht gelöscht werden.", code="cycle.delete_failed"
+        ) from exc
 
 
 def _cycle_confidence(weekly_candidates: tuple[WeeklyPlanCandidate, ...]) -> str:

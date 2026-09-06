@@ -29,6 +29,7 @@ from app.services.planning.workout_views import (
     revision_view,
     workout_lifecycle_projection,
 )
+from app.web import format_precise_duration
 
 
 @dataclass(frozen=True)
@@ -523,14 +524,13 @@ def _planning_artifact_presentation(
             or not isinstance(reliable, bool)
         ):
             return None
-        minutes, seconds = divmod(round(float(duration_s)), 60)
         return PlanningArtifactPresentation(
             resource=resource,
             title="Leistungsanker aktualisiert",
             details=(
                 ("Art", ANCHOR_LABELS.get(kind, kind)),
                 ("Distanz", f"{float(distance_m) / 1000:.2f} km".replace(".", ",")),
-                ("Zeit", f"{minutes}:{seconds:02d} Minuten"),
+                ("Zeit", format_precise_duration(duration_s)),
                 ("Datum", achieved_on),
                 ("Verlässlich", "Ja" if reliable else "Nein"),
             ),

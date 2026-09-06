@@ -28,6 +28,7 @@ from app.routes import (
     feedback,
     observability,
     onboarding,
+    planning_inputs,
     plans,
     profile,
     settings,
@@ -89,6 +90,7 @@ app.include_router(dashboard.router)
 app.include_router(profile.router)
 app.include_router(activities.router)
 app.include_router(plans.router)
+app.include_router(planning_inputs.router)
 app.include_router(workouts.router)
 app.include_router(feedback.router)
 app.include_router(settings.router)

@@ -33,6 +33,7 @@ from app.services.garmin.locks import (
     garmin_account_slot,
 )
 from app.services.garmin.performance_sync import sync_performance_metrics
+from app.services.garmin.personal_records import sync_personal_records
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,7 @@ METRIC_LABELS = {
     "cycling_ftp": "Cycling FTP",
     "race_predictions": "Rennprognosen",
     "heart_rate_zones": "HF-Zonen",
+    "personal_records": "Bestzeiten",
     "activities": "Aktivitäten",
     "devices": "Geräte",
     "login": "Anmeldung",
@@ -805,6 +807,43 @@ def sync_garmin(
                 day=date.today(),
                 operation="sync_heart_rate_zones",
                 record_count=zone_result.profiles,
+            )
+            record_result = sync_personal_records(session, client, account.user_id, pacer=pacer)
+            run.operations_total += record_result.api_calls
+            run.operations_completed += record_result.api_calls
+            _event(
+                session,
+                run,
+                (
+                    f"Bestzeiten: {record_result.created} neu, "
+                    f"{record_result.updated} aktualisiert, "
+                    f"{record_result.unchanged} unverändert"
+                    if record_result.status == "ok"
+                    else "Bestzeiten: keine Lauf-Bestzeiten"
+                    if record_result.status == "empty"
+                    else "Bestzeiten: nicht unterstützt"
+                    if record_result.status == "unsupported"
+                    else f"Bestzeiten: {record_result.status}"
+                ),
+                category="metric",
+                status=(
+                    "success"
+                    if record_result.status == "ok"
+                    else "skipped"
+                    if record_result.status in {"empty", "unsupported"}
+                    else "error"
+                ),
+                level=(
+                    "success"
+                    if record_result.status == "ok"
+                    else "info"
+                    if record_result.status in {"empty", "unsupported"}
+                    else "warning"
+                ),
+                resource="personal_records",
+                day=date.today(),
+                operation="sync_personal_records",
+                record_count=record_result.created + record_result.updated,
             )
             session.commit()
 
