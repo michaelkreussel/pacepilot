@@ -114,10 +114,12 @@ def test_complete_export_is_user_scoped_and_excludes_tokens(
                 assert "raw/activities/2026/synthetic-1.json.gz" in names
                 assert all("token" not in name for name in names)
                 assert "database/coach_tool_calls.json" not in names
+                assert "database/coach_assistant_runs.json" not in names
                 assert manifest["schema_version"] == 1
                 assert manifest["table_counts"]["users"] == 1
                 assert "coach_tool_calls" not in manifest["table_counts"]
-                assert len(manifest["table_counts"]) == 39
+                assert "coach_assistant_runs" not in manifest["table_counts"]
+                assert len(manifest["table_counts"]) == 38
         finally:
             remove_export(export_path)
 

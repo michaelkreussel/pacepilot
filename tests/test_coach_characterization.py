@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
 from app.main import app
-from app.models import CoachAssistantRun, CoachConversation, CoachMessage, User
+from app.models import CoachConversation, CoachMessage, User
 from app.models.user import utcnow
 from app.repositories.coach import conversation_messages, find_conversation
 from app.services.coach.agent import CoachEvent
@@ -679,4 +679,3 @@ def test_assistant_message_is_the_only_runtime_execution_record(
         assert assistant.prompt_template_version == COACH_PROMPT_TEMPLATE_VERSION
         assert assistant.operation_contract_version == COACH_TOOL_CONTRACT_VERSION
         assert assistant.completed_at is not None
-        assert session.scalar(select(CoachAssistantRun)) is None

@@ -93,15 +93,6 @@ class Workout(Base):
     expires_at: Mapped[datetime | None] = mapped_column(DateTime)
     lock_version: Mapped[int] = mapped_column(Integer, default=0)
     replaces_workout_id: Mapped[int | None] = mapped_column(Integer, index=True)
-    originating_conversation_id: Mapped[int | None] = mapped_column(
-        ForeignKey("coach_conversations.id", ondelete="SET NULL")
-    )
-    originating_user_message_id: Mapped[int | None] = mapped_column(
-        ForeignKey("coach_messages.id", ondelete="SET NULL")
-    )
-    originating_assistant_message_id: Mapped[int | None] = mapped_column(
-        ForeignKey("coach_messages.id", ondelete="SET NULL")
-    )
     source_assistant_message_id: Mapped[int | None] = mapped_column(
         ForeignKey("coach_messages.id", ondelete="SET NULL"), index=True
     )

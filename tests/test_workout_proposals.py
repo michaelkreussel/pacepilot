@@ -226,8 +226,6 @@ def test_one_assistant_message_can_source_multiple_proposals(
         assert first.id != second.id
         assert first.source_assistant_message_id == second.source_assistant_message_id
         assert first.source_assistant_message_id == assistant_message.id
-        assert first.originating_user_message_id == second.originating_user_message_id
-        assert first.originating_user_message_id == user_message.id
 
 
 def test_easy_run_proposal_uses_requested_60_minutes(

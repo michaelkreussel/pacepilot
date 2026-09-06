@@ -169,9 +169,6 @@ class WorkoutService:
             approval_status="proposed",
             local_schedule_status="unscheduled",
             lock_version=0,
-            originating_conversation_id=origin.conversation_id if origin else None,
-            originating_user_message_id=origin.user_message_id if origin else None,
-            originating_assistant_message_id=origin.assistant_message_id if origin else None,
             source_assistant_message_id=origin.assistant_message_id if origin else None,
         )
         self.session.add(workout)
@@ -227,12 +224,7 @@ class WorkoutService:
     def verify_proposal_origin(self, workout: Workout, origin: ProposalOrigin | None) -> None:
         if origin is None:
             return
-        if (
-            workout.originating_conversation_id != origin.conversation_id
-            or workout.originating_user_message_id != origin.user_message_id
-            or workout.originating_assistant_message_id != origin.assistant_message_id
-            or workout.source_assistant_message_id != origin.assistant_message_id
-        ):
+        if workout.source_assistant_message_id != origin.assistant_message_id:
             raise WorkoutConflictError(
                 "Der vorhandene Vorschlag gehört nicht zu dieser Coach-Antwort.",
                 code="proposal.origin_mismatch",

@@ -946,9 +946,6 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
             select(Workout).where(Workout.source_assistant_message_id == assistant_message_id)
         )
         assert workout is not None
-        assert workout.originating_conversation_id == conversation_id
-        assert workout.originating_user_message_id == user_message_id
-        assert workout.originating_assistant_message_id == assistant_message_id
         assert workout.source_assistant_message_id == assistant_message_id
         assert workout.approval_status == "proposed"
         assert workout.scheduled_for is None
@@ -1078,9 +1075,6 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
         assert session.get(CoachMessage, assistant_message_id) is None
         workout = session.get(Workout, workout_id)
         assert workout is not None
-        assert workout.originating_conversation_id is None
-        assert workout.originating_user_message_id is None
-        assert workout.originating_assistant_message_id is None
         assert workout.source_assistant_message_id is None
 
 
@@ -2710,7 +2704,7 @@ def test_proposal_survives_provider_failure_after_commit(
             ("assistant", "failed"),
         ]
         workout = session.scalar(
-            select(Workout).where(Workout.originating_conversation_id == conversation_id)
+            select(Workout).where(Workout.source_assistant_message_id == messages[1].id)
         )
         assert workout is not None
         workout_id = workout.id
