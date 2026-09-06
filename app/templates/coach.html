@@ -20,7 +20,6 @@
     {% if features.coach_plan_generation %}
     <div class="mt-2 flex flex-wrap items-center gap-2 rounded-lg border border-border bg-surface-muted px-3 py-2 text-xs">
       <span class="font-semibold text-foreground">Planung</span>
-      <a class="rounded-md border border-border bg-surface px-2.5 py-1.5 font-semibold text-foreground transition hover:bg-secondary" href="/coach/planning-shadow">Wochenplan prüfen</a>
       <a class="rounded-md border border-border bg-surface px-2.5 py-1.5 font-semibold text-foreground transition hover:bg-secondary" href="/plans/cycles/new">Mehrwochenplan erstellen</a>
       <span class="text-muted-foreground">Einzelvorschläge und Planvorschauen bleiben bis zur Annahme unverbindlich.</span>
       {% if features.coach_deferred_quality_templates %}<span class="w-full font-semibold text-warning-emphasis">Development-Testmodus: Schwellen- und VO₂max-Vorlagen sind freigeschaltet.</span>{% endif %}

@@ -1083,7 +1083,7 @@ def test_edit_draft_workout(client: TestClient, session_factory: sessionmaker[Se
     assert "startPaletteDrag('interval'" in form.text
     assert "/static/icons/workout.svg#pencil" in form.text
     assert "setDropTarget(null, index)" in form.text
-    assert "/static/css/tailwind.css?v=20260905-33" in form.text
+    assert "/static/css/tailwind.css?v=20260906-34" in form.text
     assert "/static/js/theme.js?v=20260809-3" in form.text
     assert "data-theme-toggle" in form.text
 
@@ -1672,7 +1672,7 @@ def test_manual_sync_is_queued_once(
         assert account.sync_status == "queued"
 
 
-def _seed_shadow_week_history(session_factory: sessionmaker[Session]) -> date:
+def _seed_planning_history(session_factory: sessionmaker[Session]) -> date:
     with session_factory() as session:
         user = session.scalar(select(User))
         assert user is not None
@@ -1721,11 +1721,11 @@ def _seed_shadow_week_history(session_factory: sessionmaker[Session]) -> date:
         return monday
 
 
-def test_planning_shadow_view_is_404_while_flag_disabled(
+def test_planning_shadow_view_is_removed(
     client: TestClient,
     monkeypatch: Any,
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", False)
+    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
     assert client.get("/coach/planning-shadow", follow_redirects=False).status_code == 404
 
 
@@ -1741,7 +1741,7 @@ def test_multiweek_plan_link_is_hidden_while_flag_disabled(
     assert 'href="/plans/cycles/new"' not in response.text
 
 
-def test_coach_links_to_weekly_and_multiweek_planning(
+def test_coach_links_to_multiweek_planning_without_shadow_view(
     client: TestClient,
     monkeypatch: Any,
 ) -> None:
@@ -1751,7 +1751,7 @@ def test_coach_links_to_weekly_and_multiweek_planning(
     response = client.get("/coach")
 
     assert response.status_code == 200
-    assert 'href="/coach/planning-shadow"' in response.text
+    assert 'href="/coach/planning-shadow"' not in response.text
     assert 'href="/plans/cycles/new"' in response.text
     assert (
         "Einzelvorschläge und Planvorschauen bleiben bis zur Annahme unverbindlich."
@@ -1760,61 +1760,13 @@ def test_coach_links_to_weekly_and_multiweek_planning(
     assert "Testmodus: Wochen- und Frequenz-Gates sind deaktiviert." in response.text
 
 
-def test_planning_shadow_view_redirects_unauthenticated(
-    unauthenticated_client: TestClient,
-    session_factory: sessionmaker[Session],
-    monkeypatch: Any,
-) -> None:
-    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
-    response = unauthenticated_client.get("/coach/planning-shadow", follow_redirects=False)
-    assert response.status_code == 303
-
-
-def test_planning_shadow_view_renders_deterministic_week(
-    client: TestClient,
-    session_factory: sessionmaker[Session],
-    monkeypatch: Any,
-) -> None:
-    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
-    monday = _seed_shadow_week_history(session_factory)
-
-    first = client.get(f"/coach/planning-shadow?week={monday.isoformat()}")
-    second = client.get(f"/coach/planning-shadow?week={monday.isoformat()}")
-    assert first.status_code == second.status_code == 200
-    assert first.text == second.text
-    assert "Wochenplanung im Shadow-Modus" in first.text
-    assert "Interne deterministische Vorschau" in first.text
-    assert "Nicht verfügbar" in first.text
-
-    with session_factory() as session:
-        other = User(display_name="Other Runner")
-        session.add(other)
-        session.flush()
-        session.add(
-            AthleteAvailability(user_id=other.id, weekday=2, available=True, available_minutes=180)
-        )
-        session.commit()
-
-    scoped = client.get(f"/coach/planning-shadow?week={monday.isoformat()}")
-    assert scoped.status_code == 200
-    assert scoped.text == second.text
-
-    invalid = client.get("/coach/planning-shadow?week=2026-09-01")
-    assert invalid.status_code == 200
-    assert "Die Woche muss an einem Montag beginnen." in invalid.text
-
-    garbage = client.get("/coach/planning-shadow?week=nonsense")
-    assert garbage.status_code == 200
-    assert "Ungültiges Wochendatum." in garbage.text
-
-
 def test_plan_persistence_is_flagged_idempotent_and_visible_in_calendar(
     client: TestClient,
     session_factory: sessionmaker[Session],
     monkeypatch: Any,
 ) -> None:
     monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
-    monday = _seed_shadow_week_history(session_factory)
+    monday = _seed_planning_history(session_factory)
 
     first = client.post(
         "/plans/generate-week",
@@ -1832,11 +1784,6 @@ def test_plan_persistence_is_flagged_idempotent_and_visible_in_calendar(
     calendar = client.get(first.headers["location"])
     assert calendar.status_code == 200
     assert "Planvorschlag · nicht angenommen" in calendar.text
-    assert (
-        "Als Vorschläge speichern"
-        in client.get(f"/coach/planning-shadow?week={monday.isoformat()}").text
-    )
-
     with session_factory() as session:
         proposal_id = session.scalar(
             select(Workout.id).where(Workout.approval_status == "proposed")
@@ -1889,7 +1836,7 @@ def test_week_plan_acceptance_is_exact_and_flagged(
     monkeypatch: Any,
 ) -> None:
     monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
-    monday = _seed_shadow_week_history(session_factory)
+    monday = _seed_planning_history(session_factory)
     generated = client.post(
         "/plans/generate-week",
         data={"week_start": monday.isoformat()},
@@ -1983,7 +1930,7 @@ def test_multiweek_plan_error_redirects_back_to_form(
     assert form.status_code == 200
     assert "Plan konnte nicht erstellt werden." in form.text
     assert "Für eine Wochenplanung fehlt die nötige Laufroutine." in form.text
-    assert 'href="/coach/planning-shadow"' in form.text
+    assert 'href="/coach/planning-shadow"' not in form.text
 
 
 def test_multiweek_plan_generate_detail_and_accept(
@@ -1994,7 +1941,7 @@ def test_multiweek_plan_generate_detail_and_accept(
     monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
     monkeypatch.setattr(get_settings(), "coach_planner_history_gates_enabled", False)
     monkeypatch.setattr(get_settings(), "coach_deferred_quality_templates_enabled", True)
-    current_monday = _seed_shadow_week_history(session_factory)
+    current_monday = _seed_planning_history(session_factory)
     start = current_monday + timedelta(days=7)
     target = start + timedelta(weeks=7, days=6)
     with session_factory() as session:
@@ -2052,7 +1999,7 @@ def test_plan_acceptance_targets_exact_revision_and_requires_csrf(
     from app.services.planning.weekly_plan_service import revise_week_plan
 
     monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
-    monday = _seed_shadow_week_history(session_factory)
+    monday = _seed_planning_history(session_factory)
     generated = client.post(
         "/plans/generate-week",
         data={"week_start": monday.isoformat()},
