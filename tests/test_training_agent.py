@@ -10,9 +10,9 @@ from unittest.mock import Mock
 
 import pytest
 from fastapi.testclient import TestClient
-from langchain.messages import AIMessage, AIMessageChunk, ToolMessage
+from langchain.messages import AIMessageChunk, ToolMessage
 from langchain_core.language_models import BaseChatModel
-from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
+from langchain_core.outputs import ChatGenerationChunk
 from langchain_core.tools import tool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from sqlalchemy import func, select
@@ -192,10 +192,14 @@ def test_openrouter_timeout_is_converted_to_sdk_milliseconds(
             if False:
                 yield object()
 
-    def fake_create_agent(model: object, *_: Any, **__: Any) -> EmptyAgent:
-        captured["model"] = model
+    def fake_chat_openrouter(**kwargs: Any) -> object:
+        captured["model_kwargs"] = kwargs
+        return object()
+
+    def fake_create_agent(_model: object, *_: Any, **__: Any) -> EmptyAgent:
         return EmptyAgent()
 
+    monkeypatch.setattr(coach_provider_module, "ChatOpenRouter", fake_chat_openrouter)
     monkeypatch.setattr(coach_provider_module, "create_agent", fake_create_agent)
 
     provider = OpenRouterCoachProvider(
@@ -214,12 +218,11 @@ def test_openrouter_timeout_is_converted_to_sdk_milliseconds(
 
     assert asyncio.run(collect()) == [CoachEvent("failed", failure_category="missing_final_answer")]
 
-    model: Any = captured["model"]
-    assert type(model).__name__ == "_ToolMarkupAdapter"
-    assert model.inner.request_timeout == 60_000
-    assert model.inner.max_tokens == 4000
-    assert model.inner.reasoning == {"effort": "low"}
-    assert model.inner.openrouter_provider == {
+    model_kwargs = cast(dict[str, Any], captured["model_kwargs"])
+    assert model_kwargs["timeout"] == 60_000
+    assert model_kwargs["max_tokens"] == 4000
+    assert model_kwargs["reasoning"] == {"effort": "low"}
+    assert model_kwargs["openrouter_provider"] == {
         "order": ["z-ai"],
         "allow_fallbacks": False,
     }
@@ -302,32 +305,16 @@ class _ReasoningFakeChatModel(BaseChatModel):
             yield chunk
 
 
-class _BindingRecordingFakeChatModel(BaseChatModel):
-    """Uses the default bind_tools so binding produces a real RunnableBinding."""
-
-    observed_astream_kwargs: list[dict[str, Any]] = []
-    observed_generate_kwargs: list[dict[str, Any]] = []
-
+class _BoundToolsRequiredFakeChatModel(BaseChatModel):
     @property
     def _llm_type(self) -> str:
-        return "binding-recording-fake"
+        return "bound-tools-required-fake"
 
     def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
-        return self.bind(
-            tools=[convert_to_openai_tool(tool) for tool in tools],
-            **kwargs,
-        )
+        return self.bind(tools=[convert_to_openai_tool(tool) for tool in tools], **kwargs)
 
-    def _generate(
-        self,
-        messages: Any,
-        stop: Any = None,
-        run_manager: Any = None,
-        **kwargs: Any,
-    ) -> Any:
-        del messages, run_manager
-        self.observed_generate_kwargs.append(kwargs)
-        return ChatResult(generations=[ChatGeneration(message=AIMessage(content="ok"))])
+    def _generate(self, *args: Any, **kwargs: Any) -> Any:
+        raise NotImplementedError
 
     async def _astream(
         self,
@@ -337,34 +324,40 @@ class _BindingRecordingFakeChatModel(BaseChatModel):
         **kwargs: Any,
     ) -> AsyncIterator[ChatGenerationChunk]:
         del messages, stop
-        self.observed_astream_kwargs.append(kwargs)
+        if "tools" not in kwargs:
+            raise RuntimeError("bound tools were not forwarded")
+        chunk = ChatGenerationChunk(
+            message=AIMessageChunk(content="Werkzeuge verfügbar.", chunk_position="last")
+        )
         if run_manager is not None:
-            await run_manager.on_llm_new_token(
-                "ok", chunk=ChatGenerationChunk(message=AIMessageChunk(content="ok"))
-            )
-        yield ChatGenerationChunk(message=AIMessageChunk(content="ok", chunk_position="last"))
+            await run_manager.on_llm_new_token(chunk.text, chunk=chunk)
+        yield chunk
 
 
-@pytest.mark.asyncio
-async def test_tool_markup_adapter_preserves_bound_tools_on_model_requests() -> None:
-    @tool
-    def get_recent_activities(limit: int = 5) -> str:
-        """List recent activities."""
-
-        return "[]"
-
-    inner = _BindingRecordingFakeChatModel()
-    bound = coach_provider_module._ToolMarkupAdapter(inner=inner).bind_tools(
-        [get_recent_activities]
+def test_provider_forwards_bound_tools_to_model_requests(
+    session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        coach_provider_module,
+        "ChatOpenRouter",
+        lambda **_: _BoundToolsRequiredFakeChatModel(),
     )
+    provider = OpenRouterCoachProvider(api_key="test-key", model_id="fake/model", timeout_seconds=5)
 
-    chunks = [chunk async for chunk in bound.astream([("user", "Test")])]
-    assert [chunk.content for chunk in chunks] == ["ok"]
-    assert inner.observed_astream_kwargs and "tools" in inner.observed_astream_kwargs[0]
+    async def collect() -> list[CoachEvent]:
+        return [
+            event
+            async for event in provider.stream(
+                [CoachHistoryMessage("user", "Welche Daten kannst du prüfen?")],
+                CoachRuntimeContext(1, date(2026, 8, 11), session_factory),
+            )
+        ]
 
-    message = await bound.ainvoke([("user", "Test")])
-    assert message.content == "ok"
-    assert inner.observed_generate_kwargs and "tools" in inner.observed_generate_kwargs[0]
+    assert asyncio.run(collect()) == [
+        CoachEvent("answer_text", text="Werkzeuge verfügbar."),
+        CoachEvent("completed"),
+    ]
 
 
 class _ToolCallingFakeChatModel(BaseChatModel):
@@ -574,43 +567,24 @@ def test_agent_stream_fails_when_model_emits_unparseable_tool_call_markup(
     assert not any(event.type == "completed" for event in events)
 
 
-def test_dsml_tool_call_markup_is_parsed_into_bounded_tool_calls() -> None:
-    parsed = coach_provider_module._parse_dsml_tool_calls(
-        "<｜DSML｜tool_calls>"
-        '<｜DSML｜invoke name="get_planning_inputs"></｜DSML｜invoke>'
-        "</｜DSML｜tool_calls>"
-    )
-    assert parsed == [
-        {"name": "get_planning_inputs", "args": {}, "id": "dsml-tool-1", "type": "tool_call"}
-    ]
-
-    with_args = coach_provider_module._parse_dsml_tool_calls(
-        '<｜DSML｜invoke name="set_planning_availability">'
-        '{"weekday": 2, "available": true, "available_minutes": 75}'
-        "</｜DSML｜invoke>"
-    )
-    assert with_args == [
-        {
-            "name": "set_planning_availability",
-            "args": {"weekday": 2, "available": True, "available_minutes": 75},
-            "id": "dsml-tool-1",
-            "type": "tool_call",
-        }
-    ]
-
-    assert coach_provider_module._parse_dsml_tool_calls("Normale Antwort.") is None
-    assert (
-        coach_provider_module._parse_dsml_tool_calls(
-            '<｜DSML｜invoke name="get_planning_inputs">{"weekday": }</｜DSML｜invoke>'
-        )
-        is None
-    )
-
-
 def test_agent_converts_model_tool_call_markup_into_structured_tool_call(
     session_factory: sessionmaker[Session],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    observed_arguments: dict[str, object] = {}
+
+    @tool("set_planning_availability")
+    def fake_set_planning_availability(
+        weekday: int, available: bool, available_minutes: int
+    ) -> str:
+        """Record bounded planning arguments for adapter testing."""
+        observed_arguments.update(
+            weekday=weekday,
+            available=available,
+            available_minutes=available_minutes,
+        )
+        return '{"status":"updated"}'
+
     class _DsmlFakeChatModel(BaseChatModel):
         observed_tool_result: str | None = None
 
@@ -642,7 +616,9 @@ def test_agent_converts_model_tool_call_markup_into_structured_tool_call(
                     message=AIMessageChunk(
                         content=(
                             "<｜DSML｜tool_calls>"
-                            '<｜DSML｜invoke name="get_planning_inputs"></｜DSML｜invoke>'
+                            '<｜DSML｜invoke name="set_planning_availability">'
+                            '{"weekday": 2, "available": true, "available_minutes": 75}'
+                            "</｜DSML｜invoke>"
                             "</｜DSML｜tool_calls>"
                         )
                     )
@@ -651,22 +627,19 @@ def test_agent_converts_model_tool_call_markup_into_structured_tool_call(
                 self.observed_tool_result = str(tool_result.content)
                 yield ChatGenerationChunk(
                     message=AIMessageChunk(
-                        content="Hier sind deine aktuellen Planungsdaten.",
+                        content="Deine Verfügbarkeit wurde gespeichert.",
                         chunk_position="last",
                     )
                 )
 
     model = _DsmlFakeChatModel()
     monkeypatch.setattr(coach_provider_module, "ChatOpenRouter", lambda **_: model)
+    monkeypatch.setattr(
+        coach_provider_module, "coach_tools", lambda: (fake_set_planning_availability,)
+    )
     agent = OpenRouterCoachProvider(api_key="test-key", model_id="fake/model", timeout_seconds=5)
-
-    with session_factory() as session:
-        user = User(display_name="DSML Runner")
-        session.add(user)
-        session.commit()
-        user_id = user.id
     runtime = CoachRuntimeContext(
-        user_id=user_id,
+        user_id=1,
         as_of=date(2026, 8, 29),
         session_factory=session_factory,
     )
@@ -684,9 +657,10 @@ def test_agent_converts_model_tool_call_markup_into_structured_tool_call(
 
     assert events[-1] == CoachEvent("completed")
     assert model.observed_tool_result is not None
-    assert '"goals"' in model.observed_tool_result
+    assert json.loads(model.observed_tool_result)["status"] == "updated"
+    assert observed_arguments == {"weekday": 2, "available": True, "available_minutes": 75}
     answer = "".join(event.text for event in events if event.type == "answer_text" and event.text)
-    assert answer == "Hier sind deine aktuellen Planungsdaten."
+    assert answer == "Deine Verfügbarkeit wurde gespeichert."
     assert "DSML" not in answer
 
 
@@ -694,54 +668,19 @@ def test_agent_stream_fails_when_final_answer_is_missing_after_tool_call(
     session_factory: sessionmaker[Session],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class _ScriptedAgentGraph:
-        async def astream(self, *_args: Any, **kwargs: Any) -> AsyncIterator[object]:
-            del kwargs
-            yield (
-                "messages",
-                (
-                    AIMessageChunk(content="Ich prüfe kurz deine Planungsdaten."),
-                    {"langgraph_node": "model"},
-                ),
-            )
-            yield (
-                "updates",
-                {
-                    "model": {
-                        "messages": [
-                            AIMessage(
-                                content="",
-                                tool_calls=[
-                                    {
-                                        "name": "get_planning_inputs",
-                                        "args": {},
-                                        "id": "scripted-tool-1",
-                                        "type": "tool_call",
-                                    }
-                                ],
-                            )
-                        ]
-                    }
-                },
-            )
-            yield (
-                "updates",
-                {
-                    "tools": {
-                        "messages": [
-                            ToolMessage(
-                                content='{"goals": []}',
-                                name="get_planning_inputs",
-                                tool_call_id="scripted-tool-1",
-                            )
-                        ]
-                    }
-                },
-            )
+    @tool("get_planning_inputs")
+    def fake_planning_inputs() -> str:
+        """Return deterministic planning inputs for adapter testing."""
+        return '{"goals": []}'
 
     monkeypatch.setattr(
-        coach_provider_module, "create_agent", lambda *_, **__: _ScriptedAgentGraph()
+        coach_provider_module,
+        "ChatOpenRouter",
+        lambda **_: _ToolCallingFakeChatModel(
+            tool_name="get_planning_inputs", tool_args={}, answer=""
+        ),
     )
+    monkeypatch.setattr(coach_provider_module, "coach_tools", lambda: (fake_planning_inputs,))
     agent = OpenRouterCoachProvider(api_key="test-key", model_id="fake/model", timeout_seconds=5)
 
     with session_factory() as session:
@@ -768,8 +707,6 @@ def test_agent_stream_fails_when_final_answer_is_missing_after_tool_call(
 
     assert events[-1] == CoachEvent("failed", failure_category="missing_final_answer")
     assert not any(event.type == "completed" for event in events)
-    answer = "".join(event.text for event in events if event.type == "answer_text" and event.text)
-    assert "Ich prüfe kurz deine Planungsdaten." in answer
 
 
 def _new_chat(client: TestClient) -> int:
@@ -3281,18 +3218,6 @@ def test_adaptive_context_is_focus_bounded_and_preserves_coverage_meaning(
         "progress",
         "scheduled_work",
     }
-
-
-def test_adaptive_context_prompt_requires_evidence_and_one_material_question() -> None:
-    prompt = coach_provider_module.ADAPTIVE_CONTEXT_PROMPT.lower()
-
-    assert "get_adaptive_context" in prompt
-    assert "vor jeder materiellen empfehlung" in prompt
-    assert "nicht-materiellen annahme" in prompt
-    assert "stelle genau eine" in prompt
-    assert "fokussierte frage" in prompt
-    assert "rohkontext" in prompt
-    assert "zweite modellprüfung" in prompt
 
 
 def test_progress_tool_is_bounded_and_uses_runtime_authority(

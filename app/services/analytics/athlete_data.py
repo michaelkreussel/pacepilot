@@ -153,7 +153,7 @@ class SubjectiveContext:
 
 
 class AthleteDataService:
-    """Compact deterministic athlete context for UI and future coach consumers."""
+    """Canonical deterministic athlete-data read boundary for UI and Coach consumers."""
 
     def __init__(self, session: Session, user_id: int, *, as_of: date | None = None) -> None:
         self.session = session

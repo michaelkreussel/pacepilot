@@ -2,9 +2,10 @@
 
 ## Interface
 
-`app.services.analytics.AthleteDataService` is the deterministic read boundary for the Profile page
-and future AI-coach consumers. It is constructed with a SQLAlchemy session, user ID, and optional
-`as_of` date. Supplying `as_of` gives every metric and activity query a deterministic upper boundary.
+`app.services.analytics.AthleteDataService` is the canonical deterministic athlete-data read
+boundary for the Profile page and AI Coach. It is constructed with a SQLAlchemy session, user ID,
+and optional `as_of` date. Supplying `as_of` gives every metric and activity query a deterministic
+upper boundary.
 
 ```python
 analytics = AthleteDataService(session, user_id, as_of=date(2026, 8, 8))
@@ -14,13 +15,15 @@ analytics.get_health_trends(days=28)
 analytics.get_training_summary(days=28)
 analytics.get_standard_training_summaries()
 analytics.get_recent_workouts(limit=10)
-analytics.get_weekly_running_volume(weeks=12)
-analytics.get_training_load_trend(weeks=12)
+analytics.get_training_timeline(days=84, bucket_days=7)
 analytics.get_hrv_baseline(days=28)
-analytics.get_sleep_trend(days=28)
-analytics.get_vo2max_trend(days=365)
+analytics.get_garmin_fitness_metrics(days=365)
 analytics.get_activity_details(activity_id)
 ```
+
+Domain-specific calculations remain in their analytics modules. Callers that need weekly
+Monday-to-Sunday buckets use `training_trends.get_weekly_training_trend()` directly rather than an
+`AthleteDataService` compatibility alias.
 
 All results are immutable dataclasses. They contain compact values, dated trend points, normalized
 activity children, explicit units, and synchronization coverage. They do not contain ORM objects,

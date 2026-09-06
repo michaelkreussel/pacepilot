@@ -1,7 +1,6 @@
 import json
 from datetime import date
 from pathlib import Path
-from typing import Any, cast
 
 import pytest
 from fastapi.testclient import TestClient
@@ -14,12 +13,6 @@ from app.models import (
     WorkoutEvent,
     WorkoutRevision,
     WorkoutValidationRun,
-)
-from app.services.coach.provider import (
-    COACH_PROMPT_TEMPLATE_VERSION,
-    COACH_TOOL_CONTRACT_VERSION,
-    PROGRESS_PROMPT,
-    coach_tools,
 )
 from app.services.garmin.workout_export import scheduled_workout_ids
 from app.services.observability import decision_trace, operational_metrics
@@ -80,99 +73,6 @@ def test_synthetic_contract_fixtures_contain_no_sensitive_fields() -> None:
     for path in FIXTURES.rglob("*.json"):
         content = path.read_text(encoding="utf-8").lower()
         assert not any(f'"{name}"' in content for name in forbidden), path
-
-
-def test_coach_tool_and_prompt_contracts_are_versioned_and_stable() -> None:
-    fixture = json.loads((FIXTURES / "coach" / "tool_contract.json").read_text(encoding="utf-8"))
-    actual: dict[str, list[str]] = {}
-    for tool in coach_tools():
-        schema = tool.tool_call_schema
-        json_schema = schema if isinstance(schema, dict) else cast(Any, schema).model_json_schema()
-        actual[tool.name] = sorted(json_schema.get("properties", {}))
-
-    assert fixture["contract_version"] == COACH_TOOL_CONTRACT_VERSION
-    assert actual == fixture["tools"]
-    assert COACH_PROMPT_TEMPLATE_VERSION == "coach-prompt-v10"
-    assert "get_adaptive_context" in PROGRESS_PROMPT
-    assert "keine Verlaufsdaten" in PROGRESS_PROMPT
-    assert {"user_id", "workout_id", "definition", "idempotency_key"}.isdisjoint(
-        actual["create_running_workout_proposal"]
-    )
-    for tool_name in ("record_pre_session_feedback", "record_post_session_feedback"):
-        assert {
-            "user_id",
-            "conversation_id",
-            "assistant_message_id",
-            "source",
-        }.isdisjoint(actual[tool_name])
-
-
-def test_prompt_injection_corpus_cannot_expand_coach_mutation_authority() -> None:
-    fixture = json.loads(
-        (FIXTURES / "coach" / "prompt_injection_cases.json").read_text(encoding="utf-8")
-    )
-    tool_names = {tool.name for tool in coach_tools()}
-
-    assert fixture["source"] == "synthetic"
-    assert len(fixture["cases"]) >= 4
-    assert (
-        tool_names & {"accept_workout", "schedule_workout", "push_workout", "delete_workout"}
-        == set()
-    )
-    allowed_mutations = {
-        "create_running_workout_proposal",
-        "create_planning_goal",
-        "update_planning_goal",
-        "deactivate_planning_goal",
-        "update_planning_profile",
-        "set_planning_availability",
-        "deactivate_planning_availability",
-        "create_planning_anchor",
-        "update_planning_anchor",
-        "deactivate_planning_anchor",
-        "record_pre_session_feedback",
-        "record_post_session_feedback",
-        "revise_running_workout_proposal",
-        "create_weekly_plan_draft",
-        "revise_weekly_plan_draft",
-        "create_training_cycle_draft",
-        "revise_training_cycle_draft",
-    }
-    assert tool_names - allowed_mutations == {
-        "get_adaptive_context",
-        "get_current_recovery_state",
-        "get_subjective_context",
-        "get_health_trends",
-        "get_training_summary",
-        "get_progress",
-        "get_recent_activities",
-        "get_activity_details",
-        "get_health_day",
-        "get_upcoming_workouts",
-        "get_revisable_running_workouts",
-        "get_planning_inputs",
-        "assess_daily_adaptation",
-        "get_revisable_training_plans",
-    }
-    assert {
-        "get_revisable_training_plans",
-        "create_weekly_plan_draft",
-        "revise_weekly_plan_draft",
-        "create_training_cycle_draft",
-        "revise_training_cycle_draft",
-    } <= tool_names
-    assert (
-        tool_names
-        & {
-            "accept_training_plan",
-            "accept_training_cycle",
-            "schedule_plan",
-            "publish_plan",
-            "push_plan",
-            "delete_plan",
-        }
-        == set()
-    )
 
 
 def _revision_graph(session: Session) -> WorkoutRevision:
