@@ -862,11 +862,14 @@ def test_coach_streams_and_persists_conversation(
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/event-stream")
+    assert "event: answer.started" in response.text
     assert "event: answer.delta" in response.text
     assert "event: answer.completed" in response.text
+    assert "event: run.started" not in response.text
+    assert "event: tool." not in response.text
     assert "Du wirkst heute etwas weniger erholt" in response.text
     assert fake.calls[0] == [CoachHistoryMessage("user", "Wie erholt bin ich heute?")]
-    started = _sse_payload(response.text, "run.started")
+    started = _sse_payload(response.text, "answer.started")
     completed = _sse_payload(response.text, "answer.completed")
     assert started["conversation_title"] == "Wie erholt bin ich heute?"
     assert 'data-message-state="streaming"' in cast(str, started["assistant_html"])
@@ -995,6 +998,7 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
         assistant_message = session.get(CoachMessage, assistant_message_id)
         assert assistant_message is not None
         assert assistant_message.status == "completed"
+        assert session.scalar(select(func.count(CoachToolCall.id))) == 0
         workout = session.scalar(
             select(Workout).where(Workout.source_assistant_message_id == assistant_message_id)
         )

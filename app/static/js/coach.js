@@ -95,7 +95,7 @@ import { consumeSse } from "./coach-sse.mjs?v=20260828-1";
   };
 
   const handleEvent = async (name, data) => {
-    if (name === "run.started") {
+    if (name === "answer.started") {
       startMessages(data);
     } else if (name === "answer.delta" && live.assistant && typeof data.text === "string") {
       live.assistant.answer.append(document.createTextNode(data.text));

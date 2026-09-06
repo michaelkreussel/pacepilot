@@ -378,7 +378,7 @@ async def _stream_answer(
                     request, assistant_message, card, message_state="failed"
                 ),
             }
-        yield _event("run.started", started_payload)
+        yield _event("answer.started", started_payload)
         failure_category = "provider_error"
         agent = agent_factory()
         async for event in agent.stream(history, runtime):

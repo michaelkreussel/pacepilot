@@ -5,7 +5,7 @@ from typing import Literal
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from app.models import CoachConversation, CoachMessage, CoachToolCall
+from app.models import CoachConversation, CoachMessage
 from app.models.user import utcnow
 
 CoachFailureCategory = Literal[
@@ -224,51 +224,3 @@ def fail_message(
     completed_at = utcnow()
     message.completed_at = completed_at
     message.conversation.updated_at = completed_at
-
-
-def start_tool_call(
-    session: Session,
-    message_id: int,
-    *,
-    call_id: str,
-    tool_name: str,
-    label: str,
-    input_summary: str | None,
-) -> None:
-    existing = session.scalar(
-        select(CoachToolCall).where(
-            CoachToolCall.message_id == message_id,
-            CoachToolCall.call_id == call_id,
-        )
-    )
-    if existing is not None:
-        return
-    session.add(
-        CoachToolCall(
-            message_id=message_id,
-            call_id=call_id,
-            tool_name=tool_name,
-            label=label,
-            input_summary=input_summary,
-        )
-    )
-
-
-def finish_tool_call(
-    session: Session,
-    message_id: int,
-    call_id: str,
-    *,
-    error_message: str | None = None,
-) -> None:
-    tool_call = session.scalar(
-        select(CoachToolCall).where(
-            CoachToolCall.message_id == message_id,
-            CoachToolCall.call_id == call_id,
-        )
-    )
-    if tool_call is None:
-        return
-    tool_call.status = "failed" if error_message else "completed"
-    tool_call.completed_at = utcnow()
-    tool_call.error_message = error_message
