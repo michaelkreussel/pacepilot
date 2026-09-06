@@ -873,7 +873,12 @@ def test_coach_streams_and_persists_conversation(
     completed = _sse_payload(response.text, "answer.completed")
     assert started["conversation_title"] == "Wie erholt bin ich heute?"
     assert 'data-message-state="streaming"' in cast(str, started["assistant_html"])
+    assert "Antwort wird erstellt" in cast(str, started["assistant_html"])
+    assert "data-coach-activity" not in cast(str, started["assistant_html"])
+    assert "Antwort unterbrochen" in cast(str, started["failure_html"])
     assert 'data-message-state="completed"' in cast(str, completed["html"])
+    assert "Antwort abgeschlossen" in cast(str, completed["html"])
+    assert "data-coach-activity" not in cast(str, completed["html"])
 
     with session_factory() as session:
         conversation = session.get(CoachConversation, conversation_id)
@@ -892,13 +897,31 @@ def test_coach_streams_and_persists_conversation(
         ]
         assert messages[1].content.endswith("leicht über deinem Basiswert.")
         assert session.scalar(select(Workout)) is None
+        session.add(
+            CoachToolCall(
+                message=messages[1],
+                call_id="historical-call",
+                tool_name="legacy_tool",
+                label="Veraltete Werkzeugaktivität",
+                input_summary="Veraltete Eingabezusammenfassung",
+                status="completed",
+                completed_at=utcnow(),
+            )
+        )
+        session.commit()
 
     page = client.get(f"/coach/{conversation_id}").text
     assert 'aria-label="Neuen Chat starten"' in page
     assert 'aria-label="Chat löschen"' in page
     assert "data-coach-message-list" in page
     assert "Nur lesend" in page
-    assert "data-coach-activity" in page
+    assert "data-coach-activity" not in page
+    assert "data-tool-call" not in page
+    assert "Veraltete Werkzeugaktivität" not in page
+    assert "Veraltete Eingabezusammenfassung" not in page
+    assert "Schritte ausgeführt" not in page
+    assert "nachgedacht" not in page
+    assert "Antwort abgeschlossen" in page
     assert cast(str, started["user_html"]) in page
     assert cast(str, completed["html"]) in page
 
@@ -984,14 +1007,18 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
     )
 
     assert response.status_code == 200
-    assert response.text.count("event: proposal.created") == 1
-    assert '"card_url":"/coach/' in response.text
+    assert response.text.count("event: artifact.available") == 1
+    assert "event: proposal.created" not in response.text
     assert fake.runtime is not None
     assert fake.runtime.as_of == coaching_date
     assistant_message_id = fake.runtime.assistant_message_id
     user_message_id = fake.runtime.user_message_id
     assert assistant_message_id is not None
     assert user_message_id is not None
+    assert (
+        f'"card_url":"/coach/{conversation_id}/messages/'
+        f'{assistant_message_id}/proposal-card"' in response.text
+    )
     assert f'"source_message_id":{assistant_message_id}' in response.text
 
     with session_factory() as session:
@@ -2269,7 +2296,7 @@ def test_invalid_proposal_date_returns_completed_stream_without_artifact(
 
     assert response.status_code == 200
     assert "event: answer.completed" in response.text
-    assert "event: proposal.created" not in response.text
+    assert "event: artifact.available" not in response.text
     assert "Welches zukünftige Datum meinst du?" in response.text
     with session_factory() as session:
         assistant = session.scalar(
@@ -2427,7 +2454,7 @@ def test_conversation_revises_accepted_workout_without_replacing_it(
         "status": "revised",
         "artifact": {"type": "workout_proposal"},
     }
-    assert response.text.count("event: proposal.created") == 1
+    assert response.text.count("event: artifact.available") == 1
     assert fake.runtime is not None
     assistant_message_id = fake.runtime.assistant_message_id
     assert assistant_message_id is not None
@@ -2794,8 +2821,9 @@ def test_proposal_survives_provider_failure_after_commit(
         data={"message": "Plane einen Lauf."},
     )
     assert response.status_code == 200
-    failed = _sse_payload(response.text, "error")
+    failed = _sse_payload(response.text, "answer.failed")
     assert 'data-message-state="failed"' in cast(str, failed["html"])
+    assert "Antwort fehlgeschlagen" in cast(str, failed["html"])
 
     with session_factory() as session:
         messages = list(
@@ -2850,7 +2878,7 @@ def test_planning_artifact_survives_provider_failure_after_commit(
     )
 
     assert response.status_code == 200
-    failed_html = cast(str, _sse_payload(response.text, "error")["html"])
+    failed_html = cast(str, _sse_payload(response.text, "answer.failed")["html"])
     assert "Verfügbarkeit aktualisiert" in failed_html
     assert "Samstag" in failed_html
     assert "90 Minuten" in failed_html
@@ -2961,7 +2989,7 @@ def test_provider_construction_failure_marks_claimed_answer_failed(
         data={"message": "Wie erholt bin ich?"},
     )
     assert response.status_code == 200
-    assert "event: error" in response.text
+    assert "event: answer.failed" in response.text
 
     with session_factory() as session:
         messages = list(
@@ -2998,7 +3026,7 @@ def test_completed_local_event_without_answer_marks_message_failed(
         data={"message": "Wie erholt bin ich?"},
     )
     assert response.status_code == 200
-    assert "event: error" in response.text
+    assert "event: answer.failed" in response.text
 
     with session_factory() as session:
         assistant = session.scalar(
@@ -3036,7 +3064,7 @@ def test_working_presentation_failure_marks_claimed_answer_failed(
     )
 
     assert response.status_code == 200
-    assert "event: error" in response.text
+    assert "event: answer.failed" in response.text
     with session_factory() as session:
         assistant = session.scalar(
             select(CoachMessage).where(
@@ -4563,7 +4591,7 @@ def test_plan_draft_survives_provider_failure_after_commit(
         data={"message": "Erstelle mir einen Wochenplan."},
     )
     assert response.status_code == 200
-    failed_html = cast(str, _sse_payload(response.text, "error")["html"])
+    failed_html = cast(str, _sse_payload(response.text, "answer.failed")["html"])
     assert "Wochenplan-Entwurf" in failed_html
 
     with session_factory() as session:

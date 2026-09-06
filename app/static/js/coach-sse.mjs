@@ -1,4 +1,11 @@
-const TERMINAL_EVENTS = new Set(["answer.completed", "error"]);
+const PRESENTATION_EVENTS = new Set([
+  "answer.started",
+  "answer.delta",
+  "artifact.available",
+  "answer.completed",
+  "answer.failed",
+]);
+const TERMINAL_EVENTS = new Set(["answer.completed", "answer.failed"]);
 
 function parseBlock(block) {
   let eventName = "message";
@@ -11,6 +18,7 @@ function parseBlock(block) {
     }
   }
   if (!dataLines.length) return null;
+  if (!PRESENTATION_EVENTS.has(eventName)) return null;
 
   try {
     return [eventName, JSON.parse(dataLines.join("\n"))];

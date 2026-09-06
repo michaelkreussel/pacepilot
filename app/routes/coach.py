@@ -316,7 +316,7 @@ def confirm_planning_goal_change(
     return RedirectResponse(f"/coach/{conversation_id}", status_code=303)
 
 
-def _proposal_event_payload(runtime: CoachRuntimeContext) -> dict[str, object]:
+def _artifact_event_payload(runtime: CoachRuntimeContext) -> dict[str, object]:
     if runtime.conversation_id is None or runtime.assistant_message_id is None:
         raise RuntimeError("Proposal event has no assistant message")
     with runtime.session_factory() as session:
@@ -375,7 +375,7 @@ async def _stream_answer(
                 "user_html": _message_html(request, user_message, None),
                 "assistant_html": _message_html(request, assistant_message, card),
                 "failure_html": _message_html(
-                    request, assistant_message, card, message_state="failed"
+                    request, assistant_message, card, message_state="interrupted"
                 ),
             }
         yield _event("answer.started", started_payload)
@@ -390,7 +390,7 @@ async def _stream_answer(
             elif event.type == "artifact_available" and event.artifact_type == "workout":
                 if not proposal_emitted:
                     failure_category = "internal_error"
-                    yield _event("proposal.created", _proposal_event_payload(runtime))
+                    yield _event("artifact.available", _artifact_event_payload(runtime))
                     proposal_emitted = True
                     failure_category = "provider_error"
             elif event.type == "completed":
@@ -483,7 +483,7 @@ async def _stream_answer(
             failure_category,
             round((monotonic() - started_at) * 1000),
         )
-        yield _event("error", {"message_id": assistant_message_id, "html": failed_html})
+        yield _event("answer.failed", {"message_id": assistant_message_id, "html": failed_html})
 
 
 @router.post("/{conversation_id}/messages")

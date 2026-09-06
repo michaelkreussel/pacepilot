@@ -22,7 +22,10 @@ def test_generated_tailwind_contains_semantic_themes() -> None:
     assert ".text-muted-foreground{" in CSS
     assert "@apply" not in CSS
     assert "@keyframes readiness-fill" in CSS
-    assert "@keyframes coach-activity-wave" in CSS
+    assert "@keyframes coach-activity-wave" not in CSS
+    assert "@keyframes coach-activity-pulse" not in CSS
+    assert ".coach-activity-wave" not in SOURCE
+    assert ".coach-activity-pulse" not in SOURCE
     assert "prefers-reduced-motion:reduce" in CSS
 
 

@@ -417,6 +417,7 @@ def test_loading_conversation_repairs_and_displays_a_stale_response(
         "Diese Antwort konnte nicht abgeschlossen werden. Bitte versuche es erneut."
         in response.text
     )
+    assert "Antwort unterbrochen" in response.text
     with session_factory() as session:
         stale = session.get(CoachMessage, stale_id)
         assert stale is not None
@@ -540,7 +541,7 @@ def test_partial_stream_failure_is_not_persisted_or_reused_as_history(
         data={"message": "first-question"},
     )
     assert failed.status_code == 200
-    assert "event: error" in failed.text
+    assert "event: answer.failed" in failed.text
 
     assert failing.persisted_user_message == ("user", "completed", "first-question")
     with session_factory() as session:
@@ -600,7 +601,7 @@ def test_missing_final_answer_text_is_a_durable_failed_outcome(
 
     failure_copy = "Diese Antwort konnte nicht abgeschlossen werden. Bitte versuche es erneut."
     assert response.status_code == 200
-    assert "event: error" in response.text
+    assert "event: answer.failed" in response.text
     assert failure_copy in response.text
     with session_factory() as session:
         assistant = session.scalar(

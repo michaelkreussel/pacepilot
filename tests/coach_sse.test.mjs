@@ -33,7 +33,7 @@ test("joins multiline data fields and accepts CRLF framing", async () => {
   const events = [];
   const source =
     'event: answer.delta\r\ndata: {"text":\r\ndata: "Zeile"}\r\n\r\n' +
-    'event: error\r\ndata: {"html":"<article></article>"}\r\n\r\n';
+    'event: answer.failed\r\ndata: {"html":"<article></article>"}\r\n\r\n';
 
   await consumeSse(bodyFromChunks([encoder.encode(source)]), (name, data) => {
     events.push([name, data]);
@@ -41,12 +41,12 @@ test("joins multiline data fields and accepts CRLF framing", async () => {
 
   assert.deepEqual(events, [
     ["answer.delta", { text: "Zeile" }],
-    ["error", { html: "<article></article>" }],
+    ["answer.failed", { html: "<article></article>" }],
   ]);
 });
 
 test("rejects malformed JSON", async () => {
-  const body = bodyFromChunks([encoder.encode("event: error\ndata: not-json\n\n")]);
+  const body = bodyFromChunks([encoder.encode("event: answer.failed\ndata: not-json\n\n")]);
 
   await assert.rejects(
     consumeSse(body, () => {}),
@@ -82,7 +82,7 @@ test("rejects a stream without a terminal event", async () => {
 });
 
 test("accepts completed and failed terminal events", async () => {
-  for (const terminalEvent of ["answer.completed", "error"]) {
+  for (const terminalEvent of ["answer.completed", "answer.failed"]) {
     const body = bodyFromChunks([
       encoder.encode(`event: ${terminalEvent}\ndata: {"html":"<article></article>"}\n\n`),
     ]);
@@ -103,4 +103,19 @@ test("stops consuming events after a terminal event", async () => {
   await consumeSse(body, (name) => events.push(name));
 
   assert.deepEqual(events, ["answer.completed"]);
+});
+
+test("ignores events outside the browser presentation contract", async () => {
+  const events = [];
+  const body = bodyFromChunks([
+    encoder.encode(
+      'event: tool.started\ndata: {"label":"Interner Schritt"}\n\n' +
+        'event: artifact.available\ndata: {"workout_id":1}\n\n' +
+        'event: answer.completed\ndata: {"html":"<article></article>"}\n\n',
+    ),
+  ]);
+
+  await consumeSse(body, (name) => events.push(name));
+
+  assert.deepEqual(events, ["artifact.available", "answer.completed"]);
 });

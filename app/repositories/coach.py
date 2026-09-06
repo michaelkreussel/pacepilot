@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import Literal
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session
 
 from app.models import CoachConversation, CoachMessage
 from app.models.user import utcnow
@@ -57,9 +57,7 @@ def conversation_messages(
     session: Session, user_id: int, conversation_id: int
 ) -> list[CoachMessage] | None:
     conversation = session.scalar(
-        select(CoachConversation)
-        .options(selectinload(CoachConversation.messages).selectinload(CoachMessage.tool_calls))
-        .where(
+        select(CoachConversation).where(
             CoachConversation.id == conversation_id,
             CoachConversation.user_id == user_id,
         )
@@ -77,7 +75,6 @@ def conversation_message_page(
     statement = (
         select(CoachMessage)
         .join(CoachConversation)
-        .options(selectinload(CoachMessage.tool_calls))
         .where(
             CoachMessage.conversation_id == conversation_id,
             CoachConversation.user_id == user_id,

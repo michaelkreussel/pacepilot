@@ -1,4 +1,4 @@
-import { consumeSse } from "./coach-sse.mjs?v=20260828-1";
+import { consumeSse } from "./coach-sse.mjs?v=20260906-1";
 
 (() => {
   const chat = document.querySelector("[data-coach-chat]");
@@ -61,7 +61,7 @@ import { consumeSse } from "./coach-sse.mjs?v=20260828-1";
     }
   };
 
-  const addProposal = async (data) => {
+  const addWorkoutArtifact = async (data) => {
     if (!live.assistant) return;
     if (
       live.assistant.artifacts.querySelector(
@@ -72,7 +72,7 @@ import { consumeSse } from "./coach-sse.mjs?v=20260828-1";
     }
     if (
       typeof data.card_url !== "string" ||
-      !data.card_url.startsWith(`/coach/${conversationId}/runs/`)
+      !data.card_url.startsWith(`/coach/${conversationId}/messages/`)
     ) {
       return;
     }
@@ -99,9 +99,9 @@ import { consumeSse } from "./coach-sse.mjs?v=20260828-1";
       startMessages(data);
     } else if (name === "answer.delta" && live.assistant && typeof data.text === "string") {
       live.assistant.answer.append(document.createTextNode(data.text));
-    } else if (name === "proposal.created") {
-      await addProposal(data);
-    } else if (name === "answer.completed" || name === "error") {
+    } else if (name === "artifact.available") {
+      await addWorkoutArtifact(data);
+    } else if (name === "answer.completed" || name === "answer.failed") {
       replaceAssistant(data.html);
     }
     scrollToBottom();
