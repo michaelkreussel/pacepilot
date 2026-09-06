@@ -848,9 +848,7 @@ def _accepted_scheduled_workout(session: Session, user: User, day: date) -> Work
 def test_coach_streams_and_persists_conversation(
     client: TestClient,
     session_factory: sessionmaker[Session],
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", False)
     fake = FakeCoachAgent()
     app.dependency_overrides[get_coach_agent_factory] = lambda: lambda: fake
     conversation_id = _new_chat(client)
@@ -914,7 +912,8 @@ def test_coach_streams_and_persists_conversation(
     assert 'aria-label="Neuen Chat starten"' in page
     assert 'aria-label="Chat löschen"' in page
     assert "data-coach-message-list" in page
-    assert "Nur lesend" in page
+    assert "Nur lesend" not in page
+    assert "Vorschläge möglich" not in page
     assert "data-coach-activity" not in page
     assert "data-tool-call" not in page
     assert "Veraltete Werkzeugaktivität" not in page
@@ -931,7 +930,6 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
     session_factory: sessionmaker[Session],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
     coaching_date = date(2026, 8, 28)
 
     class TurnStartDate(date):
@@ -1173,7 +1171,6 @@ def test_coach_assesses_daily_adaptation_as_artifact_before_explicit_apply(
     session_factory: sessionmaker[Session],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_daily_adaptation_enabled", True)
     today = date.today()
     with session_factory() as session:
         user = session.scalar(select(User))
@@ -1914,7 +1911,7 @@ def test_conversation_reads_and_updates_planning_inputs_with_server_artifacts(
 
 
 def test_planning_tool_schemas_expose_only_bounded_user_choices() -> None:
-    tools = {tool.name: tool for tool in coach_tools(workout_proposals_enabled=False)}
+    tools = {tool.name: tool for tool in coach_tools()}
     expected = {
         "get_planning_inputs": set(),
         "create_planning_goal": {"event_type", "event_name", "target_date"},
@@ -2262,7 +2259,6 @@ def test_invalid_proposal_date_returns_completed_stream_without_artifact(
     session_factory: sessionmaker[Session],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
 
     class InvalidDateAgent:
         async def stream(
@@ -2312,9 +2308,7 @@ def test_invalid_proposal_date_returns_completed_stream_without_artifact(
 
 def test_proposal_tool_schema_exposes_no_runtime_or_workout_definition() -> None:
     proposal_tool = next(
-        tool
-        for tool in coach_tools(workout_proposals_enabled=True)
-        if tool.name == "create_running_workout_proposal"
+        tool for tool in coach_tools() if tool.name == "create_running_workout_proposal"
     )
     schema_model: Any = proposal_tool.tool_call_schema
     schema = schema_model.model_json_schema()
@@ -2331,9 +2325,7 @@ def test_proposal_tool_schema_exposes_no_runtime_or_workout_definition() -> None
     assert schema["properties"]["template_id"]["enum"] == list(WORKOUT_FORMAT_IDS)
 
     revision_tool = next(
-        tool
-        for tool in coach_tools(workout_proposals_enabled=True)
-        if tool.name == "revise_running_workout_proposal"
+        tool for tool in coach_tools() if tool.name == "revise_running_workout_proposal"
     )
     revision_schema_model: Any = revision_tool.tool_call_schema
     revision_schema = revision_schema_model.model_json_schema()
@@ -2357,7 +2349,6 @@ def test_conversation_revises_accepted_workout_without_replacing_it(
     session_factory: sessionmaker[Session],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
     coaching_date = date.today()
     with session_factory() as session:
         user = session.scalar(select(User))
@@ -2492,7 +2483,6 @@ def test_conversation_revises_accepted_workout_without_replacing_it(
 def test_conversational_revision_rejects_foreign_workout_and_incomplete_runtime(
     session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
     as_of = date(2026, 8, 20)
     with session_factory() as session:
         user = User(display_name="Owner")
@@ -2576,34 +2566,15 @@ def test_conversational_revision_rejects_foreign_workout_and_incomplete_runtime(
 
 
 def test_health_trend_tool_schema_uses_analytics_metric_choices() -> None:
-    health_trends_tool = next(
-        tool
-        for tool in coach_tools(workout_proposals_enabled=False)
-        if tool.name == "get_health_trends"
-    )
+    health_trends_tool = next(tool for tool in coach_tools() if tool.name == "get_health_trends")
     schema_model: Any = health_trends_tool.tool_call_schema
     schema = schema_model.model_json_schema()
 
     assert schema["properties"]["metrics"]["items"]["enum"] == list(HEALTH_METRICS)
 
 
-def test_agent_registers_only_bounded_conversational_mutation_tools() -> None:
-    read_only = {tool.name for tool in coach_tools(workout_proposals_enabled=False)}
-    adaptation_enabled = {
-        tool.name
-        for tool in coach_tools(
-            workout_proposals_enabled=False,
-            daily_adaptation_enabled=True,
-        )
-    }
-    enabled = {tool.name for tool in coach_tools(workout_proposals_enabled=True)}
-    plans_enabled = {
-        tool.name
-        for tool in coach_tools(
-            workout_proposals_enabled=True,
-            plan_generation_enabled=True,
-        )
-    }
+def test_agent_registers_all_bounded_conversational_mutation_tools() -> None:
+    enabled = {tool.name for tool in coach_tools()}
     assert {
         "create_planning_goal",
         "update_planning_goal",
@@ -2614,28 +2585,19 @@ def test_agent_registers_only_bounded_conversational_mutation_tools() -> None:
         "create_planning_anchor",
         "update_planning_anchor",
         "deactivate_planning_anchor",
-    } <= read_only
-    assert enabled - read_only == {
+    } <= enabled
+    assert {
         "create_running_workout_proposal",
         "get_revisable_running_workouts",
         "revise_running_workout_proposal",
-    }
-    assert adaptation_enabled - read_only == {"assess_daily_adaptation"}
-    assert plans_enabled - enabled == {
+        "assess_daily_adaptation",
         "get_revisable_training_plans",
         "create_weekly_plan_draft",
         "revise_weekly_plan_draft",
         "create_training_cycle_draft",
         "revise_training_cycle_draft",
-    }
-    adaptation_tool = next(
-        tool
-        for tool in coach_tools(
-            workout_proposals_enabled=False,
-            daily_adaptation_enabled=True,
-        )
-        if tool.name == "assess_daily_adaptation"
-    )
+    } <= enabled
+    adaptation_tool = next(tool for tool in coach_tools() if tool.name == "assess_daily_adaptation")
     adaptation_schema_model: Any = adaptation_tool.tool_call_schema
     adaptation_schema = adaptation_schema_model.model_json_schema()
     assert set(adaptation_schema["properties"]) == {"workout_id"}
@@ -2659,18 +2621,12 @@ def test_agent_registers_only_bounded_conversational_mutation_tools() -> None:
             "publish_plan",
             "push_plan",
         }
-        & plans_enabled
+        & enabled
     )
 
 
 def test_plan_tool_schemas_expose_only_bounded_user_choices() -> None:
-    tools = {
-        tool.name: tool
-        for tool in coach_tools(
-            workout_proposals_enabled=True,
-            plan_generation_enabled=True,
-        )
-    }
+    tools = {tool.name: tool for tool in coach_tools()}
     expected = {
         "get_revisable_training_plans": {"limit"},
         "create_weekly_plan_draft": {"week_start", "availability"},
@@ -2732,7 +2688,6 @@ def test_plan_tool_schemas_expose_only_bounded_user_choices() -> None:
 def test_daily_adaptation_operation_uses_runtime_date_and_rejects_cross_user_workout(
     session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_daily_adaptation_enabled", True)
     today = date.today()
     with session_factory() as session:
         owner = User(display_name="Owner")
@@ -2791,7 +2746,6 @@ def test_proposal_survives_provider_failure_after_commit(
     session_factory: sessionmaker[Session],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
 
     class FailingAfterProposalAgent:
         async def stream(
@@ -3404,9 +3358,7 @@ def test_progress_tool_is_bounded_and_uses_runtime_authority(
     hidden_adaptive = json.loads(
         get_adaptive_context(runtime, focus="progress", days=7, goal_id=hidden_goal_id)
     )
-    tool = {item.name: item for item in coach_tools(workout_proposals_enabled=False)}[
-        "get_progress"
-    ]
+    tool = {item.name: item for item in coach_tools()}["get_progress"]
     schema_model: Any = tool.tool_call_schema
     schema = schema_model if isinstance(schema_model, dict) else schema_model.model_json_schema()
 
@@ -3516,7 +3468,6 @@ async def test_langchain_backend_maps_only_valid_proposal_artifact(
         api_key="test-key",
         model_id="fake/model",
         timeout_seconds=5,
-        workout_proposals_enabled=True,
     )
     events = [
         event
@@ -3554,7 +3505,6 @@ async def test_langchain_backend_maps_revised_workout_artifact(
         api_key="test-key",
         model_id="fake/model",
         timeout_seconds=5,
-        workout_proposals_enabled=True,
     )
 
     events = [
@@ -3872,8 +3822,6 @@ def _plan_draft_history(session: Session, user_id: int) -> None:
 def test_conversation_creates_weekly_plan_draft(
     session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
-    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
     with session_factory() as session:
         user = User(display_name="Owner")
         session.add(user)
@@ -3919,8 +3867,6 @@ def test_conversation_creates_weekly_plan_draft(
 def test_conversation_creates_training_cycle_draft_from_goal(
     session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
-    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
     target = PLAN_DRAFT_MONDAY + timedelta(weeks=8) - timedelta(days=1)
     with session_factory() as session:
         user = User(display_name="Owner")
@@ -3962,8 +3908,6 @@ def test_conversation_creates_training_cycle_draft_from_goal(
 def test_conversation_cycle_draft_needs_purpose_without_goal(
     session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
-    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
     target = PLAN_DRAFT_MONDAY + timedelta(weeks=8) - timedelta(days=1)
     with session_factory() as session:
         user = User(display_name="Owner")
@@ -4003,8 +3947,6 @@ def test_conversation_cycle_draft_needs_purpose_without_goal(
 def test_conversational_plan_revision_regenerates_and_rejects_unsupported(
     session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
-    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
     with session_factory() as session:
         user = User(display_name="Owner")
         session.add(user)
@@ -4106,8 +4048,6 @@ def test_conversational_plan_revision_regenerates_and_rejects_unsupported(
 def test_conversational_plan_drafts_reject_cross_user_ids_and_incomplete_runtime(
     session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
-    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
     target = PLAN_DRAFT_MONDAY + timedelta(weeks=8) - timedelta(days=1)
     with session_factory() as session:
         owner = User(display_name="Owner")
@@ -4197,8 +4137,6 @@ def test_conversational_plan_drafts_reject_cross_user_ids_and_incomplete_runtime
 def test_conversation_lists_revisable_training_plans(
     session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
-    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
     with session_factory() as session:
         owner = User(display_name="Owner")
         other = User(display_name="Other")
@@ -4259,11 +4197,9 @@ def test_conversation_lists_revisable_training_plans(
     assert len(bounded["training_cycles"]) == 1
 
 
-def test_conversational_plan_generation_requires_feature_flag(
-    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+def test_conversational_plan_generation_is_available(
+    session_factory: sessionmaker[Session],
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
-    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", False)
     target = PLAN_DRAFT_MONDAY + timedelta(weeks=8) - timedelta(days=1)
     with session_factory() as session:
         user = User(display_name="Owner")
@@ -4273,16 +4209,15 @@ def test_conversational_plan_generation_requires_feature_flag(
         session.commit()
         runtime = _plan_draft_runtime(session_factory, user)
 
-    disabled_weekly = json.loads(
+    weekly = json.loads(
         coach_operations.create_weekly_plan_draft(
             runtime,
             week_start=PLAN_DRAFT_MONDAY,
             availability=PLAN_DRAFT_AVAILABILITY,
         )
     )
-    assert disabled_weekly["status"] == "not_created"
-    assert disabled_weekly["error"]["code"] == "plan.feature_disabled"
-    disabled_cycle = json.loads(
+    assert weekly["status"] == "created"
+    cycle = json.loads(
         coach_operations.create_training_cycle_draft(
             runtime,
             start_date=PLAN_DRAFT_MONDAY,
@@ -4290,12 +4225,11 @@ def test_conversational_plan_generation_requires_feature_flag(
             purpose="Allgemeine Fitness",
         )
     )
-    assert disabled_cycle["status"] == "not_created"
-    assert disabled_cycle["error"]["code"] == "plan.feature_disabled"
+    assert cycle["status"] == "created"
 
     with session_factory() as session:
-        assert session.scalar(select(func.count()).select_from(TrainingPlan)) == 0
-        assert session.scalar(select(func.count()).select_from(TrainingCycle)) == 0
+        assert session.get(TrainingPlan, weekly["artifact"]["plan_id"]) is not None
+        assert session.get(TrainingCycle, cycle["artifact"]["cycle_id"]) is not None
 
 
 def test_conversation_renders_weekly_plan_card_with_exact_acceptance(
@@ -4303,8 +4237,6 @@ def test_conversation_renders_weekly_plan_card_with_exact_acceptance(
     session_factory: sessionmaker[Session],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
-    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
     coaching_date = PLAN_DRAFT_AS_OF
 
     class TurnStartDate(date):
@@ -4413,8 +4345,6 @@ def test_conversation_renders_training_cycle_card_with_evidence_and_warnings(
     session_factory: sessionmaker[Session],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
-    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
     coaching_date = PLAN_DRAFT_AS_OF
     cycle_target = PLAN_DRAFT_MONDAY + timedelta(weeks=8) - timedelta(days=1)
 
@@ -4511,8 +4441,6 @@ def test_conversation_renders_training_cycle_card_with_evidence_and_warnings(
 def test_sparse_weekly_card_exposes_dated_evidence_coverage_and_confidence(
     session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
-    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
     with session_factory() as session:
         user = User(display_name="Owner")
         session.add(user)
@@ -4553,8 +4481,6 @@ def test_plan_draft_survives_provider_failure_after_commit(
     session_factory: sessionmaker[Session],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
-    monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
     coaching_date = PLAN_DRAFT_AS_OF
 
     class TurnStartDate(date):

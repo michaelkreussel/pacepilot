@@ -7,7 +7,6 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
 from app.auth import CurrentUser
-from app.config import coach_feature_enabled, get_settings
 from app.database import SessionDep
 from app.onboarding import require_planning_access
 from app.repositories.workouts import workouts_between
@@ -79,8 +78,6 @@ def new_training_cycle(
     user: CurrentUser,
     error: Annotated[str | None, Query(max_length=500)] = None,
 ) -> HTMLResponse:
-    if not coach_feature_enabled(get_settings().coach_plan_generation_enabled, user.id):
-        raise HTTPException(status_code=404, detail="Seite nicht gefunden")
     goals = list_goals(session, user.id, status="active")
     current_week_start = date.today() - timedelta(days=date.today().weekday())
     start = (
@@ -112,8 +109,6 @@ def generate_week_plan(
     user: CurrentUser,
     week_start: str = Form(),
 ) -> RedirectResponse:
-    if not coach_feature_enabled(get_settings().coach_plan_generation_enabled, user.id):
-        raise HTTPException(status_code=404, detail="Seite nicht gefunden")
     today = date.today()
     try:
         starts_on = date.fromisoformat(week_start)
@@ -130,8 +125,6 @@ def generate_week_plan(
 def accept_week_plan(
     plan_id: int, revision_id: int, session: SessionDep, user: CurrentUser
 ) -> RedirectResponse:
-    if not coach_feature_enabled(get_settings().coach_plan_generation_enabled, user.id):
-        raise HTTPException(status_code=404, detail="Seite nicht gefunden")
     try:
         revision = accept_training_plan_revision(
             session, user, plan_id=plan_id, revision_id=revision_id
@@ -153,8 +146,6 @@ def generate_training_cycle(
     goal_id: int | None = Form(None),
     event_type: str | None = Form(None),
 ) -> RedirectResponse:
-    if not coach_feature_enabled(get_settings().coach_plan_generation_enabled, user.id):
-        raise HTTPException(status_code=404, detail="Seite nicht gefunden")
     today = date.today()
     try:
         candidate = plan_training_cycle(
@@ -178,8 +169,6 @@ def generate_training_cycle(
 def accept_training_cycle(
     cycle_id: int, revision_id: int, session: SessionDep, user: CurrentUser
 ) -> RedirectResponse:
-    if not coach_feature_enabled(get_settings().coach_plan_generation_enabled, user.id):
-        raise HTTPException(status_code=404, detail="Seite nicht gefunden")
     try:
         accept_training_cycle_revision(session, user, cycle_id=cycle_id, revision_id=revision_id)
     except TrainingCyclePersistenceError as exc:
@@ -191,8 +180,6 @@ def accept_training_cycle(
 def training_cycle_detail(
     cycle_id: int, request: Request, session: SessionDep, user: CurrentUser
 ) -> HTMLResponse:
-    if not coach_feature_enabled(get_settings().coach_plan_generation_enabled, user.id):
-        raise HTTPException(status_code=404, detail="Seite nicht gefunden")
     loaded = get_current_training_cycle(session, user.id, cycle_id)
     if loaded is None:
         raise HTTPException(status_code=404, detail="Mehrwochenplan nicht gefunden")

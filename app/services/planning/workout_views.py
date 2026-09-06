@@ -213,7 +213,6 @@ class WorkoutDetailView:
     training_fit_effective_date: date | None = None
     training_fit_acknowledgement_required: bool = False
     training_fit_schedule_acknowledgement_required: bool = False
-    garmin_sync_allowed: bool = True
     proposal_actions_allowed: bool = True
     edit_allowed: bool = True
 
@@ -419,27 +418,12 @@ def workout_detail_view(
     )
     from app.config import (
         DEFERRED_QUALITY_TEMPLATE_IDS,
-        coach_feature_enabled,
         deferred_quality_templates_enabled,
-        get_settings,
     )
 
-    settings = get_settings()
-    current_is_generated = current.source_type in {
-        "coach_single",
-        "coach_daily_adaptation",
-        "coach_weekly_plan",
-    }
     deferred_quality_actions_allowed = (
         current.template_id not in DEFERRED_QUALITY_TEMPLATE_IDS
         or deferred_quality_templates_enabled()
-    )
-    source_feature_enabled = (
-        coach_feature_enabled(settings.coach_daily_adaptation_enabled, workout.user_id)
-        if current.source_type == "coach_daily_adaptation"
-        else coach_feature_enabled(settings.coach_plan_generation_enabled, workout.user_id)
-        if current.source_type == "coach_weekly_plan"
-        else coach_feature_enabled(settings.coach_workout_proposals_enabled, workout.user_id)
     )
     return WorkoutDetailView(
         id=workout.id,
@@ -471,24 +455,7 @@ def workout_detail_view(
         training_fit_schedule_acknowledgement_required=(
             training_fit_schedule_acknowledgement_required
         ),
-        garmin_sync_allowed=(
-            not current_is_generated
-            or (
-                source_feature_enabled
-                and coach_feature_enabled(settings.coach_garmin_sync_enabled, workout.user_id)
-            )
-        ),
-        proposal_actions_allowed=(
-            (
-                coach_feature_enabled(settings.coach_daily_adaptation_enabled, workout.user_id)
-                if current.source_type == "coach_daily_adaptation"
-                else coach_feature_enabled(settings.coach_plan_generation_enabled, workout.user_id)
-                if current.source_type == "coach_weekly_plan"
-                else not current_is_generated
-                or coach_feature_enabled(settings.coach_workout_proposals_enabled, workout.user_id)
-            )
-            and deferred_quality_actions_allowed
-        ),
+        proposal_actions_allowed=deferred_quality_actions_allowed,
         edit_allowed=(
             current.source_type not in {"coach_daily_adaptation", "coach_weekly_plan"}
             and (current.source_type != "coach_single" or current.template_id == "easy_run")

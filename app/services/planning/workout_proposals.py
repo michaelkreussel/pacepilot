@@ -9,7 +9,6 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.config import coach_feature_enabled, get_settings
 from app.models import GarminAccount, User, Workout, WorkoutRevision
 from app.services.analytics.athlete_data import AthleteDataService
 from app.services.analytics.running_intensity import RunningShadowAnalysis
@@ -502,11 +501,6 @@ class RunningProposalService:
         if existing is not None:
             workout_service.verify_proposal_origin(existing, origin)
             return existing
-        if not coach_feature_enabled(get_settings().coach_workout_proposals_enabled, self.user.id):
-            raise WorkoutProposalError(
-                "Trainingsvorschläge sind noch nicht freigeschaltet.",
-                code="proposal.feature_disabled",
-            )
         data, metadata = self._build_candidate(
             template_id=request.template_id,
             suggested_for=request.suggested_for,

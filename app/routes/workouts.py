@@ -10,7 +10,6 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from pydantic import ValidationError
 
 from app.auth import CurrentUser
-from app.config import coach_feature_enabled, get_settings
 from app.database import SessionDep
 from app.models import WorkoutRevision
 from app.onboarding import require_planning_access
@@ -292,8 +291,6 @@ def _operation_error_redirect(
 
 
 def _adaptation_preview(service: WorkoutService, workout_id: int) -> DailyAdaptationPreview | None:
-    if not coach_feature_enabled(get_settings().coach_daily_adaptation_enabled, service.user.id):
-        return None
     try:
         return DailyAdaptationService(
             service.session,

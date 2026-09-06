@@ -24,8 +24,14 @@
     "deactivate_planning_anchor": ["anchor_id"],
     "record_pre_session_feedback": ["available_minutes", "illness_signal", "notes", "pain", "workout_id"],
     "record_post_session_feedback": ["activity_id", "completion_percent", "notes", "overall_feel", "pain", "session_rpe", "stopped_reason"],
+    "assess_daily_adaptation": ["workout_id"],
     "create_running_workout_proposal": ["available_minutes", "suggested_for", "template_id"],
     "get_revisable_running_workouts": ["limit"],
-    "revise_running_workout_proposal": ["available_minutes", "edit_scope", "revision_id", "suggested_for", "workout_id"]
+    "revise_running_workout_proposal": ["available_minutes", "edit_scope", "revision_id", "suggested_for", "workout_id"],
+    "get_revisable_training_plans": ["limit"],
+    "create_weekly_plan_draft": ["availability", "week_start"],
+    "revise_weekly_plan_draft": ["availability", "edit_scope", "plan_id", "week_start"],
+    "create_training_cycle_draft": ["event_type", "goal_id", "purpose", "start_date", "target_date"],
+    "revise_training_cycle_draft": ["cycle_id", "edit_scope", "event_type", "goal_id", "purpose", "start_date", "target_date"]
   }
 }

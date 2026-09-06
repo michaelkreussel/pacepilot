@@ -249,7 +249,6 @@ class WorkoutService:
         expected_identity: RevisionIdentity,
         idempotency_key: str,
     ) -> Workout:
-        self._ensure_daily_adaptation_enabled()
         if metadata.source_type != "coach_daily_adaptation":
             raise WorkoutTransitionError(
                 "Die Revisionsquelle ist keine tägliche Anpassung.",
@@ -355,7 +354,6 @@ class WorkoutService:
         idempotency_key: str,
         acknowledge_elevated_warning: bool = False,
     ) -> Workout:
-        self._ensure_daily_adaptation_enabled()
         if metadata.source_type != "coach_daily_adaptation":
             raise WorkoutTransitionError(
                 "Die Revisionsquelle ist keine tägliche Anpassung.",
@@ -516,7 +514,6 @@ class WorkoutService:
         idempotency_key: str,
         acknowledge_elevated_warning: bool = False,
     ) -> Workout:
-        self._ensure_daily_adaptation_enabled()
         workout = self.get(workout_id)
         request_hash = self._adaptation_decision_hash(
             "KEEP", context_fingerprint, expected_identity
@@ -597,7 +594,6 @@ class WorkoutService:
         expected_identity: RevisionIdentity,
         idempotency_key: str,
     ) -> Workout:
-        self._ensure_daily_adaptation_enabled()
         workout = self.get(workout_id)
         request_hash = self._adaptation_decision_hash(
             "REST", context_fingerprint, expected_identity
@@ -822,7 +818,7 @@ class WorkoutService:
         origin: ProposalOrigin | None = None,
     ) -> Workout:
         workout = self.get(workout_id)
-        self._ensure_generated_proposals_enabled(workout)
+        self._ensure_generated_action_allowed(workout)
         current = self._current_revision(workout)
         if current.source_type == "coach_weekly_plan":
             raise WorkoutTransitionError(
@@ -995,7 +991,7 @@ class WorkoutService:
 
     def accept(self, workout_id: int, command: AcceptRevisionCommand) -> Workout:
         workout = self.get(workout_id)
-        self._ensure_generated_proposals_enabled(workout)
+        self._ensure_generated_action_allowed(workout)
         revision = self._current_revision(workout)
         replacement_source = (
             self.get(workout.replaces_workout_id)
@@ -1315,7 +1311,7 @@ class WorkoutService:
 
     def schedule(self, workout_id: int, command: ScheduleWorkoutCommand) -> Workout:
         workout = self.get(workout_id)
-        self._ensure_generated_proposals_enabled(workout)
+        self._ensure_generated_action_allowed(workout)
         accepted_replacement = self.session.scalar(
             select(Workout.id).where(
                 Workout.user_id == self.user.id,
@@ -1459,7 +1455,7 @@ class WorkoutService:
             binding.remote_scheduled_for is not None and binding.remote_scheduled_for != target_date
         )
         if not retirement_required:
-            self._ensure_generated_garmin_enabled(workout)
+            self._ensure_generated_garmin_allowed(workout)
         self._validate_for_sync(workout, revision)
         retirement_only = (
             target_date is None
@@ -1492,7 +1488,7 @@ class WorkoutService:
             if account is None:
                 account = self._garmin_account()
             self._retire_replaced_calendar(workout, account)
-        self._ensure_generated_garmin_enabled(workout)
+        self._ensure_generated_garmin_allowed(workout)
         if account is None:
             account = self._garmin_account()
         operations = GarminWorkoutOperations(
@@ -1592,7 +1588,7 @@ class WorkoutService:
 
     def push(self, workout_id: int, *, acknowledge_elevated_warning: bool = False) -> Workout:
         workout = self.get(workout_id)
-        self._ensure_generated_garmin_enabled(workout)
+        self._ensure_generated_garmin_allowed(workout)
         revision = self._accepted_revision(workout)
         binding = self._binding(workout)
         self._validate_for_sync(workout, revision)
@@ -1938,7 +1934,7 @@ class WorkoutService:
                 code="garmin.state_unknown",
             )
 
-    def _ensure_generated_garmin_enabled(self, workout: Workout) -> None:
+    def _ensure_generated_garmin_allowed(self, workout: Workout) -> None:
         revision = (
             self._revision(workout, workout.accepted_revision_id)
             if workout.accepted_revision_id is not None
@@ -1952,29 +1948,9 @@ class WorkoutService:
             return
         from app.config import (
             DEFERRED_QUALITY_TEMPLATE_IDS,
-            coach_feature_enabled,
             deferred_quality_templates_enabled,
-            get_settings,
         )
 
-        settings = get_settings()
-        source_enabled = (
-            coach_feature_enabled(settings.coach_daily_adaptation_enabled, self.user.id)
-            if revision.source_type == "coach_daily_adaptation"
-            else coach_feature_enabled(settings.coach_plan_generation_enabled, self.user.id)
-            if revision.source_type == "coach_weekly_plan"
-            else coach_feature_enabled(settings.coach_workout_proposals_enabled, self.user.id)
-        )
-        if not source_enabled:
-            raise WorkoutTransitionError(
-                "Die erzeugende Coach-Funktion ist derzeit deaktiviert.",
-                code="coach.source_feature_disabled",
-            )
-        if not coach_feature_enabled(settings.coach_garmin_sync_enabled, self.user.id):
-            raise WorkoutTransitionError(
-                "Die Garmin-Übertragung für Coach-Vorschläge ist noch nicht freigeschaltet.",
-                code="coach.garmin_sync_disabled",
-            )
         if (
             revision.template_id in DEFERRED_QUALITY_TEMPLATE_IDS
             and not deferred_quality_templates_enabled()
@@ -2007,16 +1983,13 @@ class WorkoutService:
                     code="proposal.quality_spacing_violation",
                 )
 
-    def _ensure_generated_proposals_enabled(self, workout: Workout) -> None:
+    def _ensure_generated_action_allowed(self, workout: Workout) -> None:
         from app.config import (
             DEFERRED_QUALITY_TEMPLATE_IDS,
-            coach_feature_enabled,
             deferred_quality_templates_enabled,
-            get_settings,
         )
 
         revision = self._current_revision(workout)
-        settings = get_settings()
         if (
             revision.template_id in DEFERRED_QUALITY_TEMPLATE_IDS
             and not deferred_quality_templates_enabled()
@@ -2047,36 +2020,6 @@ class WorkoutService:
                     "Zu einer angenommenen Qualitätseinheit fehlen mindestens 48 Stunden Abstand.",
                     code="proposal.quality_spacing_violation",
                 )
-        if revision.source_type == "coach_daily_adaptation":
-            if not coach_feature_enabled(settings.coach_daily_adaptation_enabled, self.user.id):
-                raise WorkoutTransitionError(
-                    "Aktionen für tägliche Anpassungen sind derzeit deaktiviert.",
-                    code="adaptation.feature_disabled",
-                )
-            return
-        if revision.source_type == "coach_weekly_plan":
-            if not coach_feature_enabled(settings.coach_plan_generation_enabled, self.user.id):
-                raise WorkoutTransitionError(
-                    "Aktionen für Wochenplan-Vorschläge sind derzeit deaktiviert.",
-                    code="plan.feature_disabled",
-                )
-            return
-        if revision.source_type == "coach_single" and not coach_feature_enabled(
-            settings.coach_workout_proposals_enabled, self.user.id
-        ):
-            raise WorkoutTransitionError(
-                "Aktionen für Coach-Vorschläge sind derzeit deaktiviert.",
-                code="coach.workout_proposals_disabled",
-            )
-
-    def _ensure_daily_adaptation_enabled(self) -> None:
-        from app.config import coach_feature_enabled, get_settings
-
-        if not coach_feature_enabled(get_settings().coach_daily_adaptation_enabled, self.user.id):
-            raise WorkoutTransitionError(
-                "Die tägliche Trainingsanpassung ist noch nicht freigeschaltet.",
-                code="adaptation.feature_disabled",
-            )
 
     def _execution(self, workout: Workout, revision: WorkoutRevision) -> AcceptedWorkoutExecution:
         binding = self._binding(workout)

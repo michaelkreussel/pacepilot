@@ -8,7 +8,6 @@ from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.config import coach_feature_enabled, get_settings
 from app.models import (
     CoachMessage,
     PostSessionFeedback,
@@ -1215,10 +1214,6 @@ def revise_running_workout_proposal(
     )
 
 
-def _plan_generation_enabled(user_id: int) -> bool:
-    return coach_feature_enabled(get_settings().coach_plan_generation_enabled, user_id)
-
-
 def _draft_availability(
     availability: Sequence[AvailabilityInput] | None,
 ) -> tuple[DayAvailability, ...] | None:
@@ -1296,16 +1291,6 @@ def create_weekly_plan_draft(
     """
     with runtime.session_factory() as session:
         user, assistant_message = _proposal_runtime(session, runtime)
-        if not _plan_generation_enabled(user.id):
-            return _json(
-                {
-                    "status": "not_created",
-                    "error": {
-                        "code": "plan.feature_disabled",
-                        "message": "Die Planerstellung ist derzeit deaktiviert.",
-                    },
-                }
-            )
         try:
             candidate = plan_shadow_week(
                 session,
@@ -1350,16 +1335,6 @@ def revise_weekly_plan_draft(
     """Revise only the week or availability of an exact weekly plan draft."""
     with runtime.session_factory() as session:
         user, assistant_message = _proposal_runtime(session, runtime)
-        if not _plan_generation_enabled(user.id):
-            return _json(
-                {
-                    "status": "not_revised",
-                    "error": {
-                        "code": "plan.feature_disabled",
-                        "message": "Die Planänderung ist derzeit deaktiviert.",
-                    },
-                }
-            )
         alternative = {
             "command": "create_weekly_plan_draft",
             "description": (
@@ -1440,16 +1415,6 @@ def create_training_cycle_draft(
     """
     with runtime.session_factory() as session:
         user, assistant_message = _proposal_runtime(session, runtime)
-        if not _plan_generation_enabled(user.id):
-            return _json(
-                {
-                    "status": "not_created",
-                    "error": {
-                        "code": "plan.feature_disabled",
-                        "message": "Die Planerstellung ist derzeit deaktiviert.",
-                    },
-                }
-            )
         if goal_id is None and event_type is None and (purpose is None or not purpose.strip()):
             return _json(
                 {
@@ -1509,16 +1474,6 @@ def revise_training_cycle_draft(
     """Revise only the supported date, goal, or purpose fields of an exact cycle draft."""
     with runtime.session_factory() as session:
         user, assistant_message = _proposal_runtime(session, runtime)
-        if not _plan_generation_enabled(user.id):
-            return _json(
-                {
-                    "status": "not_revised",
-                    "error": {
-                        "code": "plan.feature_disabled",
-                        "message": "Die Planänderung ist derzeit deaktiviert.",
-                    },
-                }
-            )
         alternative = {
             "command": "create_training_cycle_draft",
             "description": (

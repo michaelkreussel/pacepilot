@@ -12,7 +12,6 @@ from app.models import (
     User,
     Workout,
     WorkoutEvent,
-    WorkoutGarminBinding,
     WorkoutRevision,
     WorkoutValidationRun,
 )
@@ -25,7 +24,6 @@ from app.services.coach.provider import (
 from app.services.garmin.workout_export import scheduled_workout_ids
 from app.services.observability import decision_trace, operational_metrics
 from app.services.planning.validator import WorkoutValidationError
-from app.services.planning.workout_service import WorkoutService, WorkoutTransitionError
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -87,7 +85,7 @@ def test_synthetic_contract_fixtures_contain_no_sensitive_fields() -> None:
 def test_coach_tool_and_prompt_contracts_are_versioned_and_stable() -> None:
     fixture = json.loads((FIXTURES / "coach" / "tool_contract.json").read_text(encoding="utf-8"))
     actual: dict[str, list[str]] = {}
-    for tool in coach_tools(workout_proposals_enabled=True):
+    for tool in coach_tools():
         schema = tool.tool_call_schema
         json_schema = schema if isinstance(schema, dict) else cast(Any, schema).model_json_schema()
         actual[tool.name] = sorted(json_schema.get("properties", {}))
@@ -113,7 +111,7 @@ def test_prompt_injection_corpus_cannot_expand_coach_mutation_authority() -> Non
     fixture = json.loads(
         (FIXTURES / "coach" / "prompt_injection_cases.json").read_text(encoding="utf-8")
     )
-    tool_names = {tool.name for tool in coach_tools(workout_proposals_enabled=True)}
+    tool_names = {tool.name for tool in coach_tools()}
 
     assert fixture["source"] == "synthetic"
     assert len(fixture["cases"]) >= 4
@@ -135,6 +133,10 @@ def test_prompt_injection_corpus_cannot_expand_coach_mutation_authority() -> Non
         "record_pre_session_feedback",
         "record_post_session_feedback",
         "revise_running_workout_proposal",
+        "create_weekly_plan_draft",
+        "revise_weekly_plan_draft",
+        "create_training_cycle_draft",
+        "revise_training_cycle_draft",
     }
     assert tool_names - allowed_mutations == {
         "get_adaptive_context",
@@ -149,20 +151,18 @@ def test_prompt_injection_corpus_cannot_expand_coach_mutation_authority() -> Non
         "get_upcoming_workouts",
         "get_revisable_running_workouts",
         "get_planning_inputs",
+        "assess_daily_adaptation",
+        "get_revisable_training_plans",
     }
-    plan_tool_names = {
-        tool.name
-        for tool in coach_tools(workout_proposals_enabled=True, plan_generation_enabled=True)
-    }
-    assert plan_tool_names - tool_names == {
+    assert {
         "get_revisable_training_plans",
         "create_weekly_plan_draft",
         "revise_weekly_plan_draft",
         "create_training_cycle_draft",
         "revise_training_cycle_draft",
-    }
+    } <= tool_names
     assert (
-        plan_tool_names
+        tool_names
         & {
             "accept_training_plan",
             "accept_training_cycle",
@@ -277,61 +277,3 @@ def test_metrics_endpoint_is_hidden_without_valid_bearer_token(
     assert hidden.status_code == 404
     assert visible.status_code == 200
     assert visible.json()["schema_version"] == "operational-metrics.v2"
-
-
-@pytest.mark.parametrize(
-    ("source_type", "disabled_setting"),
-    [
-        ("coach_single", "coach_workout_proposals_enabled"),
-        ("coach_daily_adaptation", "coach_daily_adaptation_enabled"),
-        ("coach_weekly_plan", "coach_plan_generation_enabled"),
-    ],
-)
-def test_source_feature_kill_switch_blocks_generated_garmin_side_effects(
-    source_type: str,
-    disabled_setting: str,
-    session_factory: sessionmaker[Session],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    settings = get_settings()
-    monkeypatch.setattr(settings, "coach_workout_proposals_enabled", True)
-    monkeypatch.setattr(settings, "coach_daily_adaptation_enabled", True)
-    monkeypatch.setattr(settings, "coach_plan_generation_enabled", True)
-    monkeypatch.setattr(settings, "coach_garmin_sync_enabled", True)
-    monkeypatch.setattr(settings, disabled_setting, False)
-    with session_factory() as session:
-        user = User(display_name="Rollback Athlete")
-        session.add(user)
-        session.flush()
-        workout = Workout(
-            user_id=user.id,
-            name="Generated",
-            sport="running",
-            definition_version=1,
-            definition={"blocks": []},
-            source_type=source_type,
-            approval_status="accepted",
-        )
-        session.add(workout)
-        session.flush()
-        revision = WorkoutRevision(
-            workout_id=workout.id,
-            revision_number=1,
-            name="Generated",
-            sport="running",
-            definition_version=1,
-            definition={"blocks": []},
-            source_type=source_type,
-            content_hash="c" * 64,
-        )
-        session.add(revision)
-        session.flush()
-        workout.current_revision_id = revision.id
-        workout.accepted_revision_id = revision.id
-        session.add(WorkoutGarminBinding(workout_id=workout.id))
-        session.commit()
-
-        with pytest.raises(WorkoutTransitionError) as exc_info:
-            WorkoutService(session, user).publish(workout.id)
-
-    assert exc_info.value.code == "coach.source_feature_disabled"

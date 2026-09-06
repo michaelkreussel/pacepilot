@@ -197,13 +197,8 @@ Settings are read from environment variables and, for local development, from `.
 | `LLM_API_KEY` | unset | OpenRouter API key for the optional coach |
 | `LLM_MODEL` | `z-ai/glm-5.3-flash` | OpenRouter model ID; Coach calls are routed only through Z.AI |
 | `LLM_TIMEOUT_SECONDS` | `60` | Timeout for an OpenRouter model call |
-| `COACH_WORKOUT_PROPOSALS_ENABLED` | `false` | Enables future local coach workout proposals |
-| `COACH_GARMIN_SYNC_ENABLED` | `false` | Enables future Garmin sync for accepted coach workouts |
-| `COACH_DAILY_ADAPTATION_ENABLED` | `false` | Enables future coach daily adaptations |
-| `COACH_PLAN_GENERATION_ENABLED` | `false` | Enables future coach week and multi-week plans |
 | `COACH_PLANNER_HISTORY_GATES_ENABLED` | `true` | Enforces observed week/frequency eligibility; development can disable it for planner testing |
 | `COACH_DEFERRED_QUALITY_TEMPLATES_ENABLED` | `false` | Development-only override for testing deferred threshold and VO2max templates |
-| `COACH_ROLLOUT_USER_IDS` | unset | Optional comma-separated internal cohort; malformed values fail closed |
 
 Production mode requires `SESSION_SECRET` and `SESSION_HTTPS_ONLY=true`. Configuring only one half
 of an OAuth provider's client ID and secret pair also prevents startup.
@@ -224,9 +219,8 @@ The Compose setup:
 - applies pending migrations before serving requests; and
 - starts exactly one Uvicorn worker.
 
-The included Compose file forwards deployment, OAuth, LLM, and coach feature settings. Coach
-feature flags never disable the existing manual workout or Garmin flows. Add other tuning
-variables to a Compose override if their defaults need to change in the container.
+The included Compose file forwards deployment, OAuth, LLM, and Coach test settings. Add other
+tuning variables to a Compose override if their defaults need to change in the container.
 
 For internet-facing installations, place PacePilot behind an HTTPS reverse proxy and configure
 `PUBLIC_BASE_URL`. A reverse proxy and TLS termination are not included.
@@ -264,9 +258,10 @@ directory, and raw-data directory accordingly.
   `DATA_DIR/raw/activities/user-<user-id>/<year>/` and may contain GPS routes.
 - Application logs are written to the console and `DATA_DIR/logs/pacepilot.log`. Coach logs contain
   identifiers and tool names, but not question text, answer text, or health values.
-- Enabling the coach sends prompts, bounded conversation history, and selected athlete data to
-  OpenRouter. If proposals are enabled, its single bounded mutation tool can create only an
-  unaccepted and unscheduled server-side proposal; it cannot accept, schedule, publish, or push it.
+- Configuring the Coach sends prompts, bounded conversation history, and selected athlete data to
+  OpenRouter. Its bounded mutation tools can create deterministic, unaccepted workout and plan
+  drafts, record feedback, and propose adaptations; they cannot accept, schedule, publish, or push
+  workouts or plans.
 - The web interface loads some assets from third-party CDNs. Activity maps request OpenStreetMap
   tiles, which exposes the viewed map area to the tile provider.
 - Disconnecting Garmin removes token files but retains imported data. The separate Garmin-data

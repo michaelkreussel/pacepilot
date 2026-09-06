@@ -10,7 +10,6 @@ from enum import StrEnum
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.config import coach_feature_enabled, get_settings
 from app.models import (
     PreSessionFeedback,
     User,
@@ -215,11 +214,6 @@ class DailyAdaptationService:
         allow_open_candidate: bool = False,
         expected_replacement_id: int | None = None,
     ) -> DailyAdaptationPreview:
-        if not coach_feature_enabled(get_settings().coach_daily_adaptation_enabled, self.user.id):
-            raise DailyAdaptationError(
-                "Die tägliche Trainingsanpassung ist noch nicht freigeschaltet.",
-                code="adaptation.feature_disabled",
-            )
         workout = find_workout(self.session, self.user.id, workout_id)
         if workout is None:
             raise DailyAdaptationError("Workout nicht gefunden.", code="adaptation.not_found")

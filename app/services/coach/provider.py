@@ -892,30 +892,19 @@ COACH_TOOLS = (
 )
 
 
-def coach_tools(
-    *,
-    workout_proposals_enabled: bool,
-    daily_adaptation_enabled: bool = False,
-    plan_generation_enabled: bool = False,
-) -> tuple[BaseTool, ...]:
-    tools = (*COACH_TOOLS, assess_daily_adaptation) if daily_adaptation_enabled else COACH_TOOLS
-    if workout_proposals_enabled:
-        tools = (
-            *tools,
-            create_running_workout_proposal,
-            get_revisable_running_workouts,
-            revise_running_workout_proposal,
-        )
-    if plan_generation_enabled:
-        tools = (
-            *tools,
-            get_revisable_training_plans,
-            create_weekly_plan_draft,
-            revise_weekly_plan_draft,
-            create_training_cycle_draft,
-            revise_training_cycle_draft,
-        )
-    return tools
+def coach_tools() -> tuple[BaseTool, ...]:
+    return (
+        *COACH_TOOLS,
+        assess_daily_adaptation,
+        create_running_workout_proposal,
+        get_revisable_running_workouts,
+        revise_running_workout_proposal,
+        get_revisable_training_plans,
+        create_weekly_plan_draft,
+        revise_weekly_plan_draft,
+        create_training_cycle_draft,
+        revise_training_cycle_draft,
+    )
 
 
 class OpenRouterCoachProvider:
@@ -925,16 +914,10 @@ class OpenRouterCoachProvider:
         api_key: str,
         model_id: str,
         timeout_seconds: float,
-        workout_proposals_enabled: bool = False,
-        daily_adaptation_enabled: bool = False,
-        plan_generation_enabled: bool = False,
     ) -> None:
         self._api_key = api_key
         self._model_id = model_id
         self._timeout_seconds = timeout_seconds
-        self._workout_proposals_enabled = workout_proposals_enabled
-        self._daily_adaptation_enabled = daily_adaptation_enabled
-        self._plan_generation_enabled = plan_generation_enabled
 
     def _build_agent(self) -> Any:
         model = _ToolMarkupAdapter(
@@ -960,19 +943,15 @@ class OpenRouterCoachProvider:
         )
         return create_agent(
             model,
-            tools=coach_tools(
-                workout_proposals_enabled=self._workout_proposals_enabled,
-                daily_adaptation_enabled=self._daily_adaptation_enabled,
-                plan_generation_enabled=self._plan_generation_enabled,
-            ),
+            tools=coach_tools(),
             system_prompt=SYSTEM_PROMPT
             + ADAPTIVE_CONTEXT_PROMPT
             + PLANNING_INPUT_PROMPT
             + PROGRESS_PROMPT
             + FEEDBACK_PROMPT
-            + (DAILY_ADAPTATION_PROMPT if self._daily_adaptation_enabled else "")
-            + (PROPOSAL_PROMPT if self._workout_proposals_enabled else "")
-            + (PLANS_PROMPT if self._plan_generation_enabled else ""),
+            + DAILY_ADAPTATION_PROMPT
+            + PROPOSAL_PROMPT
+            + PLANS_PROMPT,
             context_schema=CoachRuntimeContext,
             middleware=middleware,
             name="pacepilot_health_coach",

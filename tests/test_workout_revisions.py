@@ -181,9 +181,6 @@ def test_edit_after_acceptance_keeps_previous_execution(
 def test_bounded_revision_of_accepted_proposal_requires_explicit_replacement(
     session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from app.config import get_settings
-
-    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
     as_of = date(2026, 8, 20)
     with session_factory() as session:
         service, user = _service(session)

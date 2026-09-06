@@ -35,10 +35,6 @@ class Settings(BaseSettings):
     llm_api_key: str | None = None
     llm_model: str = "z-ai/glm-5.3-flash"
     llm_timeout_seconds: float = Field(default=60, ge=5, le=180)
-    coach_workout_proposals_enabled: bool = False
-    coach_garmin_sync_enabled: bool = False
-    coach_daily_adaptation_enabled: bool = False
-    coach_plan_generation_enabled: bool = False
     coach_planner_history_gates_enabled: bool = True
     coach_deferred_quality_templates_enabled: bool = False
     mutation_rate_limit_per_minute: int = Field(default=120, ge=10, le=10_000)
@@ -46,7 +42,6 @@ class Settings(BaseSettings):
     auth_rate_limit_per_minute: int = Field(default=20, ge=1, le=1_000)
     metrics_bearer_token: str | None = None
     garmin_operation_stale_minutes: int = Field(default=15, ge=5, le=1440)
-    coach_rollout_user_ids: str = ""
     account_export_rate_limit_per_minute: int = Field(default=2, ge=1, le=60)
 
     @field_validator("metrics_bearer_token", mode="before")
@@ -81,12 +76,6 @@ class Settings(BaseSettings):
             )
         if self.metrics_bearer_token is not None and len(self.metrics_bearer_token) < 32:
             raise ValueError("METRICS_BEARER_TOKEN must contain at least 32 characters")
-        if not self.coach_workout_proposals_enabled and (
-            self.coach_garmin_sync_enabled
-            or self.coach_daily_adaptation_enabled
-            or self.coach_plan_generation_enabled
-        ):
-            raise ValueError("Coach workout features require COACH_WORKOUT_PROPOSALS_ENABLED")
         return self
 
 
@@ -108,16 +97,3 @@ def deferred_quality_templates_enabled() -> bool:
     return (
         settings.environment == "development" and settings.coach_deferred_quality_templates_enabled
     )
-
-
-def coach_feature_enabled(enabled: bool, user_id: int) -> bool:
-    if not enabled:
-        return False
-    configured = get_settings().coach_rollout_user_ids.strip()
-    if not configured:
-        return True
-    try:
-        allowed = {int(value.strip()) for value in configured.split(",") if value.strip()}
-    except ValueError:
-        return False
-    return user_id in allowed

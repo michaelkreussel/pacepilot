@@ -106,7 +106,6 @@ def _identity(workout: Workout, revision: WorkoutRevision) -> RevisionIdentity:
 def test_easy_run_proposal_is_deterministic_revisioned_and_unscheduled(
     session_factory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
     with session_factory() as session:
         user = _user(session)
         _history(session, user.id, date.today())
@@ -184,7 +183,6 @@ def test_easy_run_proposal_is_deterministic_revisioned_and_unscheduled(
 def test_one_assistant_message_can_source_multiple_proposals(
     session_factory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
     with session_factory() as session:
         user = _user(session)
         _history(session, user.id, date.today())
@@ -236,7 +234,6 @@ def test_one_assistant_message_can_source_multiple_proposals(
 def test_easy_run_proposal_uses_requested_60_minutes(
     session_factory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
     with session_factory() as session:
         user = _user(session)
         _history(session, user.id, date.today())
@@ -272,8 +269,6 @@ def test_every_registered_format_produces_an_advisory_draft_with_sparse_history(
     session_factory,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    settings = get_settings()
-    monkeypatch.setattr(settings, "coach_workout_proposals_enabled", True)
     with session_factory() as session:
         user = _user(session)
 
@@ -317,7 +312,6 @@ def test_every_registered_format_produces_an_advisory_draft_with_sparse_history(
 def test_stale_idempotency_precheck_rolls_back_duplicate_proposal(
     session_factory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
     with session_factory() as session:
         user = _user(session)
         _history(session, user.id, date.today())
@@ -362,7 +356,6 @@ def test_stale_idempotency_precheck_rolls_back_duplicate_proposal(
 def test_missing_history_and_safety_stop_are_persisted_as_advisory_warnings(
     session_factory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
     with session_factory() as session:
         user = _user(session)
         service = RunningProposalService(session, user, as_of=date.today())
@@ -406,7 +399,6 @@ def test_missing_history_and_safety_stop_are_persisted_as_advisory_warnings(
 def test_easy_run_uses_personal_garmin_hr_range_as_device_target(
     session_factory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
     with session_factory() as session:
         user = _user(session)
         _history(session, user.id, date.today())
@@ -573,7 +565,6 @@ def test_easy_run_hr_target_falls_back_to_valid_default_profile(session_factory)
 def test_proposal_edit_accept_schedule_and_reject_lifecycle(
     session_factory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
     with session_factory() as session:
         user = _user(session)
         _history(session, user.id, date.today())
@@ -684,7 +675,6 @@ def test_proposal_edit_accept_schedule_and_reject_lifecycle(
 def test_bounded_revision_reexpands_the_same_registered_format(
     session_factory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
     as_of = date(2026, 8, 20)
     with session_factory() as session:
         user = _user(session)
@@ -739,7 +729,6 @@ def test_bounded_revision_reexpands_the_same_registered_format(
 def test_bounded_revision_rejects_non_deterministic_workout_without_persisting(
     session_factory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
     as_of = date(2026, 8, 20)
     with session_factory() as session:
         user = _user(session)
@@ -781,7 +770,6 @@ def test_bounded_revision_rejects_non_deterministic_workout_without_persisting(
 def test_generated_edit_and_schedule_enforce_proposal_contract(
     session_factory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
     with session_factory() as session:
         user = _user(session)
         _history(session, user.id, date.today())
@@ -808,18 +796,6 @@ def test_generated_edit_and_schedule_enforce_proposal_contract(
             )
         assert sport_error.value.code == "proposal.easy_run_sport_invalid"
 
-        monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", False)
-        with pytest.raises(WorkoutTransitionError) as feature_error:
-            service.accept(
-                workout.id,
-                AcceptRevisionCommand(
-                    identity=_identity(workout, revision),
-                    context_fingerprint=service.acceptance_context(workout.id).fingerprint,
-                ),
-            )
-        assert feature_error.value.code == "coach.workout_proposals_disabled"
-
-        monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
         service.accept(
             workout.id,
             AcceptRevisionCommand(
@@ -843,7 +819,6 @@ def test_quality_spacing_warns_without_hiding_the_requested_draft(
     session_factory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     settings = get_settings()
-    monkeypatch.setattr(settings, "coach_workout_proposals_enabled", True)
     monkeypatch.setattr(settings, "coach_planner_history_gates_enabled", False)
     monkeypatch.setattr(settings, "coach_deferred_quality_templates_enabled", True)
     with session_factory() as session:
@@ -909,7 +884,6 @@ def test_generated_proposal_uses_shared_idempotent_garmin_service(
         def schedule_workout(self, _workout_id: str, _day: str) -> None:
             self.schedules += 1
 
-    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
     with session_factory() as session:
         user = _user(session)
         _history(session, user.id, date.today())
@@ -937,11 +911,6 @@ def test_generated_proposal_uses_shared_idempotent_garmin_service(
             ),
         )
 
-        with pytest.raises(WorkoutTransitionError) as disabled:
-            service.publish(proposal.id)
-        assert disabled.value.code == "coach.garmin_sync_disabled"
-
-        monkeypatch.setattr(get_settings(), "coach_garmin_sync_enabled", True)
         session.add(GarminAccount(user_id=user.id, connected_at=utcnow()))
         session.commit()
         service.publish(proposal.id)
@@ -954,7 +923,6 @@ def test_generated_proposal_uses_shared_idempotent_garmin_service(
 def test_direct_proposal_routes_return_404_and_no_form_remains(
     client, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_workout_proposals_enabled", True)
     page = client.get("/coach")
     assert "Workout vorschlagen" not in page.text
     assert "workout-proposals" not in page.text

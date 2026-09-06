@@ -7,7 +7,6 @@ from hypothesis import given
 from hypothesis import strategies as st
 from sqlalchemy import select
 
-from app.config import get_settings
 from app.models import (
     GarminAccount,
     PreSessionFeedback,
@@ -466,7 +465,6 @@ def _accepted_workout(session, user: User, day: date) -> Workout:
 def test_elevated_keep_requires_acknowledgement_and_records_authorization(
     session_factory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_daily_adaptation_enabled", True)
     today = date.today()
     with session_factory() as session:
         user = User(display_name="Elevated Keep Runner")
@@ -526,7 +524,6 @@ def test_elevated_keep_requires_acknowledgement_and_records_authorization(
 def test_elevated_easy_replacement_requires_acknowledgement_and_records_authorization(
     session_factory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_daily_adaptation_enabled", True)
     today = date.today()
 
     def elevated_assessment(*_args, **_kwargs) -> TrainingFitAssessment:
@@ -593,7 +590,6 @@ def test_elevated_easy_replacement_requires_acknowledgement_and_records_authoriz
 def test_only_owned_accepted_scheduled_running_workout_today_is_eligible(
     session_factory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_daily_adaptation_enabled", True)
     today = date.today()
     with session_factory() as session:
         user = User(display_name="Daily Runner")
@@ -619,7 +615,6 @@ def test_only_owned_accepted_scheduled_running_workout_today_is_eligible(
 def test_feedback_and_week_changes_invalidate_adaptation_context(
     session_factory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_daily_adaptation_enabled", True)
     today = date.today()
     with session_factory() as session:
         user = User(display_name="Context Runner")
@@ -653,7 +648,6 @@ def test_feedback_and_week_changes_invalidate_adaptation_context(
 def test_availability_uses_only_target_workout_feedback_from_today(
     session_factory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_daily_adaptation_enabled", True)
     today = date.today()
     with session_factory() as session:
         user = User(display_name="Freshness Runner")
@@ -722,25 +716,9 @@ def test_availability_uses_only_target_workout_feedback_from_today(
         }
 
 
-def test_assessment_is_blocked_while_feature_flag_is_off(
-    session_factory, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(get_settings(), "coach_daily_adaptation_enabled", False)
-    with session_factory() as session:
-        user = User(display_name="Flag Runner")
-        session.add(user)
-        session.flush()
-
-        with pytest.raises(DailyAdaptationError) as disabled:
-            DailyAdaptationService(session, user, as_of=date.today()).assess_today(1)
-
-        assert disabled.value.code == "adaptation.feature_disabled"
-
-
 def test_content_adaptation_appends_revision_and_preserves_original(
     session_factory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_daily_adaptation_enabled", True)
     today = date.today()
     with session_factory() as session:
         user = User(display_name="Revision Runner")
@@ -807,7 +785,6 @@ def test_content_adaptation_appends_revision_and_preserves_original(
 def test_discard_then_new_adaptation_uses_next_revision_number(
     session_factory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_daily_adaptation_enabled", True)
     today = date.today()
     with session_factory() as session:
         user = User(display_name="Discard Runner")
@@ -862,7 +839,6 @@ def test_discard_then_new_adaptation_uses_next_revision_number(
 def test_easy_replacement_is_separate_workout_and_acceptance_swaps_schedule(
     session_factory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_daily_adaptation_enabled", True)
     today = date.today()
     with session_factory() as session:
         user = User(display_name="Replacement Runner")
@@ -958,7 +934,6 @@ def test_easy_replacement_is_separate_workout_and_acceptance_swaps_schedule(
 def test_discarded_replacement_preserves_original_and_allows_another(
     session_factory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_daily_adaptation_enabled", True)
     today = date.today()
     with session_factory() as session:
         user = User(display_name="Replacement Reject Runner")
@@ -1004,7 +979,6 @@ def test_discarded_replacement_preserves_original_and_allows_another(
 def test_adaptation_events_keep_request_id(
     session_factory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_daily_adaptation_enabled", True)
     today = date.today()
     with session_factory() as session:
         user = User(display_name="Audit Runner")
@@ -1031,7 +1005,6 @@ def test_adaptation_events_keep_request_id(
 def test_keep_preserves_execution_and_rest_cancels_only_today(
     session_factory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_daily_adaptation_enabled", True)
     today = date.today()
     with session_factory() as session:
         user = User(display_name="Keep Rest Runner")
@@ -1080,7 +1053,6 @@ def test_keep_preserves_execution_and_rest_cancels_only_today(
 
 
 def test_apply_rejects_stale_context(session_factory, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(get_settings(), "coach_daily_adaptation_enabled", True)
     today = date.today()
     with session_factory() as session:
         user = User(display_name="Stale Runner")
@@ -1112,8 +1084,6 @@ def test_apply_rejects_stale_context(session_factory, monkeypatch: pytest.Monkey
 def test_synced_adaptation_updates_known_remote_identity_without_upload(
     session_factory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_daily_adaptation_enabled", True)
-    monkeypatch.setattr(get_settings(), "coach_garmin_sync_enabled", True)
     today = date.today()
 
     class FakeGarmin:
@@ -1197,8 +1167,6 @@ def test_synced_adaptation_updates_known_remote_identity_without_upload(
 def test_synced_replacement_retires_old_calendar_before_new_upload(
     session_factory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_daily_adaptation_enabled", True)
-    monkeypatch.setattr(get_settings(), "coach_garmin_sync_enabled", True)
     today = date.today()
 
     class FakeGarmin:
@@ -1298,8 +1266,6 @@ def test_synced_replacement_retires_old_calendar_before_new_upload(
 def test_elevated_advisory_rest_can_remove_existing_garmin_calendar_entry(
     session_factory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_daily_adaptation_enabled", True)
-    monkeypatch.setattr(get_settings(), "coach_garmin_sync_enabled", True)
     today = date.today()
 
     class FakeGarmin:
@@ -1373,7 +1339,6 @@ def test_elevated_advisory_rest_can_remove_existing_garmin_calendar_entry(
 def test_original_cannot_be_deleted_while_replacement_is_active(
     session_factory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_daily_adaptation_enabled", True)
     today = date.today()
     with session_factory() as session:
         user = User(display_name="Protected Original Runner")
@@ -1413,7 +1378,7 @@ def test_original_cannot_be_deleted_while_replacement_is_active(
         assert accepted_guard.value.code == "adaptation.replacement_active"
 
 
-def test_adaptation_routes_are_user_scoped_and_flagged(
+def test_adaptation_routes_are_user_scoped_and_available(
     client, session_factory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     today = date.today()
@@ -1422,27 +1387,10 @@ def test_adaptation_routes_are_user_scoped_and_flagged(
         assert user is not None
         workout = _accepted_workout(session, user, today)
 
-    monkeypatch.setattr(get_settings(), "coach_daily_adaptation_enabled", False)
-    page_off = client.get(f"/workouts/{workout.id}")
-    assert page_off.status_code == 200
-    assert "Tägliche Anpassung" not in page_off.text
-    blocked = client.post(
-        f"/workouts/{workout.id}/adaptation/apply",
-        data={
-            "adaptation_class": "KEEP",
-            "context_fingerprint": "x",
-            "idempotency_key": "route-off-1",
-        },
-        follow_redirects=False,
-    )
-    assert blocked.status_code == 303
-    assert "error" in blocked.headers["location"]
-
-    monkeypatch.setattr(get_settings(), "coach_daily_adaptation_enabled", True)
-    page_on = client.get(f"/workouts/{workout.id}")
-    assert page_on.status_code == 200
-    assert "Tägliche Anpassung" in page_on.text
-    assert "Training beibehalten anwenden" in page_on.text
+    page = client.get(f"/workouts/{workout.id}")
+    assert page.status_code == 200
+    assert "Tägliche Anpassung" in page.text
+    assert "Training beibehalten anwenden" in page.text
     invalid_key = client.post(
         f"/workouts/{workout.id}/adaptation/apply",
         data={
@@ -1454,7 +1402,7 @@ def test_adaptation_routes_are_user_scoped_and_flagged(
     )
     assert invalid_key.status_code == 422
 
-    fingerprint_match = re.search(r'name="context_fingerprint" value="([0-9a-f]+)"', page_on.text)
+    fingerprint_match = re.search(r'name="context_fingerprint" value="([0-9a-f]+)"', page.text)
     assert fingerprint_match is not None
     applied = client.post(
         f"/workouts/{workout.id}/adaptation/apply",
@@ -1504,7 +1452,6 @@ def _discard_fields(page_html: str) -> dict[str, str]:
 def test_week_impact_is_explicit_and_non_increasing(
     session_factory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_daily_adaptation_enabled", True)
     today = date.today()
     with session_factory() as session:
         user = User(display_name="Week Impact Runner")
@@ -1523,7 +1470,6 @@ def test_week_impact_is_explicit_and_non_increasing(
 def test_unknown_remote_state_blocks_adaptation_acceptance(
     session_factory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_daily_adaptation_enabled", True)
     today = date.today()
     with session_factory() as session:
         user = User(display_name="Unknown State Runner")

@@ -7,7 +7,6 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.config import get_settings
 from app.models import (
     CoachConversation,
     CoachMessage,
@@ -300,7 +299,7 @@ def test_plan_revisions_and_memberships_are_immutable(session_factory) -> None:
         session.rollback()
 
 
-def test_weekly_workout_lifecycle_uses_plan_and_garmin_flags(session_factory, monkeypatch) -> None:
+def test_weekly_workout_lifecycle_preserves_generated_workout_constraints(session_factory) -> None:
     with session_factory() as session:
         user = _user(session)
         persist_week_candidate(session, user, _candidate())
@@ -316,12 +315,6 @@ def test_weekly_workout_lifecycle_uses_plan_and_garmin_flags(session_factory, mo
         )
         service = WorkoutService(session, user)
 
-        monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", False)
-        with pytest.raises(WorkoutTransitionError) as disabled:
-            service.accept(first.id, AcceptRevisionCommand(identity, "unused"))
-        assert disabled.value.code == "plan.feature_disabled"
-
-        monkeypatch.setattr(get_settings(), "coach_plan_generation_enabled", True)
         data = WorkoutInput(
             name=first_revision.name,
             sport=first_revision.sport,
@@ -351,11 +344,6 @@ def test_weekly_workout_lifecycle_uses_plan_and_garmin_flags(session_factory, mo
                 session, user.id, MONDAY, MONDAY + timedelta(days=6)
             )
         )
-
-        monkeypatch.setattr(get_settings(), "coach_garmin_sync_enabled", False)
-        with pytest.raises(WorkoutTransitionError) as sync_disabled:
-            service.publish(first.id)
-        assert sync_disabled.value.code == "coach.garmin_sync_disabled"
 
         second_revision = session.get(WorkoutRevision, second.current_revision_id)
         assert second_revision is not None
