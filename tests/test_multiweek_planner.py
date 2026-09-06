@@ -7,7 +7,6 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.config import get_settings
 from app.models import (
     Activity,
     AthleteAvailability,
@@ -56,9 +55,7 @@ from app.services.planning.weekly_planner import (
 START = date(2026, 8, 31)
 
 
-def _weekly_candidates(
-    count: int = 8, *, enable_deferred_quality: bool = False
-) -> tuple[WeeklyPlanCandidate, ...]:
+def _weekly_candidates(count: int = 8) -> tuple[WeeklyPlanCandidate, ...]:
     output = []
     for offset in range(count):
         snapshot = WeeklyPlannerSnapshot(
@@ -88,13 +85,7 @@ def _weekly_candidates(
             intensity_fingerprint="i" * 64,
             knowledge_base_version=get_knowledge_registry().version,
         )
-        output.append(
-            compose_week(
-                snapshot,
-                enforce_history_gates=not enable_deferred_quality,
-                enable_deferred_quality=enable_deferred_quality,
-            )
-        )
+        output.append(compose_week(snapshot))
     return tuple(output)
 
 
@@ -129,16 +120,12 @@ def test_cycle_has_versioned_phases_and_taper() -> None:
     assert all(item.role != "strides" for item in cycle.weeks[-1].weekly_plan.sessions)
 
 
-def test_development_cycle_uses_phase_specific_quality_templates(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(get_settings(), "coach_deferred_quality_templates_enabled", True)
+def test_cycle_uses_phase_specific_quality_templates() -> None:
     cycle = compose_training_cycle(
-        _weekly_candidates(enable_deferred_quality=True),
+        _weekly_candidates(),
         start_date=START,
         target_date=START + timedelta(weeks=7, days=6),
         event_type="10k",
-        enable_deferred_quality=True,
     )
 
     templates_by_phase = {
@@ -149,7 +136,8 @@ def test_development_cycle_uses_phase_specific_quality_templates(
     assert "threshold_cruise" not in templates_by_phase["base"]
     assert "vo2_intervals" not in templates_by_phase["taper"]
     assert cycle.validation_report["valid"] is True
-    assert cycle.assumptions["deferred_quality_development_override"] is True
+    assert "deferred_quality_development_override" not in cycle.assumptions
+    assert "unsupported_templates_are_not_introduced" not in cycle.assumptions
 
 
 def test_partial_target_week_does_not_fail_taper_reduction() -> None:
@@ -338,11 +326,10 @@ def test_history_limited_weeks_produce_cycle_level_warning() -> None:
 
 def test_existing_quality_spacing_produces_warning_instead_of_refusal() -> None:
     cycle = compose_training_cycle(
-        _weekly_candidates(enable_deferred_quality=True),
+        _weekly_candidates(),
         start_date=START,
         target_date=START + timedelta(weeks=7, days=6),
         event_type="10k",
-        enable_deferred_quality=True,
         existing_quality_check=lambda _day: True,
     )
 
@@ -950,17 +937,12 @@ def test_persist_cycle_rolls_back_all_weeks_when_later_week_fails(session_factor
         assert session.scalar(select(func.count()).select_from(Workout)) == 0
 
 
-def test_persist_cycle_replays_deferred_quality_templates(
-    session_factory,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(get_settings(), "coach_deferred_quality_templates_enabled", True)
+def test_persist_cycle_replays_phase_quality_templates(session_factory) -> None:
     candidate = compose_training_cycle(
-        _weekly_candidates(enable_deferred_quality=True),
+        _weekly_candidates(),
         start_date=START,
         target_date=START + timedelta(weeks=7, days=6),
         event_type="10k",
-        enable_deferred_quality=True,
     )
     with session_factory() as session:
         user = _user(session)
@@ -976,15 +958,13 @@ def test_persist_cycle_replays_deferred_quality_templates(
         )
         assert template_ids == {"threshold_cruise", "vo2_intervals"}
 
-        monkeypatch.setattr(get_settings(), "coach_deferred_quality_templates_enabled", False)
-        with pytest.raises(TrainingCyclePersistenceError) as disabled:
-            accept_training_cycle_revision(
-                session,
-                user,
-                cycle_id=revision.cycle_id,
-                revision_id=revision.id,
-            )
-        assert disabled.value.code == "cycle.deferred_quality_disabled"
+        accepted = accept_training_cycle_revision(
+            session,
+            user,
+            cycle_id=revision.cycle_id,
+            revision_id=revision.id,
+        )
+        assert accepted.id == revision.id
 
 
 def test_reactivating_cycle_revision_restores_weekly_revision_pointers(session_factory) -> None:
@@ -995,14 +975,14 @@ def test_reactivating_cycle_revision_restores_weekly_revision_pointers(session_f
         event_type="half_marathon",
     )
     changed_weeks = list(_weekly_candidates())
-    changed_week = changed_weeks[3]
+    changed_week = changed_weeks[0]
     changed_sessions = tuple(
         replace(item, planned_minutes=item.planned_minutes - 5)
         if item.role == "easy_run" and item.planned_minutes > 30
         else item
         for item in changed_week.sessions
     )
-    changed_weeks[3] = replace(
+    changed_weeks[0] = replace(
         changed_week,
         sessions=changed_sessions,
         input_fingerprint="c" * 64,

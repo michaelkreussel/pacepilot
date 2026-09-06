@@ -36,8 +36,6 @@
 </header>
 
 <section class="mb-4 rounded-xl border border-border bg-surface p-4" aria-labelledby="cycles-title">
-  {% if not features.coach_planner_history_gates %}<p class="mb-3 rounded-lg border border-warning/30 bg-warning-subtle p-3 text-sm font-semibold text-warning-emphasis">Planner-Testmodus: Wochen- und Frequenz-Gates sind deaktiviert.</p>{% endif %}
-  {% if features.coach_deferred_quality_templates %}<p class="mb-3 rounded-lg border border-warning/30 bg-warning-subtle p-3 text-sm font-semibold text-warning-emphasis">Quality-Testmodus: Schwellen- und VO₂max-Templates sind für Tests freigeschaltet.</p>{% endif %}
   <div class="flex flex-wrap items-center justify-between gap-3">
     <div><h2 class="font-display text-lg font-semibold" id="cycles-title">Mehrwochenpläne</h2><p class="mt-1 text-xs text-muted-foreground">Versionierte Trainingszyklen mit Phasen und einzelnen Workout-Vorschlägen.</p></div>
     <a class="text-sm font-semibold text-primary hover:text-primary-hover" href="/plans/cycles/new">Neuen Plan erstellen</a>

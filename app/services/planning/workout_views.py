@@ -213,7 +213,6 @@ class WorkoutDetailView:
     training_fit_effective_date: date | None = None
     training_fit_acknowledgement_required: bool = False
     training_fit_schedule_acknowledgement_required: bool = False
-    proposal_actions_allowed: bool = True
     edit_allowed: bool = True
 
     @property
@@ -416,15 +415,6 @@ def workout_detail_view(
         if binding is not None
         else None
     )
-    from app.config import (
-        DEFERRED_QUALITY_TEMPLATE_IDS,
-        deferred_quality_templates_enabled,
-    )
-
-    deferred_quality_actions_allowed = (
-        current.template_id not in DEFERRED_QUALITY_TEMPLATE_IDS
-        or deferred_quality_templates_enabled()
-    )
     return WorkoutDetailView(
         id=workout.id,
         current=revision_view(current, context_fingerprint=context_fingerprint),
@@ -455,7 +445,6 @@ def workout_detail_view(
         training_fit_schedule_acknowledgement_required=(
             training_fit_schedule_acknowledgement_required
         ),
-        proposal_actions_allowed=deferred_quality_actions_allowed,
         edit_allowed=(
             current.source_type not in {"coach_daily_adaptation", "coach_weekly_plan"}
             and (current.source_type != "coach_single" or current.template_id == "easy_run")

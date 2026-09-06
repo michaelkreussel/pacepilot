@@ -1946,20 +1946,6 @@ class WorkoutService:
             "coach_weekly_plan",
         }:
             return
-        from app.config import (
-            DEFERRED_QUALITY_TEMPLATE_IDS,
-            deferred_quality_templates_enabled,
-        )
-
-        if (
-            revision.template_id in DEFERRED_QUALITY_TEMPLATE_IDS
-            and not deferred_quality_templates_enabled()
-        ):
-            raise WorkoutTransitionError(
-                "Development-Qualitätstemplates können außerhalb des Testmodus nicht "
-                "übertragen werden.",
-                code="coach.deferred_quality_disabled",
-            )
         from app.services.planning.workout_proposals import (
             QUALITY_TEMPLATE_IDS,
             quality_density_conflicts,
@@ -1984,20 +1970,7 @@ class WorkoutService:
                 )
 
     def _ensure_generated_action_allowed(self, workout: Workout) -> None:
-        from app.config import (
-            DEFERRED_QUALITY_TEMPLATE_IDS,
-            deferred_quality_templates_enabled,
-        )
-
         revision = self._current_revision(workout)
-        if (
-            revision.template_id in DEFERRED_QUALITY_TEMPLATE_IDS
-            and not deferred_quality_templates_enabled()
-        ):
-            raise WorkoutTransitionError(
-                "Aktionen für Development-Qualitätstemplates sind derzeit deaktiviert.",
-                code="coach.deferred_quality_disabled",
-            )
         from app.services.planning.workout_proposals import (
             QUALITY_TEMPLATE_IDS,
             quality_density_conflicts,

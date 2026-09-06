@@ -298,7 +298,6 @@ def _intervals(
         confidence="low",
         uncertainty=[
             "distance_unknown_for_time_based_workout",
-            "deferred_quality_template_development_override",
             "individual_response_requires_baseline_validation",
         ],
     )

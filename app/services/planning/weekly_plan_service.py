@@ -5,7 +5,6 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.config import DEFERRED_QUALITY_TEMPLATE_IDS
 from app.models import (
     TrainingPlan,
     TrainingPlanRevision,
@@ -15,6 +14,7 @@ from app.models import (
 )
 from app.services.planning.planning_commands import WeekPlanRevisionInput
 from app.services.planning.registry import get_knowledge_registry
+from app.services.planning.registry_models import IntervalStructure
 from app.services.planning.validator import WorkoutInput
 from app.services.planning.weekly_planner import (
     DayAvailability,
@@ -248,32 +248,24 @@ def _persist_week_candidate(
     observed_runs = (
         round(float(context.get("observed_runs_per_week", 0))) if isinstance(context, dict) else 0
     )
-    history_gates = candidate.generation_context.get("history_gates")
-    if isinstance(history_gates, dict):
-        consistent_weeks = int(
-            history_gates.get("effective_consistent_running_weeks", consistent_weeks)
-        )
-        observed_runs = int(history_gates.get("effective_runs_per_week", observed_runs))
+    registry = get_knowledge_registry()
     try:
         for position, item in enumerate(candidate.sessions):
+            template = registry.workouts.get(item.template_id)
+            is_interval_template = isinstance(
+                template.structure if template is not None else None, IntervalStructure
+            )
             facts: set[str] = set()
             if item.role == "long_run":
                 facts.add("sufficient_recent_long_run_baseline")
             elif item.role == "strides":
                 facts.add("familiar_with_relaxed_fast_running")
-            elif item.template_id in DEFERRED_QUALITY_TEMPLATE_IDS:
-                facts.update(
-                    {
-                        "reliable_intensity_model",
-                        "reliable_current_performance_model",
-                        "quality_density_validation",
-                    }
-                )
-            is_deferred_quality = item.template_id in DEFERRED_QUALITY_TEMPLATE_IDS
+            elif is_interval_template and template is not None:
+                facts.update(template.eligibility.requirements)
             expanded = expand_workout_template(
                 item.template_id,
                 None
-                if item.role == "strides" or is_deferred_quality
+                if item.role == "strides" or is_interval_template
                 else TemplateParameters(duration_minutes=item.planned_minutes),
                 eligibility=TemplateEligibilityContext(
                     consistent_running_weeks=consistent_weeks,

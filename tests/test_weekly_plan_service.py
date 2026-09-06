@@ -50,9 +50,7 @@ from app.services.planning.workout_views import workout_detail_view
 MONDAY = date(2026, 8, 31)
 
 
-def _candidate(
-    *, enforce_history_gates: bool = True, sparse_history: bool = False
-) -> WeeklyPlanCandidate:
+def _candidate(*, sparse_history: bool = False) -> WeeklyPlanCandidate:
     return compose_week(
         WeeklyPlannerSnapshot(
             week_start=MONDAY,
@@ -80,7 +78,6 @@ def _candidate(
             intensity_fingerprint="i" * 64,
             knowledge_base_version=get_knowledge_registry().version,
         ),
-        enforce_history_gates=enforce_history_gates,
     )
 
 
@@ -168,7 +165,7 @@ def test_persist_week_in_transaction_leaves_rollback_to_caller(session_factory) 
 def test_persist_sparse_week_creates_advisory_draft_with_conservative_scope(
     session_factory,
 ) -> None:
-    candidate = _candidate(enforce_history_gates=False, sparse_history=True)
+    candidate = _candidate(sparse_history=True)
     with session_factory() as session:
         user = _user(session)
 

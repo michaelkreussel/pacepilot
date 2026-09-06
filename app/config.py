@@ -35,8 +35,6 @@ class Settings(BaseSettings):
     llm_api_key: str | None = None
     llm_model: str = "z-ai/glm-5.3-flash"
     llm_timeout_seconds: float = Field(default=60, ge=5, le=180)
-    coach_planner_history_gates_enabled: bool = True
-    coach_deferred_quality_templates_enabled: bool = False
     mutation_rate_limit_per_minute: int = Field(default=120, ge=10, le=10_000)
     coach_rate_limit_per_minute: int = Field(default=12, ge=1, le=1_000)
     auth_rate_limit_per_minute: int = Field(default=20, ge=1, le=1_000)
@@ -62,18 +60,6 @@ class Settings(BaseSettings):
                 raise ValueError("SESSION_SECRET must be configured in production")
             if not self.session_https_only:
                 raise ValueError("SESSION_HTTPS_ONLY must be enabled in production")
-            if not self.coach_planner_history_gates_enabled:
-                raise ValueError(
-                    "COACH_PLANNER_HISTORY_GATES_ENABLED must be enabled in production"
-                )
-        if self.coach_deferred_quality_templates_enabled and self.environment != "development":
-            raise ValueError(
-                "COACH_DEFERRED_QUALITY_TEMPLATES_ENABLED is allowed only in development"
-            )
-        if not self.coach_planner_history_gates_enabled and self.environment != "development":
-            raise ValueError(
-                "COACH_PLANNER_HISTORY_GATES_ENABLED may be disabled only in development"
-            )
         if self.metrics_bearer_token is not None and len(self.metrics_bearer_token) < 32:
             raise ValueError("METRICS_BEARER_TOKEN must contain at least 32 characters")
         return self
@@ -87,13 +73,3 @@ def get_settings() -> Settings:
 def coach_provider_configured() -> bool:
     settings = get_settings()
     return bool(settings.llm_api_key and settings.llm_model)
-
-
-DEFERRED_QUALITY_TEMPLATE_IDS = frozenset({"threshold_cruise", "vo2_intervals"})
-
-
-def deferred_quality_templates_enabled() -> bool:
-    settings = get_settings()
-    return (
-        settings.environment == "development" and settings.coach_deferred_quality_templates_enabled
-    )

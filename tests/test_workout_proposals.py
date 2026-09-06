@@ -3,7 +3,6 @@ from datetime import date, datetime, timedelta
 import pytest
 from sqlalchemy import func, select
 
-from app.config import get_settings
 from app.models import (
     Activity,
     CoachConversation,
@@ -815,12 +814,7 @@ def test_generated_edit_and_schedule_enforce_proposal_contract(
         assert date_error.value.code == "workout.schedule_date_mismatch"
 
 
-def test_quality_spacing_warns_without_hiding_the_requested_draft(
-    session_factory, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    settings = get_settings()
-    monkeypatch.setattr(settings, "coach_planner_history_gates_enabled", False)
-    monkeypatch.setattr(settings, "coach_deferred_quality_templates_enabled", True)
+def test_quality_spacing_warns_without_hiding_the_requested_draft(session_factory) -> None:
     with session_factory() as session:
         user = _user(session)
         _history(session, user.id, date.today())

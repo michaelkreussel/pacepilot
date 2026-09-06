@@ -8,9 +8,6 @@
     <p class="max-w-2xl text-sm leading-6 text-muted-foreground">PacePilot plant Re-Entry, Base, Build, Specific und Taper als versionierte Vorschau. Jede materielle Änderung muss ausdrücklich angenommen werden. Verpasste Einheiten werden nicht nachgeholt.</p>
   </header>
 
-  {% if not features.coach_planner_history_gates %}<div class="rounded-xl border border-warning/30 bg-warning-subtle p-4 text-sm text-warning-emphasis" role="status"><strong>Planner-Testmodus aktiv.</strong> Wochen- und Frequenzanforderungen werden für diese Vorschau übergangen; die übrigen Sicherheits- und Validierungsregeln bleiben aktiv.</div>{% endif %}
-  {% if features.coach_deferred_quality_templates %}<div class="rounded-xl border border-warning/30 bg-warning-subtle p-4 text-sm text-warning-emphasis" role="status"><strong>Quality-Testmodus aktiv.</strong> Build- und Specific-Phasen können Schwellen- bzw. VO₂max-Intervalle enthalten.</div>{% endif %}
-
   {% if error %}<div class="rounded-xl border border-danger/25 bg-danger-subtle p-4 text-sm text-danger-emphasis" role="alert"><strong>Plan konnte nicht erstellt werden.</strong><p class="mt-1">{{ error }}</p></div>{% endif %}
 
   {% if goals %}

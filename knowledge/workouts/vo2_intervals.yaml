@@ -1,6 +1,6 @@
 id: vo2_intervals
 version: 1.0.0
-status: deferred
+status: active
 name: VO₂max-Intervalle
 sport: running
 purpose: upper_aerobic_power
@@ -41,7 +41,7 @@ evidence_refs:
   - E-SRPE-001
 product_heuristic:
   product_default: true
-  rationale: Exact interval values and eligibility thresholds are conservative defaults and remain disabled pending dedicated tests.
+  rationale: Exact interval values and eligibility thresholds are conservative defaults; history and spacing signals remain advisory inputs.
   status: initial_product_default
   reviewed_on: 2026-08-24
 garmin_capabilities:

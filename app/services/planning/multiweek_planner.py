@@ -8,7 +8,6 @@ from math import ceil
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.config import deferred_quality_templates_enabled
 from app.models import (
     TrainingCycle,
     TrainingCycleRevision,
@@ -300,20 +299,24 @@ def _quality_templates(phase: str, event_type: str) -> tuple[str, ...]:
     return ()
 
 
-def _insert_deferred_quality(
+def _insert_phase_quality(
     candidate: WeeklyPlanCandidate,
     *,
     phase: str,
     event_type: str,
-) -> WeeklyPlanCandidate:
+) -> tuple[WeeklyPlanCandidate, bool]:
     template_ids = _quality_templates(phase, event_type)
     if not template_ids or not candidate.sessions:
-        return candidate
-    history = candidate.generation_context.get("history_gates")
-    if not isinstance(history, dict):
-        return candidate
-    consistent_weeks = int(history.get("effective_consistent_running_weeks", 0))
-    runs_per_week = int(history.get("effective_runs_per_week", 0))
+        return candidate, False
+    baseline = candidate.generation_context.get("baseline")
+    consistent_weeks = (
+        int(baseline.get("consistent_running_weeks", 0)) if isinstance(baseline, dict) else 0
+    )
+    observed_runs = (
+        int(round(float(baseline.get("observed_runs_per_week", 0))))
+        if isinstance(baseline, dict)
+        else 0
+    )
     replacement_indexes = sorted(
         (
             index
@@ -340,7 +343,7 @@ def _insert_deferred_quality(
                     template_id,
                     eligibility=TemplateEligibilityContext(
                         consistent_running_weeks=consistent_weeks,
-                        runs_per_week=runs_per_week,
+                        runs_per_week=observed_runs,
                         available_minutes=budget,
                         facts={
                             "reliable_intensity_model",
@@ -365,12 +368,11 @@ def _insert_deferred_quality(
                     if template_id == "vo2_intervals"
                     else "Die Aufbauphase setzt einen kontrollierten Schwellenreiz."
                 ),
-                warnings=("planner.deferred_quality_development_override",),
+                warnings=("planner.phase_quality_placed",),
                 load_estimate_json=expanded.load_estimate.model_dump(mode="json"),
             )
             context = dict(candidate.generation_context)
-            context["deferred_quality"] = {
-                "development_override": True,
+            context["phase_quality"] = {
                 "template_id": template_id,
                 "phase": phase,
                 "eligibility_facts": [
@@ -379,34 +381,14 @@ def _insert_deferred_quality(
                     "reliable_intensity_model",
                 ],
             }
-            report = dict(candidate.validation_report)
-            raw_checks = report.get("checks", [])
-            checks = list(raw_checks) if isinstance(raw_checks, list) else []
-            checks = [
-                {
-                    **check,
-                    "code": "planner.templates.active_or_development_allowlist",
-                }
-                if isinstance(check, dict) and check.get("code") == "planner.templates.active_only"
-                else check
-                for check in checks
-            ]
-            checks.append(
-                {
-                    "code": "planner.deferred_quality_development_override",
-                    "result": "bypassed",
-                    "template_id": template_id,
-                }
-            )
-            report["checks"] = checks
             adjusted = replace(
                 candidate,
                 sessions=tuple(sessions),
                 generation_context=context,
-                validation_report=report,
+                validation_report=candidate.validation_report,
             )
-            return replace(adjusted, input_fingerprint=_candidate_fingerprint(adjusted))
-    return candidate
+            return replace(adjusted, input_fingerprint=_candidate_fingerprint(adjusted)), True
+    return candidate, False
 
 
 def _candidate_fingerprint(candidate: WeeklyPlanCandidate) -> str:
@@ -539,7 +521,6 @@ def compose_training_cycle(
     goal_id: int | None = None,
     effective_reentry: bool = False,
     interrupted_weeks: frozenset[int] = frozenset(),
-    enable_deferred_quality: bool = False,
     purpose: str | None = None,
     existing_quality_check: Callable[[date], bool] | None = None,
 ) -> TrainingCycleCandidate:
@@ -592,20 +573,30 @@ def compose_training_cycle(
             target_date=target_date,
             interrupted=interrupted,
         )
-        if enable_deferred_quality and not interrupted:
-            adjusted = _insert_deferred_quality(
+        if not interrupted:
+            pre_quality = adjusted
+            adjusted, quality_inserted = _insert_phase_quality(
                 adjusted,
                 phase=phase,
                 event_type=event_type,
             )
+        else:
+            pre_quality = adjusted
+            quality_inserted = False
         long_runs = [item.planned_minutes for item in adjusted.sessions if item.role == "long_run"]
         if long_runs and previous_long_run_minutes:
+            maximum_long_run_minutes = _floor_grid(
+                previous_long_run_minutes * profile.max_long_run_increase
+            )
             adjusted = _cap_long_run_increase(
                 adjusted,
-                maximum_minutes=_floor_grid(
-                    previous_long_run_minutes * profile.max_long_run_increase
-                ),
+                maximum_minutes=maximum_long_run_minutes,
             )
+            if quality_inserted:
+                pre_quality = _cap_long_run_increase(
+                    pre_quality,
+                    maximum_minutes=maximum_long_run_minutes,
+                )
             long_runs = [
                 item.planned_minutes for item in adjusted.sessions if item.role == "long_run"
             ]
@@ -613,12 +604,20 @@ def compose_training_cycle(
             previous_long_run_minutes = max(long_runs)
         prior_totals = [week.total_minutes for week in weeks if week.total_minutes > 0]
         if prior_totals:
+            maximum_total_minutes = _floor_grid(
+                prior_totals[-1] * profile.max_weekly_volume_increase
+            )
             adjusted = _cap_weekly_increase(
                 adjusted,
-                maximum_total_minutes=_floor_grid(
-                    prior_totals[-1] * profile.max_weekly_volume_increase
-                ),
+                maximum_total_minutes=maximum_total_minutes,
             )
+            if quality_inserted and (
+                sum(item.planned_minutes for item in adjusted.sessions) > maximum_total_minutes
+            ):
+                # Phase quality yields to volume discipline: when the capped week
+                # still exceeds progression, keep the valid base week instead of
+                # an unpersistable cycle.
+                adjusted = _cap_weekly_increase(pre_quality, maximum_total_minutes)
         weeks.append(
             CycleWeekCandidate(
                 position=position,
@@ -727,8 +726,6 @@ def compose_training_cycle(
         "existing_quality_spacing_conflicts": spacing_conflicts,
         "effective_reentry": effective_reentry,
         "interrupted_weeks": sorted(interrupted_weeks),
-        "unsupported_templates_are_not_introduced": not enable_deferred_quality,
-        "deferred_quality_development_override": enable_deferred_quality,
         "rule_profile": {
             "volume_multiplier": profile.volume_multiplier,
             "max_weekly_volume_increase": profile.max_weekly_volume_increase,
@@ -898,7 +895,6 @@ def plan_training_cycle(
         goal_id=goal.id if goal is not None else None,
         effective_reentry=effective_reentry,
         interrupted_weeks=interrupted_weeks,
-        enable_deferred_quality=deferred_quality_templates_enabled(),
         purpose=recorded_purpose,
         existing_quality_check=_existing_quality_conflict,
     )
@@ -1055,15 +1051,6 @@ def accept_training_cycle_revision(
         raise TrainingCyclePersistenceError(
             "Diese Planrevision ist nicht mehr die aktuelle Vorschau.",
             code="cycle.revision_stale",
-        )
-    if (
-        revision.assumptions_json.get("deferred_quality_development_override")
-        and not deferred_quality_templates_enabled()
-    ):
-        raise TrainingCyclePersistenceError(
-            "Development-Qualitätstemplates können außerhalb des Testmodus nicht "
-            "angenommen werden.",
-            code="cycle.deferred_quality_disabled",
         )
     memberships = session.scalars(
         select(TrainingCycleWeek)

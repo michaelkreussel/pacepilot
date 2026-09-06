@@ -1738,10 +1738,7 @@ def test_multiweek_plan_link_is_available_without_a_capability_gate(
 
 def test_coach_links_to_multiweek_planning_without_shadow_view(
     client: TestClient,
-    monkeypatch: Any,
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_planner_history_gates_enabled", False)
-
     response = client.get("/coach")
 
     assert response.status_code == 200
@@ -1751,7 +1748,7 @@ def test_coach_links_to_multiweek_planning_without_shadow_view(
         "Einzelvorschläge und Planvorschauen bleiben bis zur Annahme unverbindlich."
         in response.text
     )
-    assert "Testmodus: Wochen- und Frequenz-Gates sind deaktiviert." in response.text
+    assert "Testmodus: Wochen- und Frequenz-Gates sind deaktiviert." not in response.text
 
 
 def test_plan_persistence_is_idempotent_and_visible_in_calendar(
@@ -1904,10 +1901,7 @@ def test_multiweek_plan_error_redirects_back_to_form(
 def test_multiweek_plan_generate_detail_and_accept(
     client: TestClient,
     session_factory: sessionmaker[Session],
-    monkeypatch: Any,
 ) -> None:
-    monkeypatch.setattr(get_settings(), "coach_planner_history_gates_enabled", False)
-    monkeypatch.setattr(get_settings(), "coach_deferred_quality_templates_enabled", True)
     current_monday = _seed_planning_history(session_factory)
     start = current_monday + timedelta(days=7)
     target = start + timedelta(weeks=7, days=6)

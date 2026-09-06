@@ -1,6 +1,6 @@
 id: threshold_cruise
 version: 1.0.0
-status: deferred
+status: active
 name: Schwellenintervalle
 sport: running
 purpose: threshold_endurance
@@ -41,7 +41,7 @@ evidence_refs:
   - E-TALK-TEST-001
 product_heuristic:
   product_default: true
-  rationale: Exact work and recovery ranges are template defaults and remain disabled until intensity and density validation is complete.
+  rationale: Exact work and recovery ranges are template defaults; intensity and density signals remain advisory inputs.
   status: initial_product_default
   reviewed_on: 2026-08-24
 garmin_capabilities:

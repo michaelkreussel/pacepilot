@@ -29,7 +29,8 @@ def test_registry_is_deterministic_and_references_resolve() -> None:
         "vo2_intervals",
     }
     assert first.workouts["easy_run"].status == "active"
-    assert first.workouts["threshold_cruise"].status == "deferred"
+    assert first.workouts["threshold_cruise"].status == "active"
+    assert first.workouts["vo2_intervals"].status == "active"
     assert all(
         set(artifact.evidence_refs) <= set(first.evidence)
         for artifact in [*first.workouts.values(), *first.constraints.values()]

@@ -185,8 +185,8 @@ PLAN_WARNING_LABELS = {
         "Länger als dein typisch längster Wochenlauf"
     ),
     "planner.strides_adjacent_to_long_run": "Steigerungen direkt neben dem Langen Lauf",
-    "planner.deferred_quality_development_override": (
-        "Development-Testvorlage: vor Annahme besonders sorgfältig prüfen"
+    "planner.phase_quality_placed": (
+        "Phasen-Qualität: Aufbau- oder Spezifisch-Phase setzt einen kontrollierten Reiz"
     ),
     "planner.weekly_frequency_low": "Geringe wöchentliche Laufhäufigkeit in der Historie",
     "planner.baseline_confidence_insufficient": "Unzureichende Datengrundlage für die Basis",

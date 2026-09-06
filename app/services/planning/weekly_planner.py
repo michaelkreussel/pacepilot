@@ -312,15 +312,9 @@ def _weekly_history_advisory(snapshot: WeeklyPlannerSnapshot) -> dict[str, objec
     }
 
 
-def compose_week(
-    snapshot: WeeklyPlannerSnapshot,
-    *,
-    enforce_history_gates: bool = True,
-    enable_deferred_quality: bool = False,
-) -> WeeklyPlanCandidate:
+def compose_week(snapshot: WeeklyPlannerSnapshot) -> WeeklyPlanCandidate:
     # Advisory mode: sparse history, low frequency, and re-entry are warnings,
-    # never refusals. The flag stays for caller compatibility.
-    _ = enforce_history_gates
+    # never refusals.
     registry = get_knowledge_registry()
     available_days = snapshot.availability
     if not available_days:
@@ -333,17 +327,12 @@ def compose_week(
 
     effective_consistent_weeks = snapshot.consistent_running_weeks
     effective_runs_per_week = max(round(snapshot.observed_runs_per_week), 1)
-    if enable_deferred_quality:
-        frequency_cap = MAX_PLAN_DAYS
-        effective_consistent_weeks = max(effective_consistent_weeks, 8)
-        effective_runs_per_week = max(effective_runs_per_week, 3)
+    if typical is None:
+        frequency_cap = MIN_TYPICAL_WEEKLY_RUNS
     else:
-        if typical is None:
-            frequency_cap = MIN_TYPICAL_WEEKLY_RUNS
-        else:
-            frequency_cap = max(int(typical), MIN_TYPICAL_WEEKLY_RUNS)
-        if snapshot.baseline_confidence in {"insufficient", "low"} or snapshot.effective_reentry:
-            frequency_cap = min(frequency_cap, CONSERVATIVE_FREQUENCY_CAP)
+        frequency_cap = max(int(typical), MIN_TYPICAL_WEEKLY_RUNS)
+    if snapshot.baseline_confidence in {"insufficient", "low"} or snapshot.effective_reentry:
+        frequency_cap = min(frequency_cap, CONSERVATIVE_FREQUENCY_CAP)
     target_days = min(frequency_cap, len(available_days), MAX_PLAN_DAYS)
 
     long_decision = _long_run_decision(snapshot)
@@ -530,13 +519,7 @@ def compose_week(
             {"code": "planner.no_catchup", "result": "pass"},
         ],
     }
-    generation_context = _generation_context(
-        snapshot,
-        target_days,
-        advisory=advisory,
-        effective_consistent_weeks=effective_consistent_weeks,
-        effective_runs_per_week=effective_runs_per_week,
-    )
+    generation_context = _generation_context(snapshot, target_days, advisory=advisory)
     fingerprint = _fingerprint_candidate(
         generation_context, tuple(session_candidates), snapshot.knowledge_base_version
     )
@@ -603,8 +586,6 @@ def _generation_context(
     target_days: int,
     *,
     advisory: dict[str, object],
-    effective_consistent_weeks: int,
-    effective_runs_per_week: int,
 ) -> dict[str, object]:
     return {
         "schema_version": PLANNER_SCHEMA_VERSION,
@@ -612,12 +593,6 @@ def _generation_context(
         "week_start": snapshot.week_start.isoformat(),
         "week_end": (snapshot.week_start + timedelta(days=6)).isoformat(),
         "target_days": target_days,
-        "history_gates": {
-            "enabled": False,
-            "mode": "advisory",
-            "effective_consistent_running_weeks": effective_consistent_weeks,
-            "effective_runs_per_week": effective_runs_per_week,
-        },
         "advisory": advisory,
         "safety": {"outcome": snapshot.safety_outcome},
         "availability": [

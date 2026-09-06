@@ -197,8 +197,6 @@ Settings are read from environment variables and, for local development, from `.
 | `LLM_API_KEY` | unset | OpenRouter API key for the optional coach |
 | `LLM_MODEL` | `z-ai/glm-5.3-flash` | OpenRouter model ID; Coach calls are routed only through Z.AI |
 | `LLM_TIMEOUT_SECONDS` | `60` | Timeout for an OpenRouter model call |
-| `COACH_PLANNER_HISTORY_GATES_ENABLED` | `true` | Enforces observed week/frequency eligibility; development can disable it for planner testing |
-| `COACH_DEFERRED_QUALITY_TEMPLATES_ENABLED` | `false` | Development-only override for testing deferred threshold and VO2max templates |
 
 Production mode requires `SESSION_SECRET` and `SESSION_HTTPS_ONLY=true`. Configuring only one half
 of an OAuth provider's client ID and secret pair also prevents startup.

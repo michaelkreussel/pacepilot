@@ -131,7 +131,6 @@ def test_sparse_history_produces_advisory_draft_with_conservative_scope() -> Non
             observed_runs_per_week=1.0,
             consistent_running_weeks=1,
         ),
-        enforce_history_gates=False,
     )
 
     assert candidate.target_days == 2
@@ -151,9 +150,7 @@ def test_sparse_history_produces_advisory_draft_with_conservative_scope() -> Non
         isinstance(item, dict) and item.get("observed_on") == "2026-08-26" for item in raw_evidence
     )
     assert raw_advisory["coverage"]
-    raw_gates = candidate.generation_context.get("history_gates")
-    assert isinstance(raw_gates, dict)
-    assert raw_gates["mode"] == "advisory"
+    assert candidate.generation_context.get("history_gates") is None
     checks = candidate.validation_report["checks"]
     assert isinstance(checks, list)
     assert {

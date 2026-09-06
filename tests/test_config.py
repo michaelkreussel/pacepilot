@@ -1,5 +1,3 @@
-from typing import Literal
-
 import pytest
 from pydantic import ValidationError
 
@@ -29,6 +27,8 @@ def test_removed_coach_capability_settings_are_ignored(
     monkeypatch.setenv("COACH_DAILY_ADAPTATION_ENABLED", "true")
     monkeypatch.setenv("COACH_PLAN_GENERATION_ENABLED", "true")
     monkeypatch.setenv("COACH_ROLLOUT_USER_IDS", "1,2")
+    monkeypatch.setenv("COACH_PLANNER_HISTORY_GATES_ENABLED", "false")
+    monkeypatch.setenv("COACH_DEFERRED_QUALITY_TEMPLATES_ENABLED", "true")
     settings = Settings(_env_file=None)
 
     assert not hasattr(settings, "coach_workout_proposals_enabled")
@@ -36,8 +36,8 @@ def test_removed_coach_capability_settings_are_ignored(
     assert not hasattr(settings, "coach_daily_adaptation_enabled")
     assert not hasattr(settings, "coach_plan_generation_enabled")
     assert not hasattr(settings, "coach_rollout_user_ids")
-    assert settings.coach_planner_history_gates_enabled is True
-    assert settings.coach_deferred_quality_templates_enabled is False
+    assert not hasattr(settings, "coach_planner_history_gates_enabled")
+    assert not hasattr(settings, "coach_deferred_quality_templates_enabled")
 
 
 def test_coach_defaults_to_zai_glm_flash() -> None:
@@ -66,40 +66,6 @@ def test_coach_provider_requires_credentials_and_model(
     monkeypatch.setattr(settings, "llm_model", model)
 
     assert coach_provider_configured() is expected
-
-
-def test_production_rejects_disabled_planner_history_gates() -> None:
-    with pytest.raises(ValidationError, match="COACH_PLANNER_HISTORY_GATES_ENABLED"):
-        Settings(
-            _env_file=None,
-            environment="production",
-            session_secret="x" * 32,
-            session_https_only=True,
-            coach_planner_history_gates_enabled=False,
-        )
-
-
-@pytest.mark.parametrize("environment", ["test", "production"])
-def test_deferred_quality_templates_are_development_only(
-    environment: Literal["test", "production"],
-) -> None:
-    with pytest.raises(ValidationError, match="COACH_DEFERRED_QUALITY_TEMPLATES_ENABLED"):
-        Settings(
-            _env_file=None,
-            environment=environment,
-            session_secret="x" * 32 if environment == "production" else None,
-            session_https_only=environment == "production",
-            coach_deferred_quality_templates_enabled=True,
-        )
-
-
-def test_history_gate_bypass_is_development_only() -> None:
-    with pytest.raises(ValidationError, match="may be disabled only in development"):
-        Settings(
-            _env_file=None,
-            environment="test",
-            coach_planner_history_gates_enabled=False,
-        )
 
 
 def test_empty_optional_metrics_token_is_normalized() -> None:
