@@ -1,4 +1,4 @@
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -59,7 +59,6 @@ class FeedbackCommands:
             content_hash=feedback_content_hash(data),
         )
         self.session.add(feedback)
-        self._invalidate_context(workout_ids={workout.id})
         return feedback
 
     def record_post_session(
@@ -91,8 +90,6 @@ class FeedbackCommands:
             content_hash=feedback_content_hash(data),
         )
         self.session.add(feedback)
-        workout_ids = {activity.workout_id} if activity.workout_id is not None else set()
-        self._invalidate_context(workout_ids=workout_ids)
         return feedback
 
     def delete_pre_session(self, feedback_id: int) -> int | None:
@@ -106,7 +103,6 @@ class FeedbackCommands:
             raise FeedbackNotFoundError("Feedback nicht gefunden")
         workout_id = feedback.workout_id
         self.session.delete(feedback)
-        self._invalidate_context(workout_ids={workout_id} if workout_id else set())
         return workout_id
 
     def delete_post_session(self, feedback_id: int) -> int | None:
@@ -119,29 +115,8 @@ class FeedbackCommands:
         if feedback is None:
             raise FeedbackNotFoundError("Feedback nicht gefunden")
         activity_id = feedback.activity_id
-        workout_ids = {feedback.workout_id} if feedback.workout_id else set()
         self.session.delete(feedback)
-        self._invalidate_context(workout_ids=workout_ids)
         return activity_id
-
-    def _invalidate_context(self, *, workout_ids: set[int]) -> None:
-        if workout_ids:
-            self.session.execute(
-                update(Workout)
-                .where(Workout.id.in_(workout_ids), Workout.user_id == self.user.id)
-                .values(lock_version=Workout.lock_version + 1)
-            )
-        today = utcnow().date()
-        self.session.execute(
-            update(Workout)
-            .where(
-                Workout.user_id == self.user.id,
-                Workout.scheduled_for == today,
-                Workout.id.not_in(workout_ids),
-                Workout.deleted_at.is_(None),
-            )
-            .values(lock_version=Workout.lock_version + 1)
-        )
 
 
 class FeedbackQueries:

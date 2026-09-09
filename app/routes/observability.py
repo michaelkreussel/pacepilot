@@ -30,7 +30,7 @@ def workout_decision_trace(
     )
     if revision is None:
         raise HTTPException(status_code=404, detail="Revision nicht gefunden")
-    return decision_trace(revision)
+    return decision_trace(session, revision)
 
 
 @router.get("/metrics")

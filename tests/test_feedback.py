@@ -227,6 +227,7 @@ def test_feedback_record_commands_are_transaction_neutral(
         user_id = user.id
         workout_id = workout.id
         activity_id = activity.id
+        lock_version = workout.lock_version
 
         commands = FeedbackCommands(session, user)
         commands.record_pre_session(
@@ -241,6 +242,8 @@ def test_feedback_record_commands_are_transaction_neutral(
         queries = FeedbackQueries(session, user)
         assert len(queries.pre_session_for_workout(workout_id)) == 1
         assert len(queries.post_session_for_activity(activity_id)) == 1
+        session.refresh(workout)
+        assert workout.lock_version == lock_version
         session.rollback()
 
     with session_factory() as session:
