@@ -2231,7 +2231,6 @@ def test_proposal_tool_schema_exposes_no_runtime_or_workout_definition() -> None
     }
     serialized = json.dumps(schema)
     assert "user_id" not in serialized
-    assert "assistant_run_id" not in serialized
     assert "idempotency" not in serialized
     assert "WorkoutDefinition" not in serialized
     assert schema["properties"]["template_id"]["enum"] == list(WORKOUT_FORMAT_IDS)

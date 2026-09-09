@@ -51,9 +51,7 @@ from app.services.planning.workout_revision import (
 
 
 @dataclass(frozen=True)
-class ProposalOrigin:
-    conversation_id: int
-    user_message_id: int
+class ProposalSource:
     assistant_message_id: int
     model_provider: str
     model_id: str | None
@@ -144,7 +142,7 @@ class WorkoutService:
         *,
         idempotency_key: str,
         request_fingerprint: str,
-        origin: ProposalOrigin | None = None,
+        source: ProposalSource | None = None,
         commit: bool = True,
     ) -> Workout:
         existing = self.idempotent_proposal(
@@ -152,7 +150,7 @@ class WorkoutService:
             request_fingerprint=request_fingerprint,
         )
         if existing is not None:
-            self.verify_proposal_origin(existing, origin)
+            self.verify_proposal_source(existing, source)
             return existing
 
         self.validate(data)
@@ -169,17 +167,17 @@ class WorkoutService:
             approval_status="proposed",
             local_schedule_status="unscheduled",
             lock_version=0,
-            source_assistant_message_id=origin.assistant_message_id if origin else None,
+            source_assistant_message_id=source.assistant_message_id if source else None,
         )
         self.session.add(workout)
         self.session.flush()
         revision_metadata = metadata
-        if origin is not None:
+        if source is not None:
             revision_metadata = replace(
                 metadata,
-                model_provider=origin.model_provider,
-                model_id=origin.model_id,
-                prompt_template_version=origin.prompt_template_version,
+                model_provider=source.model_provider,
+                model_id=source.model_id,
+                prompt_template_version=source.prompt_template_version,
             )
         revision = self._create_revision(
             workout,
@@ -216,18 +214,18 @@ class WorkoutService:
                 request_fingerprint=request_fingerprint,
             )
             if winner is not None:
-                self.verify_proposal_origin(winner, origin)
+                self.verify_proposal_source(winner, source)
                 return winner
             raise
         return workout
 
-    def verify_proposal_origin(self, workout: Workout, origin: ProposalOrigin | None) -> None:
-        if origin is None:
+    def verify_proposal_source(self, workout: Workout, source: ProposalSource | None) -> None:
+        if source is None:
             return
-        if workout.source_assistant_message_id != origin.assistant_message_id:
+        if workout.source_assistant_message_id != source.assistant_message_id:
             raise WorkoutConflictError(
                 "Der vorhandene Vorschlag gehört nicht zu dieser Coach-Antwort.",
-                code="proposal.origin_mismatch",
+                code="proposal.source_mismatch",
             )
 
     def propose_adaptation_revision(
@@ -807,7 +805,7 @@ class WorkoutService:
         expected_identity: RevisionIdentity | None = None,
         idempotency_key: str | None = None,
         proposal_metadata: RevisionMetadata | None = None,
-        origin: ProposalOrigin | None = None,
+        source: ProposalSource | None = None,
     ) -> Workout:
         workout = self.get(workout_id)
         self._ensure_generated_action_allowed(workout)
@@ -871,12 +869,12 @@ class WorkoutService:
                 )
             else:
                 metadata = proposal_metadata
-            if origin is not None:
+            if source is not None:
                 metadata = replace(
                     metadata,
-                    model_provider=origin.model_provider,
-                    model_id=origin.model_id,
-                    prompt_template_version=origin.prompt_template_version,
+                    model_provider=source.model_provider,
+                    model_id=source.model_id,
+                    prompt_template_version=source.prompt_template_version,
                 )
         revision = self._create_revision(
             workout,
@@ -908,8 +906,8 @@ class WorkoutService:
                         ),
                         approval_status="proposed",
                         source_assistant_message_id=(
-                            origin.assistant_message_id
-                            if origin is not None
+                            source.assistant_message_id
+                            if source is not None
                             else workout.source_assistant_message_id
                         ),
                         lock_version=Workout.lock_version + 1,
@@ -954,8 +952,8 @@ class WorkoutService:
                     "changed_fields": list(change_labels),
                     "request_hash": request_hash,
                     **(
-                        {"source_assistant_message_id": origin.assistant_message_id}
-                        if origin is not None
+                        {"source_assistant_message_id": source.assistant_message_id}
+                        if source is not None
                         else {}
                     ),
                 },

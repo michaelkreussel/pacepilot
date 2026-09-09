@@ -42,7 +42,7 @@ from app.services.planning.workout_revision import (
     workout_content_hash,
 )
 from app.services.planning.workout_service import (
-    ProposalOrigin,
+    ProposalSource,
     WorkoutService,
     WorkoutTransitionError,
 )
@@ -490,7 +490,7 @@ class RunningProposalService:
         self.request_id = request_id
 
     def create(
-        self, request: RunningProposalRequest, *, origin: ProposalOrigin | None = None
+        self, request: RunningProposalRequest, *, source: ProposalSource | None = None
     ) -> Workout:
         request_fingerprint = _request_fingerprint(request)
         workout_service = WorkoutService(self.session, self.user, request_id=self.request_id)
@@ -499,7 +499,7 @@ class RunningProposalService:
             request_fingerprint=request_fingerprint,
         )
         if existing is not None:
-            workout_service.verify_proposal_origin(existing, origin)
+            workout_service.verify_proposal_source(existing, source)
             return existing
         data, metadata = self._build_candidate(
             template_id=request.template_id,
@@ -512,11 +512,11 @@ class RunningProposalService:
             metadata,
             idempotency_key=request.idempotency_key,
             request_fingerprint=request_fingerprint,
-            origin=origin,
+            source=source,
         )
 
     def revise(
-        self, request: RunningRevisionRequest, *, origin: ProposalOrigin | None = None
+        self, request: RunningRevisionRequest, *, source: ProposalSource | None = None
     ) -> Workout:
         workout_service = WorkoutService(self.session, self.user, request_id=self.request_id)
         workout = workout_service.get(request.workout_id)
@@ -552,7 +552,7 @@ class RunningProposalService:
             ),
             idempotency_key=request.idempotency_key,
             proposal_metadata=metadata,
-            origin=origin,
+            source=source,
         )
 
     def _build_candidate(

@@ -82,7 +82,7 @@ from app.services.planning.workout_proposals import (
     WorkoutProposalError,
 )
 from app.services.planning.workout_service import (
-    ProposalOrigin,
+    ProposalSource,
     WorkoutService,
     WorkoutServiceError,
 )
@@ -1039,13 +1039,8 @@ def create_running_workout_proposal(
     if the athlete did not request a type, use easy_run. The result remains unscheduled and
     unaccepted. This tool cannot accept, schedule, upload, push, or synchronize a workout.
     """
-    context = runtime
-    if context.conversation_id is None or context.user_message_id is None:
-        raise ValueError("Coach proposal runtime is incomplete")
-    conversation_id = context.conversation_id
-    user_message_id = context.user_message_id
-    with context.session_factory() as session:
-        user, assistant_message = _proposal_runtime(session, context)
+    with runtime.session_factory() as session:
+        user, assistant_message = _proposal_runtime(session, runtime)
         assistant_message_id = assistant_message.id
         request = RunningProposalRequest(
             template_id=template_id,
@@ -1062,13 +1057,11 @@ def create_running_workout_proposal(
             RunningProposalService(
                 session,
                 user,
-                as_of=context.as_of,
+                as_of=runtime.as_of,
                 request_id=assistant_message.request_id,
             ).create(
                 request,
-                origin=ProposalOrigin(
-                    conversation_id=conversation_id,
-                    user_message_id=user_message_id,
+                source=ProposalSource(
                     assistant_message_id=assistant_message_id,
                     model_provider="openrouter",
                     model_id=assistant_message.model_id,
@@ -1100,8 +1093,6 @@ def revise_running_workout_proposal(
     edit_scope: RevisionEditScope = "supported_parameters",
 ) -> str:
     """Revise only the date or time budget of an exact deterministic workout revision."""
-    if runtime.conversation_id is None or runtime.user_message_id is None:
-        raise ValueError("Coach proposal runtime is incomplete")
     with runtime.session_factory() as session:
         user, assistant_message = _proposal_runtime(session, runtime)
         service = WorkoutService(session, user, request_id=assistant_message.request_id)
@@ -1185,9 +1176,7 @@ def revise_running_workout_proposal(
                         f"revise_running_workout_proposal:v1:{workout_id}:{revision_id}"
                     ),
                 ),
-                origin=ProposalOrigin(
-                    conversation_id=runtime.conversation_id,
-                    user_message_id=runtime.user_message_id,
+                source=ProposalSource(
                     assistant_message_id=assistant_message.id,
                     model_provider="openrouter",
                     model_id=assistant_message.model_id,

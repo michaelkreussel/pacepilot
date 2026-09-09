@@ -42,7 +42,7 @@ from app.services.planning.workout_revision import (
     ScheduleWorkoutCommand,
 )
 from app.services.planning.workout_service import (
-    ProposalOrigin,
+    ProposalSource,
     WorkoutConflictError,
     WorkoutService,
     WorkoutTransitionError,
@@ -186,7 +186,6 @@ def test_one_assistant_message_can_source_multiple_proposals(
         user = _user(session)
         _history(session, user.id, date.today())
         conversation = CoachConversation(user_id=user.id)
-        user_message = CoachMessage(conversation=conversation, role="user", content="Plane Läufe")
         assistant_message = CoachMessage(
             conversation=conversation,
             role="assistant",
@@ -194,11 +193,16 @@ def test_one_assistant_message_can_source_multiple_proposals(
             model_id="test/model",
             prompt_template_version="coach-prompt-v2",
         )
-        session.add_all((conversation, user_message, assistant_message))
+        other_assistant_message = CoachMessage(
+            conversation=conversation,
+            role="assistant",
+            status="completed",
+            model_id="test/model",
+            prompt_template_version="coach-prompt-v2",
+        )
+        session.add_all((conversation, assistant_message, other_assistant_message))
         session.flush()
-        origin = ProposalOrigin(
-            conversation_id=conversation.id,
-            user_message_id=user_message.id,
+        source = ProposalSource(
             assistant_message_id=assistant_message.id,
             model_provider="openrouter",
             model_id=assistant_message.model_id,
@@ -212,7 +216,7 @@ def test_one_assistant_message_can_source_multiple_proposals(
                 available_minutes=45,
                 idempotency_key="assistant-artifact-1",
             ),
-            origin=origin,
+            source=source,
         )
         second = service.create(
             RunningProposalRequest(
@@ -220,12 +224,28 @@ def test_one_assistant_message_can_source_multiple_proposals(
                 available_minutes=45,
                 idempotency_key="assistant-artifact-2",
             ),
-            origin=origin,
+            source=source,
         )
 
         assert first.id != second.id
         assert first.source_assistant_message_id == second.source_assistant_message_id
         assert first.source_assistant_message_id == assistant_message.id
+
+        with pytest.raises(WorkoutConflictError) as conflict:
+            service.create(
+                RunningProposalRequest(
+                    suggested_for=date.today() + timedelta(days=1),
+                    available_minutes=45,
+                    idempotency_key="assistant-artifact-1",
+                ),
+                source=ProposalSource(
+                    assistant_message_id=other_assistant_message.id,
+                    model_provider="openrouter",
+                    model_id=other_assistant_message.model_id,
+                    prompt_template_version=other_assistant_message.prompt_template_version,
+                ),
+            )
+        assert conflict.value.code == "proposal.source_mismatch"
 
 
 def test_easy_run_proposal_uses_requested_60_minutes(
