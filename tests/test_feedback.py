@@ -18,7 +18,6 @@ from app.models import (
     WorkoutEvent,
     WorkoutGarminOperation,
     WorkoutRevision,
-    WorkoutValidationRun,
 )
 from app.models.user import utcnow
 from app.routes import workouts as workouts_module
@@ -288,7 +287,7 @@ def test_feedback_delete_commands_return_ids_without_committing(
         assert [item.id for item in queries.all_post_session()] == [post.id]
 
 
-def test_feedback_changes_fresh_fit_without_mutating_historical_validation_runs(
+def test_feedback_changes_fresh_training_fit(
     session_factory: sessionmaker[Session],
 ) -> None:
     with session_factory() as session:
@@ -303,21 +302,6 @@ def test_feedback_changes_fresh_fit_without_mutating_historical_validation_runs(
         initial_fingerprint = service.local_action_training_fit(
             workout.id, revision.id, date.today()
         ).assessment.authoritative_input_fingerprint
-        original_expiry = utcnow() + timedelta(days=1)
-        historical = WorkoutValidationRun(
-            workout_id=workout.id,
-            revision_id=revision.id,
-            validation_kind="contextual",
-            rule_set_version="legacy-rules",
-            context_fingerprint="a" * 64,
-            feedback_ids_json=[],
-            expires_at=original_expiry,
-            valid=False,
-            report_json={},
-        )
-        session.add(historical)
-        session.commit()
-
         commands = FeedbackCommands(session, user)
         feedback = commands.record_pre_session(
             workout.id,
@@ -329,28 +313,14 @@ def test_feedback_changes_fresh_fit_without_mutating_historical_validation_runs(
         ).assessment.authoritative_input_fingerprint
 
         assert updated_fingerprint != initial_fingerprint
-        assert historical.expires_at == original_expiry
-
-        deletion_guard = WorkoutValidationRun(
-            workout_id=workout.id,
-            revision_id=revision.id,
-            validation_kind="contextual",
-            rule_set_version="legacy-rules",
-            context_fingerprint="b" * 64,
-            feedback_ids_json=[f"pre:{feedback.id}"],
-            expires_at=original_expiry,
-            valid=False,
-            report_json={},
-        )
-        session.add(deletion_guard)
-        session.flush()
-        deletion_guard_id = deletion_guard.id
 
         commands.delete_pre_session(feedback.id)
         session.flush()
+        restored_fingerprint = service.local_action_training_fit(
+            workout.id, revision.id, date.today()
+        ).assessment.authoritative_input_fingerprint
 
-        assert session.get(WorkoutValidationRun, deletion_guard_id) is not None
-        assert deletion_guard.expires_at == original_expiry
+        assert restored_fingerprint == initial_fingerprint
 
 
 def test_elevated_same_day_accept_requires_fresh_acknowledgement(

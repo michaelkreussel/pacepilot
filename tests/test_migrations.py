@@ -58,7 +58,6 @@ def test_initial_migration_matches_models(tmp_path: Path) -> None:
         "workout_garmin_remote_identities",
         "workout_revisions",
         "workout_steps",
-        "workout_validation_runs",
         "workouts",
     } == set(inspector.get_table_names())
 
@@ -194,7 +193,7 @@ def test_feedback_owner_migration_upgrades_applied_revision_22(tmp_path: Path) -
         ).one() == (1, 1)
         assert connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
-        ).scalar_one() == ("20260906_40")
+        ).scalar_one() == ("20260909_41")
 
 
 def test_application_migration_uses_absolute_project_paths(tmp_path: Path, monkeypatch) -> None:
@@ -254,7 +253,7 @@ def test_workout_revision_migration_resumes_after_added_columns(tmp_path: Path) 
             "SELECT version_num FROM alembic_version"
         ).scalar_one()
         integrity = connection.exec_driver_sql("PRAGMA integrity_check").scalar_one()
-    assert revision == "20260906_40"
+    assert revision == "20260909_41"
     assert integrity == "ok"
     assert "workout_revisions" in inspector.get_table_names()
 
@@ -283,7 +282,7 @@ def test_reverted_athlete_profile_revision_upgrades_to_head(tmp_path: Path) -> N
         revision = connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
         ).scalar_one()
-    assert revision == "20260906_40"
+    assert revision == "20260909_41"
 
 
 def test_principal_fingerprint_migration_upgrades_applied_phase_4_schema(
@@ -731,7 +730,7 @@ def test_athlete_planning_inputs_fresh_and_filled_upgrade(tmp_path: Path) -> Non
         legacy = connection.exec_driver_sql("SELECT name FROM workouts WHERE id = 1").scalar()
     engine.dispose()
 
-    assert version == "20260906_40"
+    assert version == "20260909_41"
     assert {
         "athlete_planning_profiles",
         "athlete_goals",
@@ -1014,7 +1013,7 @@ def test_coach_message_lineage_migration_preserves_runs_and_workouts(tmp_path: P
         )
         assert (
             connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one()
-            == "20260906_40"
+            == "20260909_41"
         )
         assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
     source_key = next(
@@ -1293,7 +1292,7 @@ def test_plan_message_lineage_migration_preserves_artifacts_and_enforces_ownersh
         assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
         assert connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
-        ).scalar_one() == ("20260906_40")
+        ).scalar_one() == ("20260909_41")
 
     for table in ("training_plan_revisions", "training_cycle_revisions"):
         source_key = next(
@@ -1545,7 +1544,7 @@ def test_single_active_coach_response_migration_repairs_duplicates_and_enforces_
         ).all() == [(1, 3), (2, 6)]
         assert (
             connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one()
-            == "20260906_40"
+            == "20260909_41"
         )
         assert connection.exec_driver_sql(
             "SELECT DISTINCT artifacts_json FROM coach_messages"
@@ -2235,4 +2234,229 @@ def test_drop_coach_runs_and_origins_rejects_unresolved_provenance_before_ddl(
             connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one()
             == "20260906_39"
         )
+    engine.dispose()
+
+
+def test_drop_contextual_validation_runs_discards_history_and_preserves_workout_state(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "drop-contextual-validation-runs.db"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    config = Config("alembic.ini")
+    config.attributes["database_url"] = database_url
+    command.upgrade(config, "20260906_40")
+    engine = create_engine(database_url)
+    preserved_tables = (
+        "garmin_accounts",
+        "workouts",
+        "workout_revisions",
+        "workout_events",
+        "workout_garmin_bindings",
+        "workout_garmin_remote_identities",
+        "workout_garmin_operations",
+        "workout_garmin_attempts",
+    )
+
+    with engine.begin() as connection:
+        connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+        connection.exec_driver_sql(
+            "INSERT INTO users (id, display_name, created_at, onboarding_completed_version) "
+            "VALUES (1, 'Runner', '2026-09-09', 1)"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO garmin_accounts "
+            "(id, user_id, email, principal_fingerprint, connected_at, last_sync_at, "
+            "rate_limit_until, sync_status, sync_error, heart_rate_zone_profiles, "
+            "heart_rate_zones_synced_at) VALUES "
+            "(1, 1, 'runner@example.invalid', ?, '2026-09-08 08:00:00', "
+            "'2026-09-09 07:00:00', '2026-09-09 09:00:00', 'connected', 'rate-limited', "
+            "'[{\"sport\": \"RUNNING\"}]', '2026-09-09 07:00:00')",
+            ("a" * 64,),
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO workouts "
+            "(id, user_id, name, sport, scheduled_for, description, status, garmin_workout_id, "
+            "definition_version, definition, source_type, approval_status, "
+            "local_schedule_status, lock_version, replaces_workout_id, created_at, updated_at) "
+            "VALUES "
+            "(1, 1, 'Accepted Run', 'running', '2026-09-09', 'Keep me', 'pushed', "
+            "'garmin-42', 1, '{\"blocks\": []}', 'coach', 'accepted', 'scheduled', 4, NULL, "
+            "'2026-09-08', '2026-09-09'), "
+            "(2, 1, 'Replacement Run', 'running', '2026-09-10', 'Replacement', 'draft', NULL, "
+            "1, '{\"blocks\": []}', 'coach', 'proposed', 'unscheduled', 1, 1, "
+            "'2026-09-09', '2026-09-09')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO workout_revisions "
+            "(id, workout_id, revision_number, parent_revision_id, name, sport, suggested_for, "
+            "description, definition_version, definition, purpose, guidance_json, "
+            "load_estimate_json, validation_report_json, generation_context_json, source_type, "
+            "generator_version, template_id, template_version, rule_set_version, "
+            "knowledge_base_version, model_provider, model_id, prompt_template_version, "
+            "content_hash, edit_source, created_at) VALUES "
+            "(1, 1, 1, NULL, 'Accepted Run', 'running', '2026-09-09', 'Keep me', 1, "
+            "'{\"blocks\": []}', 'Aerobic', '{\"cue\": \"easy\"}', "
+            '\'{"load": 20}\', \'{"valid": true, "issues": []}\', '
+            "'{\"source\": \"coach\"}', 'coach', 'generator-v1', 'easy_run', '1', "
+            "'structural-v1', 'knowledge-v1', 'openrouter', 'model-a', 'coach-prompt-v2', ?, "
+            "'coach', '2026-09-08'), "
+            "(2, 2, 1, NULL, 'Replacement Run', 'running', '2026-09-10', 'Replacement', 1, "
+            "'{\"blocks\": []}', 'Recovery', '{\"cue\": \"relaxed\"}', "
+            '\'{"load": 10}\', \'{"valid": true, "issues": []}\', '
+            "'{\"source\": \"coach\"}', 'coach', 'generator-v1', 'recovery_run', '1', "
+            "'structural-v1', 'knowledge-v1', 'openrouter', 'model-a', 'coach-prompt-v2', ?, "
+            "'coach', '2026-09-09')",
+            ("b" * 64, "c" * 64),
+        )
+        connection.exec_driver_sql(
+            "UPDATE workouts SET current_revision_id = 1, accepted_revision_id = 1, "
+            "materialized_revision_id = 1, accepted_at = '2026-09-08 09:00:00', "
+            "accepted_by_user_id = 1 WHERE id = 1"
+        )
+        connection.exec_driver_sql(
+            "UPDATE workouts SET current_revision_id = 2, materialized_revision_id = 2 WHERE id = 2"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO workout_events "
+            "(id, workout_id, revision_id, owner_user_id, actor_type, actor_user_id, action, "
+            "request_id, idempotency_key, safe_metadata_json, created_at) VALUES "
+            "(1, 1, 1, 1, 'user', 1, 'schedule', 'request-1', 'schedule-1', "
+            '\'{"training_fit_authorization": {"policy_version": "fit-v1", '
+            '"assessment_fingerprint": "dddddddddddddddddddddddddddddddd'
+            "dddddddddddddddddddddddddddddddd\"}}', "
+            "'2026-09-08 09:05:00')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO workout_garmin_bindings "
+            "(id, workout_id, active_remote_identity_id, content_status, calendar_status, "
+            "device_status, remote_scheduled_for, last_attempt_at, last_success_at, "
+            "last_error_code, last_error_message) VALUES "
+            "(1, 1, NULL, 'synced', 'unknown', 'request_accepted', '2026-09-09', "
+            "'2026-09-09 07:01:00', '2026-09-08 08:01:00', 'garmin.unknown', "
+            "'Outcome unknown')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO workout_garmin_remote_identities "
+            "(id, binding_id, garmin_account_id, garmin_workout_id, principal_fingerprint, "
+            "status, created_at, removed_at) VALUES "
+            "(1, 1, 1, 'garmin-42', ?, 'active', '2026-09-08 08:01:00', NULL)",
+            ("a" * 64,),
+        )
+        connection.exec_driver_sql(
+            "UPDATE workout_garmin_bindings SET active_remote_identity_id = 1 WHERE id = 1"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO workout_garmin_operations "
+            "(id, workout_id, binding_id, operation_type, revision_id, remote_identity_id, "
+            "scheduled_for, idempotency_key, status, remote_reference, completed_at, error_code, "
+            "training_fit_policy_version, training_fit_assessment_fingerprint, "
+            "training_fit_effective_date, training_fit_acknowledged_by_user_id, "
+            "training_fit_acknowledged_at, training_fit_authorized_revision_id, created_at) "
+            "VALUES (1, 1, 1, 'schedule', 1, 1, '2026-09-09', ?, 'unknown', 'remote-op-1', "
+            "'2026-09-09 07:02:00', 'garmin.remote_outcome_unknown', 'fit-v1', ?, '2026-09-09', "
+            "1, '2026-09-09 07:00:00', 1, '2026-09-09 07:00:00')",
+            ("e" * 64, "d" * 64),
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO workout_garmin_attempts "
+            "(id, operation_id, attempt_number, attempt_kind, status, started_at, completed_at, "
+            "error_code, error_message) VALUES "
+            "(1, 1, 1, 'execute', 'unknown', '2026-09-09 07:00:00', "
+            "'2026-09-09 07:02:00', 'garmin.remote_outcome_unknown', 'Timed out')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO workout_validation_runs "
+            "(id, workout_id, revision_id, validation_kind, rule_set_version, "
+            "context_fingerprint, feedback_ids_json, evaluated_at, expires_at, valid, report_json) "
+            "VALUES "
+            "(1, 1, 1, 'contextual', 'legacy-v1', ?, '[\"pre:1\"]', '2026-09-08', "
+            "'2026-09-10', 1, '{\"outcome\": \"allow\"}'), "
+            "(2, 1, 1, 'contextual', 'legacy-v1', ?, '[\"pre:2\"]', '2026-09-08', "
+            "'2026-09-10', 0, '{\"outcome\": \"block\"}')",
+            ("f" * 64, "f" * 64),
+        )
+        before = {
+            table: connection.exec_driver_sql(f'SELECT * FROM "{table}" ORDER BY id').all()
+            for table in preserved_tables
+        }
+    engine.dispose()
+
+    command.upgrade(config, "head")
+    command.check(config)
+    engine = create_engine(database_url)
+    inspector = inspect(engine)
+    assert "workout_validation_runs" not in inspector.get_table_names()
+    with engine.connect() as connection:
+        after = {
+            table: connection.exec_driver_sql(f'SELECT * FROM "{table}" ORDER BY id').all()
+            for table in preserved_tables
+        }
+        assert after == before
+        assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
+        assert (
+            connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one()
+            == "20260909_41"
+        )
+    engine.dispose()
+
+    command.downgrade(config, "20260906_40")
+    engine = create_engine(database_url)
+    inspector = inspect(engine)
+    assert {column["name"] for column in inspector.get_columns("workout_validation_runs")} == {
+        "id",
+        "workout_id",
+        "revision_id",
+        "validation_kind",
+        "rule_set_version",
+        "context_fingerprint",
+        "feedback_ids_json",
+        "evaluated_at",
+        "expires_at",
+        "valid",
+        "report_json",
+    }
+    assert inspector.get_pk_constraint("workout_validation_runs")["constrained_columns"] == ["id"]
+    assert {
+        (index["name"], tuple(index["column_names"]))
+        for index in inspector.get_indexes("workout_validation_runs")
+    } == {
+        ("ix_workout_validation_runs_workout_id", ("workout_id",)),
+        ("ix_workout_validation_runs_revision_id", ("revision_id",)),
+        (
+            "ix_workout_validation_runs_revision_kind_evaluated",
+            ("revision_id", "validation_kind", "evaluated_at"),
+        ),
+        ("ix_workout_validation_runs_context_fingerprint", ("context_fingerprint",)),
+    }
+    assert inspector.get_foreign_keys("workout_validation_runs") == [
+        {
+            "name": "fk_workout_validation_runs_revision_same_workout",
+            "constrained_columns": ["revision_id", "workout_id"],
+            "referred_schema": None,
+            "referred_table": "workout_revisions",
+            "referred_columns": ["id", "workout_id"],
+            "options": {"ondelete": "CASCADE"},
+        }
+    ]
+    with engine.connect() as connection:
+        assert (
+            connection.exec_driver_sql("SELECT count(*) FROM workout_validation_runs").scalar_one()
+            == 0
+        )
+        assert {
+            table: connection.exec_driver_sql(f'SELECT * FROM "{table}" ORDER BY id').all()
+            for table in preserved_tables
+        } == before
+        assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
+    engine.dispose()
+
+    command.upgrade(config, "head")
+    engine = create_engine(database_url)
+    assert "workout_validation_runs" not in inspect(engine).get_table_names()
+    with engine.connect() as connection:
+        assert {
+            table: connection.exec_driver_sql(f'SELECT * FROM "{table}" ORDER BY id').all()
+            for table in preserved_tables
+        } == before
+        assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
     engine.dispose()

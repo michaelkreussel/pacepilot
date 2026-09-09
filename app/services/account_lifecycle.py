@@ -119,7 +119,6 @@ def collect_user_rows(session: Session, user_id: int) -> dict[str, list[dict[str
     workout_ids = _ids(workouts)
     add("workout_steps", "workout_id", workout_ids)
     add("workout_revisions", "workout_id", workout_ids)
-    add("workout_validation_runs", "workout_id", workout_ids)
     add("workout_events", "owner_user_id", [user_id])
     bindings = add("workout_garmin_bindings", "workout_id", workout_ids)
     binding_ids = _ids(bindings)

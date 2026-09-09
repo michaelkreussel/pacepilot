@@ -4,7 +4,6 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy import (
     DDL,
     JSON,
-    Boolean,
     CheckConstraint,
     Date,
     DateTime,
@@ -198,9 +197,6 @@ class WorkoutRevision(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
     workout: Mapped[Workout] = relationship(back_populates="revisions", foreign_keys=[workout_id])
-    validation_runs: Mapped[list["WorkoutValidationRun"]] = relationship(
-        back_populates="revision", cascade="all, delete-orphan"
-    )
 
     @property
     def definition_model(self):
@@ -229,42 +225,6 @@ event.listen(
         "BEGIN SELECT RAISE(ABORT, 'Workout revisions are immutable'); END"
     ).execute_if(dialect="sqlite"),
 )
-
-
-class WorkoutValidationRun(Base):
-    __tablename__ = "workout_validation_runs"
-    __table_args__ = (
-        ForeignKeyConstraint(
-            ["revision_id", "workout_id"],
-            ["workout_revisions.id", "workout_revisions.workout_id"],
-            name="fk_workout_validation_runs_revision_same_workout",
-            ondelete="CASCADE",
-        ),
-        Index(
-            "ix_workout_validation_runs_revision_kind_evaluated",
-            "revision_id",
-            "validation_kind",
-            "evaluated_at",
-        ),
-        Index("ix_workout_validation_runs_context_fingerprint", "context_fingerprint"),
-    )
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    workout_id: Mapped[int] = mapped_column(Integer, index=True)
-    revision_id: Mapped[int] = mapped_column(Integer, index=True)
-    validation_kind: Mapped[str] = mapped_column(String(30))
-    rule_set_version: Mapped[str] = mapped_column(String(100))
-    context_fingerprint: Mapped[str] = mapped_column(String(64))
-    feedback_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
-    evaluated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
-    expires_at: Mapped[datetime | None] = mapped_column(DateTime)
-    valid: Mapped[bool] = mapped_column(Boolean)
-    report_json: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
-
-    revision: Mapped[WorkoutRevision] = relationship(
-        back_populates="validation_runs",
-        foreign_keys=[revision_id, workout_id],
-    )
 
 
 class WorkoutEvent(Base):

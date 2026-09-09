@@ -36,7 +36,6 @@ from app.models import (
     WorkoutGarminOperation,
     WorkoutGarminRemoteIdentity,
     WorkoutRevision,
-    WorkoutValidationRun,
 )
 from app.routes import plans as plans_module
 from app.routes import settings as settings_module
@@ -572,10 +571,6 @@ def test_delete_garmin_data_preserves_connection_user_and_local_workout(
         user_id = account.user_id
         workout = session.scalar(select(Workout))
         assert workout is not None
-        revision = session.scalar(
-            select(WorkoutRevision).where(WorkoutRevision.workout_id == workout.id)
-        )
-        assert revision is not None
         workout.garmin_workout_id = "remote-123"
         workout.status = "pushed"
         activity = Activity(
@@ -629,19 +624,6 @@ def test_delete_garmin_data_preserves_connection_user_and_local_workout(
             status="active",
         )
         session.add(identity)
-        session.add(
-            WorkoutValidationRun(
-                workout_id=workout.id,
-                revision_id=revision.id,
-                validation_kind="contextual",
-                rule_set_version="safety-triage-v1",
-                context_fingerprint="a" * 64,
-                feedback_ids_json=["activity:222:garmin:8:4"],
-                expires_at=None,
-                valid=True,
-                report_json={"outcome": "allow"},
-            )
-        )
         session.flush()
         binding.active_remote_identity_id = identity.id
         session.commit()
@@ -676,7 +658,6 @@ def test_delete_garmin_data_preserves_connection_user_and_local_workout(
         assert session.scalar(select(func.count()).select_from(GarminDevice)) == 0
         assert session.scalar(select(func.count()).select_from(SyncRun)) == 0
         assert session.scalar(select(func.count()).select_from(SyncEvent)) == 0
-        assert session.scalar(select(func.count()).select_from(WorkoutValidationRun)) == 0
         workout = session.scalar(select(Workout))
         assert workout is not None
         assert workout.step_count == 3

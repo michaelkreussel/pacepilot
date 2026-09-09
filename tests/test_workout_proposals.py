@@ -14,7 +14,6 @@ from app.models import (
     Workout,
     WorkoutEvent,
     WorkoutRevision,
-    WorkoutValidationRun,
 )
 from app.models.user import utcnow
 from app.repositories.workouts import workouts_between
@@ -155,14 +154,6 @@ def test_easy_run_proposal_is_deterministic_revisioned_and_unscheduled(
                 .where(WorkoutEvent.workout_id == workout.id)
             )
             == 2
-        )
-        assert (
-            session.scalar(
-                select(func.count())
-                .select_from(WorkoutValidationRun)
-                .where(WorkoutValidationRun.workout_id == workout.id)
-            )
-            == 0
         )
         session.add(
             PreSessionFeedback(

@@ -12,7 +12,6 @@ from app.models import (
     Workout,
     WorkoutEvent,
     WorkoutRevision,
-    WorkoutValidationRun,
 )
 from app.services.garmin.workout_export import scheduled_workout_ids
 from app.services.observability import decision_trace, operational_metrics
@@ -117,17 +116,6 @@ def _revision_graph(session: Session) -> WorkoutRevision:
     session.add(revision)
     session.flush()
     workout.current_revision_id = revision.id
-    run = WorkoutValidationRun(
-        workout_id=workout.id,
-        revision_id=revision.id,
-        validation_kind="contextual",
-        rule_set_version="rules-v1",
-        context_fingerprint="b" * 64,
-        feedback_ids_json=["private-feedback-id"],
-        valid=True,
-        report_json={"checks": [{"code": "safety.synthetic", "detail": "Private"}]},
-    )
-    session.add(run)
     session.add(
         WorkoutEvent(
             workout_id=workout.id,

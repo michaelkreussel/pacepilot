@@ -26,7 +26,6 @@ from app.models.workout import (
     WorkoutGarminRemoteIdentity,
     WorkoutRevision,
     WorkoutStep,
-    WorkoutValidationRun,
 )
 
 __all__ = [
@@ -67,5 +66,4 @@ __all__ = [
     "WorkoutGarminRemoteIdentity",
     "WorkoutRevision",
     "WorkoutStep",
-    "WorkoutValidationRun",
 ]

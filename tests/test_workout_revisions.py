@@ -13,7 +13,6 @@ from app.models import (
     WorkoutEvent,
     WorkoutGarminBinding,
     WorkoutRevision,
-    WorkoutValidationRun,
 )
 from app.models.user import utcnow
 from app.services.planning.validator import WorkoutInput
@@ -505,7 +504,7 @@ def test_edit_creates_next_revision(session_factory: sessionmaker[Session]) -> N
         assert revisions[1].name == "Revision 2"
 
 
-def test_commands_store_structural_reports_without_validation_runs(
+def test_commands_store_structural_reports(
     session_factory: sessionmaker[Session],
 ) -> None:
     with session_factory() as session:
@@ -531,14 +530,6 @@ def test_commands_store_structural_reports_without_validation_runs(
             revision.validation_report_json is not None
             and revision.validation_report_json["valid"] is True
             for revision in revisions
-        )
-        assert (
-            session.scalar(
-                select(func.count())
-                .select_from(WorkoutValidationRun)
-                .where(WorkoutValidationRun.workout_id == workout.id)
-            )
-            == 0
         )
 
 
