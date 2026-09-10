@@ -1098,6 +1098,12 @@ def test_edit_pushed_workout_creates_candidate_without_contacting_garmin(
     session_factory: sessionmaker[Session],
     monkeypatch: Any,
 ) -> None:
+    class FixedDate(date):
+        @classmethod
+        def today(cls) -> date:
+            return cls(2026, 8, 15)
+
+    monkeypatch.setattr(plans_module, "date", FixedDate)
     created = client.post("/workouts", data=_workout_data(), follow_redirects=False)
     location = created.headers["location"]
     _confirm_and_schedule(client, location)
@@ -1704,12 +1710,6 @@ def _seed_planning_history(session_factory: sessionmaker[Session]) -> date:
         return monday
 
 
-def test_planning_shadow_view_is_removed(
-    client: TestClient,
-) -> None:
-    assert client.get("/coach/planning-shadow", follow_redirects=False).status_code == 404
-
-
 def test_multiweek_plan_link_is_available_without_a_capability_gate(
     client: TestClient,
 ) -> None:
@@ -1719,19 +1719,17 @@ def test_multiweek_plan_link_is_available_without_a_capability_gate(
     assert 'href="/plans/cycles/new"' in response.text
 
 
-def test_coach_links_to_multiweek_planning_without_shadow_view(
+def test_coach_links_to_multiweek_planning(
     client: TestClient,
 ) -> None:
     response = client.get("/coach")
 
     assert response.status_code == 200
-    assert 'href="/coach/planning-shadow"' not in response.text
     assert 'href="/plans/cycles/new"' in response.text
     assert (
         "Einzelvorschläge und Planvorschauen bleiben bis zur Annahme unverbindlich."
         in response.text
     )
-    assert "Testmodus: Wochen- und Frequenz-Gates sind deaktiviert." not in response.text
 
 
 def test_plan_persistence_is_idempotent_and_visible_in_calendar(
@@ -1878,7 +1876,6 @@ def test_multiweek_plan_error_redirects_back_to_form(
     assert form.status_code == 200
     assert "Plan konnte nicht erstellt werden." in form.text
     assert "Für eine Wochenplanung fehlt die nötige Laufroutine." in form.text
-    assert 'href="/coach/planning-shadow"' not in form.text
 
 
 def test_multiweek_plan_generate_detail_and_accept(

@@ -91,6 +91,6 @@ It does not aggregate Garmin data or infer metric meaning.
   breakdown. Stored stage timestamps are naive Garmin GMT values, so local clock presentation first
   needs explicit timezone semantics.
 - Add activity-index sport and zone controls to complement the implemented date drill-down.
-- Add editable athlete goals, thresholds, and profile attributes when those concepts exist in the
-  domain model.
+- Add goal, threshold, and planning-profile controls to the Profile page. Goals and planning inputs
+  are currently managed through the Coach conversation.
 - Consider server-side weekly health downsampling if ranges longer than one year are introduced.

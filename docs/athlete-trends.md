@@ -27,7 +27,8 @@ Monday-to-Sunday buckets use `training_trends.get_weekly_training_trend()` direc
 
 All results are immutable dataclasses. They contain compact values, dated trend points, normalized
 activity children, explicit units, and synchronization coverage. They do not contain ORM objects,
-Garmin credentials, raw file paths, sampled GPS tracks, or years of source payloads.
+Garmin credentials, raw file paths, sampled GPS tracks, or years of source payloads. The Coach
+uses this boundary for bounded evidence and does not recalculate Garmin metrics.
 
 ## Health Trends
 
@@ -146,5 +147,5 @@ partial, so Profile totals and chart bars use identical boundaries.
 `get_recent_workouts()` is the normal compact activity context. `get_activity_details()` is an
 explicit user-scoped drill-down containing the activity summary plus normalized zones, laps/typed
 splits, strength sets, and detail/split completion flags. Both methods honor `as_of`. The drill-down
-deliberately does not load sampled Garmin chart/GPS JSON. A future coach should request this detail
-only for selected workouts.
+deliberately does not load sampled Garmin chart/GPS JSON. The Coach requests this detail only for
+an explicitly selected workout.

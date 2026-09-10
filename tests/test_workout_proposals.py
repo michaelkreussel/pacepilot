@@ -410,6 +410,7 @@ def test_easy_run_uses_personal_garmin_hr_range_as_device_target(
     with session_factory() as session:
         user = _user(session)
         _history(session, user.id, date.today())
+        zones_synced_at = utcnow()
         account = GarminAccount(
             user_id=user.id,
             principal_fingerprint="a" * 64,
@@ -432,7 +433,7 @@ def test_easy_run_uses_personal_garmin_hr_range_as_device_target(
                     "lactate_threshold_hr": 177,
                 },
             ],
-            heart_rate_zones_synced_at=utcnow(),
+            heart_rate_zones_synced_at=zones_synced_at,
         )
         session.add(account)
         session.flush()
@@ -459,7 +460,7 @@ def test_easy_run_uses_personal_garmin_hr_range_as_device_target(
             "profile_sport": "RUNNING",
             "training_method": "LACTATE_THRESHOLD",
             "synced_at": revision.generation_context_json["device_target"]["synced_at"],
-            "synced_on": date.today().isoformat(),
+            "synced_on": zones_synced_at.date().isoformat(),
             "policy": "personalized_aerobic_zone_2_bounds_v1",
         }
         compiled = compile_workout_with_report(revision)

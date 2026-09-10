@@ -624,10 +624,11 @@ def test_feedback_and_week_changes_invalidate_adaptation_context(
         service = DailyAdaptationService(session, user, as_of=today)
         initial = service.assess_today(workout.id)
 
-        FeedbackCommands(session, user).record_pre_session(
+        feedback = FeedbackCommands(session, user).record_pre_session(
             workout.id,
             PreSessionFeedbackInput(fatigue=5, available_minutes=30),
         )
+        feedback.recorded_at = datetime.combine(today, datetime.min.time())
         session.commit()
         after_feedback = service.assess_today(workout.id)
 

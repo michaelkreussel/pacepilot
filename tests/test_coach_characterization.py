@@ -17,6 +17,7 @@ from app.main import app
 from app.models import CoachConversation, CoachMessage, User
 from app.models.user import utcnow
 from app.repositories.coach import conversation_messages, find_conversation
+from app.services.coach import COACH_PROMPT_TEMPLATE_VERSION, COACH_TOOL_CONTRACT_VERSION
 from app.services.coach.agent import CoachEvent
 from app.services.coach.conversation import (
     ActiveResponseConflictError,
@@ -25,10 +26,6 @@ from app.services.coach.conversation import (
     prepare_execution,
 )
 from app.services.coach.dependencies import get_coach_agent_factory
-from app.services.coach.provider import (
-    COACH_PROMPT_TEMPLATE_VERSION,
-    COACH_TOOL_CONTRACT_VERSION,
-)
 
 
 class RecordingCoachAgent:

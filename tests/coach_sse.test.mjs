@@ -110,7 +110,7 @@ test("ignores events outside the browser presentation contract", async () => {
   const events = [];
   const body = bodyFromChunks([
     encoder.encode(
-      'event: tool.started\ndata: {"label":"Interner Schritt"}\n\n' +
+      'event: debug.trace\ndata: {"detail":"ignored"}\n\n' +
         'event: artifact.available\ndata: {"workout_id":1}\n\n' +
         'event: answer.completed\ndata: {"html":"<article></article>"}\n\n',
     ),

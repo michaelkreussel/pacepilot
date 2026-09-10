@@ -27,6 +27,7 @@ from app.repositories.coach import (
     find_conversation,
     list_conversations,
 )
+from app.services.coach import COACH_PROMPT_TEMPLATE_VERSION, COACH_TOOL_CONTRACT_VERSION
 from app.services.coach.agent import CoachProviderError
 from app.services.coach.conversation import (
     ActiveResponseConflictError,
@@ -48,10 +49,6 @@ from app.services.coach.presentation import (
     planning_artifact_presentations,
     workout_artifact_presentation,
     workout_artifact_presentations,
-)
-from app.services.coach.provider import (
-    COACH_PROMPT_TEMPLATE_VERSION,
-    COACH_TOOL_CONTRACT_VERSION,
 )
 from app.services.planning.planning_commands import (
     GoalUpdateInput,

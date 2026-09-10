@@ -50,8 +50,8 @@ process. The user interface is currently available in German.
 - **Structured workout editor** for running, cycling, walking, and hiking, including repeats and
   pace or heart-rate targets
 - **Guarded Garmin publishing flow**: `draft -> confirmed -> published -> pushed`
-- **Optional AI coach** powered by LangChain and OpenRouter, with streamed responses, persistent
-  conversations, and read-only access to bounded athlete data
+- **Optional AI coach** powered by LangChain and OpenRouter, with streamed persistent conversations,
+  bounded athlete context, and deterministic workout, plan, feedback, and planning-input operations
 - **Multi-user authentication** through Google OpenID Connect and/or GitHub OAuth2
 - **Operational visibility** through live synchronization progress, endpoint timings, JSON sync-run
   exports, rotating logs, and an unauthenticated `/api/health` endpoint
@@ -217,8 +217,8 @@ The Compose setup:
 - applies pending migrations before serving requests; and
 - starts exactly one Uvicorn worker.
 
-The included Compose file forwards deployment, OAuth, LLM, and Coach test settings. Add other
-tuning variables to a Compose override if their defaults need to change in the container.
+The included Compose file forwards deployment, OAuth, LLM, metrics, and rate-limit settings. Add
+other tuning variables to a Compose override if their defaults need to change in the container.
 
 For internet-facing installations, place PacePilot behind an HTTPS reverse proxy and configure
 `PUBLIC_BASE_URL`. A reverse proxy and TLS termination are not included.
@@ -244,22 +244,30 @@ migrations, and starts APScheduler. Migration failure aborts startup before requ
 SQLite uses WAL mode and must reside on a local filesystem, not SMB or NFS. Multiple Uvicorn workers
 are unsupported because Garmin account locks and the scheduler are process-local.
 
+The Coach is an HTTP/SSE adapter over one conversation executor and one OpenRouter provider adapter.
+It reads bounded analytics and invokes deterministic planning, feedback, and workout command
+boundaries; explicit artifact actions use the shared workout and Garmin lifecycle. Those domains do
+not depend on Coach implementation details. Model prose never authorizes acceptance, scheduling,
+replacement, publication, or device push. See [AI Coach architecture](docs/ai-coach.md).
+
 ## Data and Privacy
 
 PacePilot stores sensitive personal data. Protect the host, backups, `.env`, database, token
 directory, and raw-data directory accordingly.
 
-- OAuth identity metadata, Garmin account metadata, health history, activities, workouts, coach
-  conversations, and coach tool records are stored in SQLite.
+- OAuth identity metadata, Garmin account metadata, health history, activities, workouts, Coach
+  conversations, completed messages, and artifact provenance are stored in SQLite. Per-tool traces
+  are not stored as database records or displayed in the UI.
 - Garmin tokens are stored as local files outside SQLite.
 - Compressed raw activity payloads are stored under
   `DATA_DIR/raw/activities/user-<user-id>/<year>/` and may contain GPS routes.
 - Application logs are written to the console and `DATA_DIR/logs/pacepilot.log`. Coach logs contain
   identifiers and tool names, but not question text, answer text, or health values.
-- Configuring the Coach sends prompts, bounded conversation history, and selected athlete data to
-  OpenRouter. Its bounded mutation tools can create deterministic, unaccepted workout and plan
-  drafts, record feedback, and propose adaptations; they cannot accept, schedule, publish, or push
-  workouts or plans.
+- Configuring the Coach sends prompts, bounded completed conversation history, and selected athlete
+  data to OpenRouter. Its bounded operations can update explicit planning inputs, record feedback,
+  and create deterministic, unaccepted workout and plan drafts. Exact artifact actions remain
+  authenticated application commands; model prose cannot accept, schedule, replace, publish, or
+  push workouts or plans.
 - The web interface loads some assets from third-party CDNs. Activity maps request OpenStreetMap
   tiles, which exposes the viewed map area to the tile provider.
 - Disconnecting Garmin removes token files but retains imported data. The separate Garmin-data
@@ -386,6 +394,7 @@ uv.lock               Locked dependency graph
 - [Athlete history architecture](docs/athlete-history-architecture.md)
 - [Athlete profile](docs/athlete-profile.md)
 - [Athlete trends](docs/athlete-trends.md)
+- [AI Coach architecture](docs/ai-coach.md)
 
 Some documents capture the investigation or design state at a specific point in development. The
 application code, migrations, and this README are authoritative for current runtime behavior.

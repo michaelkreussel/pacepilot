@@ -1,7 +1,7 @@
 import hashlib
 import json
 from dataclasses import dataclass, replace
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Any, cast
 
 from sqlalchemy import func, select, update
@@ -2191,7 +2191,8 @@ class WorkoutService:
         if (
             operation is None
             or operation.training_fit_acknowledged_at is None
-            or operation.training_fit_acknowledged_at.date() != date.today()
+            or operation.training_fit_acknowledged_at.replace(tzinfo=UTC).astimezone().date()
+            != date.today()
         ):
             return None
         return operation

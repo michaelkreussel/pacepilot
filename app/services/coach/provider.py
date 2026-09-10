@@ -41,8 +41,6 @@ from app.services.planning.safety_triage import IllnessSignal, PainInput
 from app.services.planning.workout_proposals import RunningTemplateId
 
 logger = logging.getLogger(__name__)
-COACH_PROMPT_TEMPLATE_VERSION = "coach-prompt-v10"
-COACH_TOOL_CONTRACT_VERSION = "coach-tools-v9"
 
 
 def _exception_source(exc: Exception) -> str:
