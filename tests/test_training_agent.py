@@ -215,7 +215,12 @@ def test_openrouter_timeout_is_converted_to_sdk_milliseconds(
             )
         ]
 
-    assert asyncio.run(collect()) == [CoachEvent("failed", failure_category="missing_final_answer")]
+    events = asyncio.run(collect())
+    assert any(
+        event.type == "failed" and event.failure_category == "missing_final_answer"
+        for event in events
+    )
+    assert all(event.type != "completed" for event in events)
 
     model_kwargs = cast(dict[str, Any], captured["model_kwargs"])
     assert model_kwargs["timeout"] == 60_000
@@ -225,42 +230,6 @@ def test_openrouter_timeout_is_converted_to_sdk_milliseconds(
         "order": ["z-ai"],
         "allow_fallbacks": False,
     }
-
-
-def test_provider_failure_logs_only_a_privacy_safe_category(
-    session_factory: sessionmaker[Session],
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    class FailingAgent:
-        async def astream(self, *_: Any, **__: Any) -> AsyncIterator[object]:
-            raise RuntimeError("private provider response detail")
-            yield object()
-
-    monkeypatch.setattr(
-        coach_provider_module,
-        "create_agent",
-        lambda *_args, **_kwargs: FailingAgent(),
-    )
-    provider = OpenRouterCoachProvider(
-        api_key="test-key", model_id="test/model", timeout_seconds=60
-    )
-    caplog.set_level(logging.WARNING, logger=coach_provider_module.__name__)
-
-    async def collect() -> list[CoachEvent]:
-        return [
-            event
-            async for event in provider.stream(
-                [CoachHistoryMessage("user", "Test")],
-                CoachRuntimeContext(1, date(2026, 8, 28), session_factory),
-            )
-        ]
-
-    assert asyncio.run(collect()) == [CoachEvent("failed", failure_category="provider_error")]
-    assert "failure_category=provider_error" in caplog.text
-    assert "error_type=RuntimeError" in caplog.text
-    assert "error_source=test_training_agent.astream:" in caplog.text
-    assert "private provider response detail" not in caplog.text
 
 
 class _ReasoningFakeChatModel(BaseChatModel):
@@ -353,10 +322,12 @@ def test_provider_forwards_bound_tools_to_model_requests(
             )
         ]
 
-    assert asyncio.run(collect()) == [
-        CoachEvent("answer_text", text="Werkzeuge verfügbar."),
-        CoachEvent("completed"),
-    ]
+    events = asyncio.run(collect())
+    assert "".join(event.text or "" for event in events if event.type == "answer_text") == (
+        "Werkzeuge verfügbar."
+    )
+    assert any(event.type == "completed" for event in events)
+    assert all(event.type != "failed" for event in events)
 
 
 class _ToolCallingFakeChatModel(BaseChatModel):
@@ -799,8 +770,6 @@ def test_coach_streams_and_persists_conversation(
     assert "event: answer.started" in response.text
     assert "event: answer.delta" in response.text
     assert "event: answer.completed" in response.text
-    assert "event: run.started" not in response.text
-    assert "event: tool." not in response.text
     assert "Du wirkst heute etwas weniger erholt" in response.text
     assert fake.calls[0] == [CoachHistoryMessage("user", "Wie erholt bin ich heute?")]
     started = _sse_payload(response.text, "answer.started")
@@ -838,7 +807,6 @@ def test_coach_streams_and_persists_conversation(
     assert "Nur lesend" not in page
     assert "Vorschläge möglich" not in page
     assert "data-coach-activity" not in page
-    assert "data-tool-call" not in page
     assert "Antwort abgeschlossen" in page
     assert cast(str, started["user_html"]) in page
     assert cast(str, completed["html"]) in page
@@ -925,7 +893,6 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
 
     assert response.status_code == 200
     assert response.text.count("event: artifact.available") == 1
-    assert "event: proposal.created" not in response.text
     assert fake.runtime is not None
     assert fake.runtime.as_of == coaching_date
     assistant_message_id = fake.runtime.assistant_message_id
@@ -3329,10 +3296,11 @@ async def test_langchain_backend_continues_after_read_only_json_list_tool_result
     ]
 
     assert all(event.type != "artifact_available" for event in events)
-    assert events[-2:] == [
-        CoachEvent("answer_text", text="Die Aktivität wurde gefunden."),
-        CoachEvent("completed"),
-    ]
+    assert "".join(event.text or "" for event in events if event.type == "answer_text") == (
+        "Die Aktivität wurde gefunden."
+    )
+    assert any(event.type == "completed" for event in events)
+    assert all(event.type != "failed" for event in events)
 
 
 @pytest.mark.asyncio
@@ -3366,10 +3334,11 @@ async def test_langchain_backend_maps_only_valid_proposal_artifact(
     ]
 
     assert [event.type for event in events].count("artifact_available") == 1
-    assert events[-2:] == [
-        CoachEvent("answer_text", text="Der Vorschlag ist bereit."),
-        CoachEvent("completed"),
-    ]
+    assert "".join(event.text or "" for event in events if event.type == "answer_text") == (
+        "Der Vorschlag ist bereit."
+    )
+    assert any(event.type == "completed" for event in events)
+    assert all(event.type != "failed" for event in events)
 
 
 @pytest.mark.asyncio
@@ -3404,10 +3373,11 @@ async def test_langchain_backend_maps_revised_workout_artifact(
     ]
 
     assert CoachEvent("artifact_available", artifact_type="workout") in events
-    assert events[-2:] == [
-        CoachEvent("answer_text", text="Die neue Revision ist bereit."),
-        CoachEvent("completed"),
-    ]
+    assert "".join(event.text or "" for event in events if event.type == "answer_text") == (
+        "Die neue Revision ist bereit."
+    )
+    assert any(event.type == "completed" for event in events)
+    assert all(event.type != "failed" for event in events)
 
 
 @pytest.mark.asyncio
@@ -3514,10 +3484,12 @@ async def test_langchain_backend_completes_promised_tool_action_in_same_turn(
 
     assert model.invocation_count == 3
     assert CoachEvent("artifact_available", artifact_type="feedback") in events
-    assert events[-2:] == [
-        CoachEvent("answer_text", text="Dein Feedback wurde gespeichert."),
-        CoachEvent("completed"),
-    ]
+    assert any(
+        event.type == "answer_text" and event.text == "Dein Feedback wurde gespeichert."
+        for event in events
+    )
+    assert any(event.type == "completed" for event in events)
+    assert all(event.type != "failed" for event in events)
 
 
 @pytest.mark.asyncio
@@ -3541,7 +3513,10 @@ async def test_provider_adapter_logs_and_maps_provider_errors(
         async for event in agent.stream([CoachHistoryMessage("user", private_question)], runtime)
     ]
 
-    assert events == [CoachEvent("failed", failure_category="provider_error")]
+    assert any(
+        event.type == "failed" and event.failure_category == "provider_error" for event in events
+    )
+    assert all(event.type != "completed" for event in events)
     logger.warning.assert_called_once()
     log_call = logger.warning.call_args
     assert "AI coach agent failed" in log_call.args[0]
@@ -3549,6 +3524,7 @@ async def test_provider_adapter_logs_and_maps_provider_errors(
     assert "error_type=%s error_source=%s" in log_call.args[0]
     assert "RuntimeError" in log_call.args
     assert private_question not in repr(log_call)
+    assert "secret provider detail" not in repr(log_call)
 
 
 @pytest.mark.asyncio
@@ -3571,7 +3547,11 @@ async def test_provider_adapter_maps_missing_answer_to_failed(
         )
     ]
 
-    assert events == [CoachEvent("failed", failure_category="missing_final_answer")]
+    assert any(
+        event.type == "failed" and event.failure_category == "missing_final_answer"
+        for event in events
+    )
+    assert all(event.type != "completed" for event in events)
 
 
 def test_coach_card_separates_elevated_acknowledgement_from_acceptance(

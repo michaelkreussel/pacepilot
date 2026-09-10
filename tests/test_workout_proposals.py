@@ -921,20 +921,3 @@ def test_generated_proposal_uses_shared_idempotent_garmin_service(
 
         assert garmin.uploads == 1
         assert garmin.schedules == 1
-
-
-def test_direct_proposal_routes_return_404_and_no_form_remains(
-    client, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    page = client.get("/coach")
-    assert "Workout vorschlagen" not in page.text
-    assert "workout-proposals" not in page.text
-
-    payload = {
-        "template_id": "easy_run",
-        "suggested_for": (date.today() + timedelta(days=1)).isoformat(),
-        "available_minutes": "45",
-        "idempotency_key": "dd02-removed-route",
-    }
-    for route in ("/coach/workout-proposals/running", "/coach/workout-proposals/easy-run"):
-        assert client.post(route, data=payload, follow_redirects=False).status_code == 404

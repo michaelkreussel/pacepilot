@@ -1,3 +1,4 @@
+import { addWorkoutArtifact, parseElement } from "./coach-artifacts.mjs?v=20260910-1";
 import { consumeSse } from "./coach-sse.mjs?v=20260906-1";
 
 (() => {
@@ -19,13 +20,6 @@ import { consumeSse } from "./coach-sse.mjs?v=20260906-1";
 
   const scrollToBottom = () => {
     messages.scrollTop = messages.scrollHeight;
-  };
-
-  const parseElement = (html, selector) => {
-    if (typeof html !== "string") throw new Error("Ungültige Nachrichtendarstellung.");
-    const parsed = new DOMParser().parseFromString(html, "text/html").body.firstElementChild;
-    if (!parsed?.matches(selector)) throw new Error("Ungültige Nachrichtendarstellung.");
-    return document.importNode(parsed, true);
   };
 
   const bindAssistant = (article) => {
@@ -61,46 +55,13 @@ import { consumeSse } from "./coach-sse.mjs?v=20260906-1";
     }
   };
 
-  const addWorkoutArtifact = async (data) => {
-    if (!live.assistant) return;
-    if (
-      live.assistant.artifacts.querySelector(
-        `[data-workout-id="${CSS.escape(String(data.workout_id))}"]`,
-      )
-    ) {
-      return;
-    }
-    if (
-      typeof data.card_url !== "string" ||
-      !data.card_url.startsWith(`/coach/${conversationId}/messages/`)
-    ) {
-      return;
-    }
-
-    try {
-      const response = await fetch(data.card_url, { headers: { Accept: "text/html" } });
-      if (!response.ok || !response.headers.get("content-type")?.includes("text/html")) {
-        throw new Error();
-      }
-      const card = parseElement(await response.text(), "[data-proposal-card]");
-      if (card.dataset.workoutId !== String(data.workout_id)) throw new Error();
-      live.assistant.artifacts.append(card);
-    } catch (_) {
-      const notice = document.createElement("p");
-      notice.className = "mt-2 text-xs text-warning-emphasis";
-      notice.setAttribute("role", "status");
-      notice.textContent = "Der Vorschlag wurde gespeichert. Lade den Chat neu, um die Karte zu öffnen.";
-      live.assistant.artifacts.append(notice);
-    }
-  };
-
   const handleEvent = async (name, data) => {
     if (name === "answer.started") {
       startMessages(data);
     } else if (name === "answer.delta" && live.assistant && typeof data.text === "string") {
       live.assistant.answer.append(document.createTextNode(data.text));
-    } else if (name === "artifact.available") {
-      await addWorkoutArtifact(data);
+    } else if (name === "artifact.available" && live.assistant) {
+      await addWorkoutArtifact(live.assistant.artifacts, conversationId, data);
     } else if (name === "answer.completed" || name === "answer.failed") {
       replaceAssistant(data.html);
     }

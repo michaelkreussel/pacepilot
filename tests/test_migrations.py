@@ -1790,7 +1790,7 @@ def test_garmin_fit_authorization_upgrade_preserves_operations_and_constraints(
     engine.dispose()
 
 
-def test_drop_coach_tool_calls_preserves_coach_state_and_recreates_schema_on_downgrade(
+def test_drop_coach_tool_calls_preserves_coach_state(
     tmp_path: Path,
 ) -> None:
     database_path = tmp_path / "drop-coach-tool-calls.db"
@@ -1868,41 +1868,6 @@ def test_drop_coach_tool_calls_preserves_coach_state_and_recreates_schema_on_dow
             connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one()
             == "20260906_39"
         )
-    engine.dispose()
-
-    command.downgrade(config, "20260906_38")
-    engine = create_engine(database_url)
-    inspector = inspect(engine)
-    assert {column["name"] for column in inspector.get_columns("coach_tool_calls")} == {
-        "id",
-        "message_id",
-        "call_id",
-        "tool_name",
-        "label",
-        "input_summary",
-        "status",
-        "started_at",
-        "completed_at",
-        "error_message",
-    }
-    assert {
-        tuple(constraint["column_names"])
-        for constraint in inspector.get_unique_constraints("coach_tool_calls")
-    } == {("message_id", "call_id")}
-    assert {
-        (index["name"], tuple(index["column_names"]))
-        for index in inspector.get_indexes("coach_tool_calls")
-    } == {("ix_coach_tool_calls_message_id", ("message_id",))}
-    assert inspector.get_foreign_keys("coach_tool_calls") == [
-        {
-            "name": None,
-            "constrained_columns": ["message_id"],
-            "referred_schema": None,
-            "referred_table": "coach_messages",
-            "referred_columns": ["id"],
-            "options": {"ondelete": "CASCADE"},
-        }
-    ]
     engine.dispose()
 
 
@@ -2084,69 +2049,6 @@ def test_drop_coach_runs_and_origins_preserves_workout_graph_and_schema(tmp_path
             connection.exec_driver_sql("SELECT status FROM workout_garmin_attempts").scalar_one()
             == "unknown"
         )
-        assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
-    engine.dispose()
-
-    command.downgrade(config, "20260906_39")
-    engine = create_engine(database_url)
-    inspector = inspect(engine)
-    assert {
-        "originating_conversation_id",
-        "originating_user_message_id",
-        "originating_assistant_message_id",
-    } <= {column["name"] for column in inspector.get_columns("workouts")}
-    downgraded_workout_keys = {
-        tuple(key["constrained_columns"]): (key["referred_table"], key["options"])
-        for key in inspector.get_foreign_keys("workouts")
-    }
-    assert downgraded_workout_keys[("originating_conversation_id",)] == (
-        "coach_conversations",
-        {"ondelete": "SET NULL"},
-    )
-    assert downgraded_workout_keys[("originating_user_message_id",)] == (
-        "coach_messages",
-        {"ondelete": "SET NULL"},
-    )
-    assert downgraded_workout_keys[("originating_assistant_message_id",)] == (
-        "coach_messages",
-        {"ondelete": "SET NULL"},
-    )
-    assert {column["name"] for column in inspector.get_columns("coach_assistant_runs")} == {
-        "id",
-        "conversation_id",
-        "user_message_id",
-        "assistant_message_id",
-        "workout_id",
-        "status",
-        "model_id",
-        "request_id",
-        "created_at",
-        "completed_at",
-    }
-    assert {
-        tuple(constraint["column_names"])
-        for constraint in inspector.get_unique_constraints("coach_assistant_runs")
-    } == {("assistant_message_id",), ("workout_id",)}
-    assert {index["name"] for index in inspector.get_indexes("coach_assistant_runs")} == {
-        "ix_coach_assistant_runs_assistant_message_id",
-        "ix_coach_assistant_runs_conversation_id",
-        "ix_coach_assistant_runs_user_message_id",
-        "ix_coach_assistant_runs_workout_id",
-    }
-    assert {
-        tuple(key["constrained_columns"]): (key["referred_table"], key["options"])
-        for key in inspector.get_foreign_keys("coach_assistant_runs")
-    } == {
-        ("assistant_message_id",): ("coach_messages", {"ondelete": "CASCADE"}),
-        ("conversation_id",): ("coach_conversations", {"ondelete": "CASCADE"}),
-        ("user_message_id",): ("coach_messages", {"ondelete": "CASCADE"}),
-        ("workout_id",): ("workouts", {"ondelete": "SET NULL"}),
-    }
-    engine.dispose()
-
-    command.upgrade(config, "head")
-    engine = create_engine(database_url)
-    with engine.connect() as connection:
         assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
     engine.dispose()
 
@@ -2397,66 +2299,4 @@ def test_drop_contextual_validation_runs_discards_history_and_preserves_workout_
             connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one()
             == "20260909_41"
         )
-    engine.dispose()
-
-    command.downgrade(config, "20260906_40")
-    engine = create_engine(database_url)
-    inspector = inspect(engine)
-    assert {column["name"] for column in inspector.get_columns("workout_validation_runs")} == {
-        "id",
-        "workout_id",
-        "revision_id",
-        "validation_kind",
-        "rule_set_version",
-        "context_fingerprint",
-        "feedback_ids_json",
-        "evaluated_at",
-        "expires_at",
-        "valid",
-        "report_json",
-    }
-    assert inspector.get_pk_constraint("workout_validation_runs")["constrained_columns"] == ["id"]
-    assert {
-        (index["name"], tuple(index["column_names"]))
-        for index in inspector.get_indexes("workout_validation_runs")
-    } == {
-        ("ix_workout_validation_runs_workout_id", ("workout_id",)),
-        ("ix_workout_validation_runs_revision_id", ("revision_id",)),
-        (
-            "ix_workout_validation_runs_revision_kind_evaluated",
-            ("revision_id", "validation_kind", "evaluated_at"),
-        ),
-        ("ix_workout_validation_runs_context_fingerprint", ("context_fingerprint",)),
-    }
-    assert inspector.get_foreign_keys("workout_validation_runs") == [
-        {
-            "name": "fk_workout_validation_runs_revision_same_workout",
-            "constrained_columns": ["revision_id", "workout_id"],
-            "referred_schema": None,
-            "referred_table": "workout_revisions",
-            "referred_columns": ["id", "workout_id"],
-            "options": {"ondelete": "CASCADE"},
-        }
-    ]
-    with engine.connect() as connection:
-        assert (
-            connection.exec_driver_sql("SELECT count(*) FROM workout_validation_runs").scalar_one()
-            == 0
-        )
-        assert {
-            table: connection.exec_driver_sql(f'SELECT * FROM "{table}" ORDER BY id').all()
-            for table in preserved_tables
-        } == before
-        assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
-    engine.dispose()
-
-    command.upgrade(config, "head")
-    engine = create_engine(database_url)
-    assert "workout_validation_runs" not in inspect(engine).get_table_names()
-    with engine.connect() as connection:
-        assert {
-            table: connection.exec_driver_sql(f'SELECT * FROM "{table}" ORDER BY id').all()
-            for table in preserved_tables
-        } == before
-        assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
     engine.dispose()

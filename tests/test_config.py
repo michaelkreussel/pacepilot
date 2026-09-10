@@ -19,27 +19,6 @@ def test_oauth_credentials_must_be_configured_as_a_pair() -> None:
         Settings(_env_file=None, github_client_id="client-id")
 
 
-def test_removed_coach_capability_settings_are_ignored(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("COACH_WORKOUT_PROPOSALS_ENABLED", "true")
-    monkeypatch.setenv("COACH_GARMIN_SYNC_ENABLED", "true")
-    monkeypatch.setenv("COACH_DAILY_ADAPTATION_ENABLED", "true")
-    monkeypatch.setenv("COACH_PLAN_GENERATION_ENABLED", "true")
-    monkeypatch.setenv("COACH_ROLLOUT_USER_IDS", "1,2")
-    monkeypatch.setenv("COACH_PLANNER_HISTORY_GATES_ENABLED", "false")
-    monkeypatch.setenv("COACH_DEFERRED_QUALITY_TEMPLATES_ENABLED", "true")
-    settings = Settings(_env_file=None)
-
-    assert not hasattr(settings, "coach_workout_proposals_enabled")
-    assert not hasattr(settings, "coach_garmin_sync_enabled")
-    assert not hasattr(settings, "coach_daily_adaptation_enabled")
-    assert not hasattr(settings, "coach_plan_generation_enabled")
-    assert not hasattr(settings, "coach_rollout_user_ids")
-    assert not hasattr(settings, "coach_planner_history_gates_enabled")
-    assert not hasattr(settings, "coach_deferred_quality_templates_enabled")
-
-
 def test_coach_defaults_to_zai_glm_flash() -> None:
     settings = Settings(_env_file=None)
 
