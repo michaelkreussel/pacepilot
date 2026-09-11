@@ -395,6 +395,9 @@ uv.lock               Locked dependency graph
 - [Athlete profile](docs/athlete-profile.md)
 - [Athlete trends](docs/athlete-trends.md)
 - [AI Coach architecture](docs/ai-coach.md)
+- [Coach implementation map](docs/refactoring/ai-coach-current-state.md)
+- [Coaching upgrade intent](docs/refactoring/ai-coach-intent.md)
+- [Planned coaching upgrade and implementation prompts](docs/plans/coaching-intelligence-upgrade.md)
 
 Some documents capture the investigation or design state at a specific point in development. The
 application code, migrations, and this README are authoritative for current runtime behavior.
@@ -406,7 +409,9 @@ application code, migrations, and this README are authoritative for current runt
 - Detailed activity data is enriched incrementally, so maps, charts, splits, or strength sets may
   not appear immediately after the initial import.
 - The workout editor does not support nested repeat groups. Pace targets are limited to running.
-- The AI coach requires an external OpenRouter account and is intended for informational use only.
+- Conversational coaching requires an external OpenRouter account. It can create deterministic
+  drafts and record explicit planning inputs and feedback; acceptance, scheduling, and Garmin
+  actions remain separate user commands.
 - Only a single Uvicorn worker and a locally stored SQLite database are supported.
 - The application interface is currently German-only.
 

@@ -1,153 +1,115 @@
-# AI Coach Refactoring Intent
+# Coaching And Training Intelligence Intent
 
-## Purpose
+## Purpose And Authority
 
-This refactoring should produce a smaller, clearer, and more direct AI Coach
-without weakening its central value: dependable, data-driven coaching that
-adapts to each user over time.
+Updated **11 September 2026** to reflect the training-first coaching upgrade. This document
+describes the desired outcome, not shipped behavior. The filename remains stable for existing
+agent instructions and links.
 
-The work should favor deletion and simplification over new abstraction. It is
-not a rewrite unless concrete evidence shows that incremental simplification
-would be riskier or more complex than replacement.
+- [Current-state context](ai-coach-current-state.md) maps the inspected implementation.
+- [Upgrade execution prompts](../plans/coaching-intelligence-upgrade.md) define two implementation
+  packages. Their implementation is pending.
+
+The application already works. Improve the coaching experience substantially while preserving the
+dashboard, Garmin integration, authentication, historical data, workout builder and deployment.
+The Runna benchmark concerns clarity and usefulness of coaching, not copying its implementation.
 
 ## Core Product Promise
 
-The AI Coach should enable users to interact reliably with their personal data
-and training through one continuous coaching relationship. It should use the
-user's data, established training formats, and recognized training
-methodologies to:
+Opening the Coach should answer: **What training makes sense today, and why?**
 
-- answer questions about training data and make that data understandable;
-- create and modify training sessions;
-- provide useful workout guidance and support;
-- accept feedback and incorporate it into later guidance;
-- provide dependable, individualized recommendations;
-- help users pursue their goals and training plans;
-- track progress over time; and
-- adapt guidance according to progress toward those goals.
+Recommendations should combine athlete state, recent training, goal, recovery and available time
+to choose a stimulus and an existing workout archetype, individualize the session, and explain:
 
-The most important capability to preserve is the adaptive coaching loop:
-personal data and goals inform recommendations, the user trains and provides
-feedback, progress is evaluated, and subsequent guidance adapts.
+- why this workout and why today;
+- why this intensity and amount of work;
+- how it fits recent training and the athlete's goal;
+- what changed after completed sessions or feedback; and
+- which evidence or assumptions limit confidence.
+
+Different athlete levels should produce materially different sessions, not merely different paces.
+Available time is a ceiling for an automatic recommendation, not the amount of training to fill.
 
 ## Desired Experience
 
-The Coach should feel direct, lightweight, and useful. Querying data, creating
-or changing workouts, giving feedback, and receiving guidance should feel like
-parts of one coherent conversation rather than separate modes or bureaucratic
-workflows.
+Make `/coach` training-first, with chat secondary:
 
-Analysis, recommendations, and draft creation should not be slowed by
-unnecessary confirmation, review, or revision stages. Explicit confirmation
-should be reserved for consequential actions, such as replacing an accepted
-workout or publishing or pushing a workout to an external service.
+- **Heute:** recommended, scheduled, completed or rest state, with structured workout steps.
+- **Warum diese Einheit?:** a few dated personal reasons and explainable intensity guidance.
+- **Diese Woche:** actual training and existing planned work, clearly labeled by state.
+- **Anpassen:** shorter/easier choices and explanations of changes.
+- **Coach fragen:** optional conversation for questions, feedback and explicit planning changes.
 
-## Reliability
+Users should not need to ask what to do today when the available data supports a recommendation.
+The daily overview should work without an LLM call. Viewing it should not create drafts, change
+accepted work or contact Garmin. Persist a chosen workout through the existing proposal workflow.
 
-Reliability should come primarily from relevant personal data, sound training
-methods, clear assumptions, and coherent decisions. It should not be simulated
-through layers of defensive orchestration.
+Retain useful chat capabilities and historical conversations. The continuity of coaching comes
+from durable athlete data, plans, activities and feedback, not a requirement to make chat primary.
 
-When information is missing or contradictory, the Coach should:
+## Training Intelligence
 
-- identify material uncertainty;
-- ask one focused question when the answer could materially change its advice;
-  and
-- otherwise proceed usefully while making important assumptions explicit.
+Reuse the six existing workout formats, running baselines, planning inputs, feedback and recovery
+analytics. Improve selection, dose and target personalization before expanding the taxonomy.
 
-The Coach should remain grounded and dependable without becoming so cautious
-that reasonable training guidance is blocked.
+Use deterministic code for numerical consistency: duration, repetitions, work volume, recovery,
+preparation, pace/HR bounds and structured validity. AI can interpret intent and explain or discuss
+the grounded result; it cannot invent executable workout parameters.
 
-## Safeguards And User Control
+Use recent appropriate performances or threshold evidence where reliable, with source-aware HR and
+RPE/talk-test fallbacks. Race predictions and VO2max are supporting context, not precise prescriptions.
+A single performance is not Critical Speed; unsuitable performance pairs must not appear robust.
 
-The product is intended for a small, trusted group. Safeguards should address
-concrete risks rather than hypothetical misuse.
+Respect recent hard/long work, habitual frequency, interruptions and current volume. Progress only
+when observed training supports it, avoid catch-up stacking, and preserve accepted plan intent.
+Weekly/cycle generation and single-workout recommendations should share dose and target logic;
+persisted sessions must match their previews.
 
-The following protections remain important:
+Recovery modifies training rather than dictates it from one score. Distinguish corroborated adverse
+evidence from missing health coverage. Missing metrics alone must not imply poor recovery or trigger
+automatic reductions. Do not encode an ACWR safe zone or rigid universal intensity distribution.
 
-- authentication and isolation of each user's data;
-- protection against invalid or unconfirmed workouts reaching external
-  services;
-- explicit user control over consequential external actions; and
-- honest communication of material uncertainty.
+## Reliability And User Control
 
-Broad refusals, redundant AI review and revision stages, excessive
-confirmation gates, and restrictions that do not mitigate a concrete risk
-should be removed or substantially simplified.
+Make uncertainty explicit without refusing ordinary useful guidance. Ask one focused question only
+when a missing answer materially changes the recommendation; otherwise proceed with a stated
+assumption. Never infer missed training solely from incomplete synchronization or workout linkage.
 
-## Scope Decisions
+Preserve the existing distinction between an explicitly requested advisory draft and the workout
+PacePilot automatically recommends. Sparse history need not hide a representable requested draft,
+but automatic selection should choose appropriate easier work or rest when warranted.
 
-An existing capability should survive only when it directly strengthens the
-adaptive coaching loop or satisfies a demonstrated need among the actual
-users. Existing complexity is not, by itself, a reason to preserve a feature.
+Preserve user isolation, CSRF, immutable revisions and accepted-revision execution. Acceptance,
+scheduling, replacement, publication and device push remain explicit existing actions. Model prose
+is not authorization. Do not add redundant confirmation stages or AI review loops.
 
-Prefer deleting or simplifying:
+## Scope And Implementation Constraints
 
-- duplicate ways to achieve the same user outcome;
-- speculative flexibility without a demonstrated use;
-- rarely useful features outside the core coaching loop;
-- defensive machinery aimed at implausible scenarios for the trusted user
-  group;
-- redundant validation, review, revision, and verification stages; and
-- process or UI steps that make coaching slower without improving its outcome.
+Preserve the existing architecture unless a change is necessary for this feature. Prefer modifying
+and reusing existing code over introducing parallel systems. Do not introduce abstractions,
+services, repositories, interfaces, agents, infrastructure or migrations unless they solve a
+concrete problem identified in the implementation.
 
-## Maintainability Direction
+**Do not add libraries, databases, external services or runtime dependencies.** Use the existing
+stack, database schema and workout models. Existing revision JSON fields are sufficient for the
+planned context, parameters and explanation metadata. No schema migration is planned. If a concrete
+blocker appears to require a dependency or schema change, explain it and ask before proceeding.
 
-The coaching flow should have clear, understandable responsibilities and as
-little orchestration as necessary. A developer changing one coaching
-capability should normally need to understand that capability and the shared
-coaching context, not unrelated parts of the system.
+External datasets, Garmin FIT documentation, scientific papers and other platforms are development
+references by default, not production dependencies. No new recommendation database, background
+coaching job, vector store, model infrastructure or large onboarding questionnaire is needed.
 
-When behavior is wrong, it should be reasonably apparent:
+Keep work focused on measurable coaching quality. Simplify code only where it directly enables
+the feature; avoid unrelated cleanup or a broad rewrite. Complete each package end-to-end rather
+than leaving scaffolding or production TODOs.
 
-- which user data and context informed the result;
-- which coaching operation made the decision;
-- which meaningful action was taken; and
-- where a failure or incorrect decision originated.
+## Execution And Success Criteria
 
-This calls for a short, traceable decision path rather than deeply interwoven
-gates, validation layers, and control loops. Reduced code size is useful
-evidence of simplification, but understandable behavior and localized change
-are the actual goals.
+Use two meaningful vertical packages: individualized daily recommendations with a visible card
+(Astra High), then consistent weekly intelligence and training-first UX (Astra Medium). The limited
+Astra credit window favors understand -> implement -> test -> concise review, not additional phases.
 
-## Compatibility
-
-Preserve durable user value:
-
-- stored user data and training history;
-- goals, plans, progress, and feedback;
-- the essential adaptive coaching outcomes; and
-- essential external integrations.
-
-Do not preserve internal APIs, incidental conversational behavior, redundant
-workflows, or existing UI steps solely for backward compatibility. These may
-change when doing so creates a more direct and maintainable product.
-
-## Rewrite Threshold
-
-A full rewrite is justified only by concrete evidence that the existing
-foundation prevents a clear, testable adaptive coaching flow and that
-incremental simplification would be riskier or more complex than replacement.
-Code size, untidiness, or architectural preference alone are not sufficient
-reasons.
-
-## Success Criteria
-
-The refactoring is successful when:
-
-- the data-driven adaptive coaching loop remains dependable and useful;
-- the user experience is noticeably more direct and lightweight;
-- unnecessary features, gates, and orchestration have been removed;
-- consequential external actions remain under explicit user control;
-- common changes are localized to clear responsibilities;
-- decisions and failures can be traced without reconstructing a large control
-  graph; and
-- focused behavioral tests protect the core coaching outcomes rather than
-  incidental implementation details.
-
-## Out Of Scope
-
-This intent does not require preserving every existing feature, internal
-boundary, workflow, UI step, or incidental behavior. It does not call for a
-general-purpose safety framework, speculative extensibility, or a full rewrite
-without the evidence described above.
+Success means a user can understand and reasonably trust tomorrow's recommendation: its stimulus,
+dose and intensity respond to actual training and evidence, alternatives are useful, and the
+workout remains valid through persistence and Garmin compilation. Focused behavioral tests must
+protect these outcomes and existing lifecycle/integration behavior. The dashboard remains intact.
