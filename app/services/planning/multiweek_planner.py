@@ -3,7 +3,6 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import date, timedelta
-from math import ceil
 
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
@@ -25,12 +24,9 @@ from app.services.planning.weekly_plan_service import (
 )
 from app.services.planning.weekly_planner import (
     WeeklyPlanCandidate,
+    _fingerprint_candidate,
     plan_shadow_week,
-)
-from app.services.planning.workout_templates import (
-    TemplateEligibilityContext,
-    TemplateExpansionError,
-    expand_workout_template,
+    resize_session,
 )
 
 MULTIWEEK_PLANNER_VERSION = "multiweek-planner-v1"
@@ -277,18 +273,6 @@ def _session_budget(candidate: WeeklyPlanCandidate, weekday: int) -> int:
     return 1440
 
 
-def _explicit_session_budget(candidate: WeeklyPlanCandidate, weekday: int) -> int | None:
-    raw = candidate.generation_context.get("availability")
-    if not isinstance(raw, list):
-        return None
-    for item in raw:
-        if isinstance(item, dict) and item.get("weekday") == weekday:
-            value = item.get("available_minutes")
-            if isinstance(value, (int, float)):
-                return int(value)
-    return None
-
-
 def _quality_templates(phase: str, event_type: str) -> tuple[str, ...]:
     if phase == "build" and event_type != "general_fitness":
         return ("threshold_cruise",)
@@ -304,116 +288,41 @@ def _insert_phase_quality(
     *,
     phase: str,
     event_type: str,
+    blocked: Callable[[date], bool] | None = None,
 ) -> tuple[WeeklyPlanCandidate, bool]:
     template_ids = _quality_templates(phase, event_type)
     if not template_ids or not candidate.sessions:
         return candidate, False
-    baseline = candidate.generation_context.get("baseline")
-    consistent_weeks = (
-        int(baseline.get("consistent_running_weeks", 0)) if isinstance(baseline, dict) else 0
-    )
-    observed_runs = (
-        int(round(float(baseline.get("observed_runs_per_week", 0))))
-        if isinstance(baseline, dict)
-        else 0
-    )
-    replacement_indexes = sorted(
-        (
-            index
-            for index, item in enumerate(candidate.sessions)
-            if item.role in {"strides", "easy_run"}
+    if any(item.role in {"threshold_cruise", "vo2_intervals"} for item in candidate.sessions):
+        return candidate, False
+    for option in sorted(
+        candidate.quality_options,
+        key=lambda item: (
+            template_ids.index(item.template_id)
+            if item.template_id in template_ids
+            else len(template_ids)
         ),
-        key=lambda index: candidate.sessions[index].role != "strides",
-    )
-    for template_id in template_ids:
-        for index in replacement_indexes:
-            current = candidate.sessions[index]
-            budget = _explicit_session_budget(candidate, current.weekday)
-            if budget is None:
+    ):
+        if option.template_id not in template_ids:
+            continue
+        if blocked is not None and blocked(option.scheduled_for):
+            continue
+        for index, current in enumerate(candidate.sessions):
+            if current.scheduled_for != option.scheduled_for or current.role == "long_run":
                 continue
-            other_quality_days = [
-                item.weekday
-                for other_index, item in enumerate(candidate.sessions)
-                if other_index != index and item.intensity_domain != "low"
-            ]
-            if any(abs(current.weekday - weekday) * 24 < 48 for weekday in other_quality_days):
-                continue
-            try:
-                expanded = expand_workout_template(
-                    template_id,
-                    eligibility=TemplateEligibilityContext(
-                        consistent_running_weeks=consistent_weeks,
-                        runs_per_week=observed_runs,
-                        available_minutes=budget,
-                        facts={
-                            "reliable_intensity_model",
-                            "reliable_current_performance_model",
-                            "quality_density_validation",
-                        },
-                    ),
-                )
-            except TemplateExpansionError:
+            if option.planned_minutes > _session_budget(candidate, current.weekday):
                 continue
             sessions = list(candidate.sessions)
-            sessions[index] = replace(
-                current,
-                template_id=expanded.template_id,
-                template_version=expanded.template_version,
-                name=expanded.name,
-                planned_minutes=ceil(expanded.load_estimate.duration_seconds / 60),
-                intensity_domain=("high" if template_id == "vo2_intervals" else "moderate"),
-                role=template_id,
-                rationale=(
-                    "Die spezifische Phase setzt einen kontrollierten VO₂max-Reiz."
-                    if template_id == "vo2_intervals"
-                    else "Die Aufbauphase setzt einen kontrollierten Schwellenreiz."
-                ),
-                warnings=("planner.phase_quality_placed",),
-                load_estimate_json=expanded.load_estimate.model_dump(mode="json"),
-            )
-            context = dict(candidate.generation_context)
-            context["phase_quality"] = {
-                "template_id": template_id,
-                "phase": phase,
-                "eligibility_facts": [
-                    "quality_density_validation",
-                    "reliable_current_performance_model",
-                    "reliable_intensity_model",
-                ],
-            }
-            adjusted = replace(
-                candidate,
-                sessions=tuple(sessions),
-                generation_context=context,
-                validation_report=candidate.validation_report,
-            )
+            sessions[index] = option
+            adjusted = replace(candidate, sessions=tuple(sessions))
             return replace(adjusted, input_fingerprint=_candidate_fingerprint(adjusted)), True
     return candidate, False
 
 
 def _candidate_fingerprint(candidate: WeeklyPlanCandidate) -> str:
-    encoded = json.dumps(
-        {
-            "generation_context": candidate.generation_context,
-            "planner_version": candidate.planner_version,
-            "knowledge_base_version": candidate.knowledge_base_version,
-            "sessions": [
-                {
-                    "scheduled_for": item.scheduled_for.isoformat(),
-                    "role": item.role,
-                    "template_id": item.template_id,
-                    "template_version": item.template_version,
-                    "planned_minutes": item.planned_minutes,
-                    "warnings": list(item.warnings),
-                }
-                for item in candidate.sessions
-            ],
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode()
-    return hashlib.sha256(encoded).hexdigest()
+    return _fingerprint_candidate(
+        candidate.generation_context, candidate.sessions, candidate.knowledge_base_version
+    )
 
 
 def _apply_phase(
@@ -437,11 +346,14 @@ def _apply_phase(
             bounds = _continuous_bounds(item.template_id)
             if bounds is not None:
                 minimum, _, maximum = bounds
+                maximum = min(maximum, 120 if item.role == "long_run" else 90)
+                if item.role == "long_run":
+                    maximum = min(maximum, _floor_grid(item.planned_minutes * 1.1))
                 planned_minutes = _floor_grid(item.planned_minutes * volume_factor)
                 planned_minutes = max(minimum, min(maximum, planned_minutes))
                 planned_minutes = min(planned_minutes, _session_budget(candidate, item.weekday))
                 planned_minutes = max(minimum, _floor_grid(planned_minutes))
-            sessions.append(replace(item, planned_minutes=planned_minutes))
+            sessions.append(resize_session(item, planned_minutes))
         sessions = tuple(sessions)
     context = dict(candidate.generation_context)
     context["cycle"] = {
@@ -490,7 +402,7 @@ def _cap_weekly_increase(
             bounds = _continuous_bounds(item.template_id)
             if bounds is None or item.planned_minutes <= bounds[0]:
                 continue
-            sessions[index] = replace(item, planned_minutes=item.planned_minutes - 5)
+            sessions[index] = resize_session(item, item.planned_minutes - 5)
             changed = True
             break
         if not changed:
@@ -503,7 +415,7 @@ def _cap_long_run_increase(
     candidate: WeeklyPlanCandidate, maximum_minutes: int
 ) -> WeeklyPlanCandidate:
     sessions = tuple(
-        replace(item, planned_minutes=min(item.planned_minutes, maximum_minutes))
+        resize_session(item, min(item.planned_minutes, maximum_minutes))
         if item.role == "long_run"
         else item
         for item in candidate.sessions
@@ -550,6 +462,7 @@ def compose_training_cycle(
         )
 
     weeks: list[CycleWeekCandidate] = []
+    prevented_quality_dates: set[date] = set()
     previous_long_run_minutes = 0
     for position, weekly in enumerate(weekly_candidates):
         week_start = start_date + timedelta(weeks=position)
@@ -575,10 +488,26 @@ def compose_training_cycle(
         )
         if not interrupted:
             pre_quality = adjusted
+            prior_quality = [
+                item.scheduled_for
+                for week in weeks
+                for item in week.weekly_plan.sessions
+                if item.role in {"threshold_cruise", "vo2_intervals"}
+            ]
+
+            def quality_blocked(day: date, prior_quality: list[date] = prior_quality) -> bool:
+                conflict = bool(existing_quality_check and existing_quality_check(day)) or any(
+                    abs((day - prior).days) < 2 for prior in prior_quality
+                )
+                if conflict:
+                    prevented_quality_dates.add(day)
+                return conflict
+
             adjusted, quality_inserted = _insert_phase_quality(
                 adjusted,
                 phase=phase,
                 event_type=event_type,
+                blocked=quality_blocked,
             )
         else:
             pre_quality = adjusted
@@ -607,6 +536,8 @@ def compose_training_cycle(
             maximum_total_minutes = _floor_grid(
                 prior_totals[-1] * profile.max_weekly_volume_increase
             )
+            if phase == "taper":
+                maximum_total_minutes = _floor_grid(prior_totals[-1] * 0.9)
             adjusted = _cap_weekly_increase(
                 adjusted,
                 maximum_total_minutes=maximum_total_minutes,
@@ -629,6 +560,22 @@ def compose_training_cycle(
             )
         )
 
+    # Race-week dose ceilings can make the final week smaller than a percentage
+    # taper alone predicts. Reduce the preceding taper rather than expanding the
+    # race-week sessions beyond their selected dose.
+    for index in range(len(weeks) - 1, 0, -1):
+        current, previous = weeks[index], weeks[index - 1]
+        if current.phase != "taper" or previous.phase != "taper" or not current.total_minutes:
+            continue
+        maximum_previous = _floor_grid(
+            current.total_minutes / (1 - profile.maximum_taper_reduction)
+        )
+        if previous.total_minutes > maximum_previous:
+            weeks[index - 1] = replace(
+                previous,
+                weekly_plan=_cap_weekly_increase(previous.weekly_plan, maximum_previous),
+            )
+
     totals = [week.total_minutes for week in weeks]
     weekly_increase_ok = True
     previous_positive = totals[0] if totals and totals[0] > 0 else 0
@@ -650,6 +597,14 @@ def compose_training_cycle(
         if previous_total == 0:
             continue
         reduction = 1 - week.total_minutes / previous_total
+        at_minimum = all(
+            (bounds := _continuous_bounds(item.template_id)) is not None
+            and item.planned_minutes <= bounds[0]
+            for item in week.weekly_plan.sessions
+        )
+        if reduction == 0 and at_minimum:
+            warnings.append("cycle.taper_at_minimum_dose")
+            continue
         if not profile.minimum_taper_reduction <= reduction <= profile.maximum_taper_reduction:
             taper_ok = False
     long_run_ok = True
@@ -676,7 +631,7 @@ def compose_training_cycle(
         week_quality_dates = sorted(
             item.scheduled_for
             for item in week.weekly_plan.sessions
-            if item.intensity_domain != "low"
+            if item.intensity_domain != "low" and item.role != "strides"
         )
         if len(week_quality_dates) > profile.max_quality_sessions:
             quality_density_ok = False
@@ -699,7 +654,7 @@ def compose_training_cycle(
         warnings.append("cycle.long_run_progression_elevated")
     if not quality_density_ok:
         warnings.append("cycle.quality_density_elevated")
-    spacing_conflicts: list[str] = []
+    spacing_conflicts: list[str] = [day.isoformat() for day in sorted(prevented_quality_dates)]
     if existing_quality_check is not None:
         for week in weeks:
             for item in week.weekly_plan.sessions:
@@ -872,6 +827,8 @@ def plan_training_cycle(
             user,
             week_start=start_date + timedelta(weeks=offset),
             as_of=as_of,
+            include_quality=False,
+            planning_goal=selected_type,
         )
         for offset in range(_week_count(start_date, target_date))
     )

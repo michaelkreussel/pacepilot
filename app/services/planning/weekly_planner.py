@@ -1,19 +1,23 @@
 import hashlib
 import json
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime, time, timedelta
 
 from sqlalchemy.orm import Session
 
 from app.models import User
 from app.repositories.activities import activities_between
+from app.repositories.workouts import workouts_between
 from app.services.analytics.activity_semantics import is_running_sport
 from app.services.analytics.athlete_data import AthleteDataService
 from app.services.planning.planning_queries import get_planning_inputs
 from app.services.planning.registry import get_knowledge_registry
 from app.services.planning.registry_models import ContinuousStructure
 from app.services.planning.safety_triage import build_proposal_safety_context
-from app.services.planning.training_fit import assess_training_fit
+from app.services.planning.training_fit import assess_training_fit, recent_training_facts
+from app.services.planning.validator import WorkoutInput
+from app.services.planning.workout_definition import StepBlockV2, TimeEnd, workout_metrics
+from app.services.planning.workout_revision import RevisionMetadata
 from app.services.planning.workout_templates import (
     ExpandedWorkoutTemplate,
     TemplateEligibilityContext,
@@ -79,6 +83,9 @@ class WeeklyPlannerSnapshot:
     intensity_fingerprint: str
     knowledge_base_version: str
     safety_outcome: str = "allow"
+    occupied_days: tuple[date, ...] = ()
+    accounted_minutes: float = 0
+    sustainable_minutes: float | None = None
 
 
 @dataclass(frozen=True)
@@ -94,6 +101,8 @@ class PlannedSessionCandidate:
     rationale: str
     warnings: tuple[str, ...]
     load_estimate_json: dict[str, object]
+    data: WorkoutInput | None = None
+    metadata: RevisionMetadata | None = None
 
 
 @dataclass(frozen=True)
@@ -121,6 +130,7 @@ class WeeklyPlanCandidate:
     input_fingerprint: str
     planner_version: str
     knowledge_base_version: str
+    quality_options: tuple[PlannedSessionCandidate, ...] = ()
 
 
 def _floor_grid(minutes: float) -> int:
@@ -316,12 +326,17 @@ def compose_week(snapshot: WeeklyPlannerSnapshot) -> WeeklyPlanCandidate:
     # Advisory mode: sparse history, low frequency, and re-entry are warnings,
     # never refusals.
     registry = get_knowledge_registry()
-    available_days = snapshot.availability
-    if not available_days:
+    if not snapshot.availability:
         raise WeeklyPlannerError(
             "Für diese Woche sind keine verfügbaren Lauftage erfasst.",
             code="planner.no_available_days",
         )
+    available_days = tuple(
+        day
+        for day in snapshot.availability
+        if snapshot.week_start + timedelta(days=day.weekday) >= snapshot.as_of
+        and snapshot.week_start + timedelta(days=day.weekday) not in snapshot.occupied_days
+    )
     typical = snapshot.typical_weekly_runs_median
     advisory = _weekly_history_advisory(snapshot)
 
@@ -333,7 +348,9 @@ def compose_week(snapshot: WeeklyPlannerSnapshot) -> WeeklyPlanCandidate:
         frequency_cap = max(int(typical), MIN_TYPICAL_WEEKLY_RUNS)
     if snapshot.baseline_confidence in {"insufficient", "low"} or snapshot.effective_reentry:
         frequency_cap = min(frequency_cap, CONSERVATIVE_FREQUENCY_CAP)
-    target_days = min(frequency_cap, len(available_days), MAX_PLAN_DAYS)
+    target_days = min(
+        max(0, frequency_cap - len(snapshot.occupied_days)), len(available_days), MAX_PLAN_DAYS
+    )
 
     long_decision = _long_run_decision(snapshot)
     long_ok = (
@@ -436,7 +453,17 @@ def compose_week(snapshot: WeeklyPlannerSnapshot) -> WeeklyPlanCandidate:
         skips.pop(day.weekday, None)
 
     session_candidates: list[PlannedSessionCandidate] = []
+    remaining = (
+        max(0, snapshot.sustainable_minutes - snapshot.accounted_minutes)
+        if snapshot.sustainable_minutes is not None
+        else float("inf")
+    )
     for role, day, minutes in placements:
+        minutes = min(minutes, int(remaining)) if remaining != float("inf") else minutes
+        if minutes < (60 if role == "long_run" else 20):
+            role = "easy_run"
+        if minutes < 20:
+            continue
         facts: set[str] = set()
         if role == "long_run":
             facts.add("sufficient_recent_long_run_baseline")
@@ -471,6 +498,10 @@ def compose_week(snapshot: WeeklyPlannerSnapshot) -> WeeklyPlanCandidate:
         ):
             session_warnings.append(STRIDES_ADJACENCY_TO_LONG_RUN_WARNING)
         domain = get_knowledge_registry().workouts[template_id].intensity_domain
+        minutes = -(-expanded.load_estimate.duration_seconds // 60)
+        if minutes > remaining:
+            continue
+        remaining -= minutes
         session_candidates.append(
             PlannedSessionCandidate(
                 scheduled_for=scheduled_for,
@@ -484,6 +515,25 @@ def compose_week(snapshot: WeeklyPlannerSnapshot) -> WeeklyPlanCandidate:
                 rationale=_rationale(role),
                 warnings=tuple(session_warnings),
                 load_estimate_json=expanded.load_estimate.model_dump(mode="json"),
+                data=WorkoutInput(
+                    name=expanded.name,
+                    sport="running",
+                    scheduled_for=scheduled_for,
+                    description="",
+                    definition=expanded.definition,
+                    definition_version=expanded.definition_version,
+                ),
+                metadata=RevisionMetadata(
+                    purpose=expanded.purpose,
+                    guidance_json=expanded.guidance,
+                    load_estimate_json=expanded.load_estimate.model_dump(mode="json"),
+                    generator_version=expanded.generator_version,
+                    template_id=expanded.template_id,
+                    template_version=expanded.template_version,
+                    knowledge_base_version=expanded.knowledge_base_version,
+                    source_type="coach_weekly_plan",
+                    edit_source="generator",
+                ),
             )
         )
 
@@ -526,7 +576,7 @@ def compose_week(snapshot: WeeklyPlannerSnapshot) -> WeeklyPlanCandidate:
     return WeeklyPlanCandidate(
         week_start=snapshot.week_start,
         week_end=snapshot.week_start + timedelta(days=6),
-        target_days=target_days,
+        target_days=len(session_candidates),
         sessions=tuple(session_candidates),
         skipped_days=skipped_tuple,
         validation_report=validation_report,
@@ -571,6 +621,16 @@ def _fingerprint_candidate(
                 "template_version": session.template_version,
                 "planned_minutes": session.planned_minutes,
                 "warnings": list(session.warnings),
+                "template_id": session.template_id,
+                "rationale": session.rationale,
+                "data": {
+                    **asdict(session.data),
+                    "definition": session.data.definition.model_dump(mode="json"),
+                }
+                if session.data
+                else None,
+                "metadata": asdict(session.metadata) if session.metadata else None,
+                "load": session.load_estimate_json,
             }
             for session in sessions
         ],
@@ -639,6 +699,8 @@ def plan_shadow_week(
     week_start: date,
     as_of: date,
     availability: tuple[DayAvailability, ...] | list[DayAvailability] | None = None,
+    include_quality: bool = True,
+    planning_goal: str | None = None,
 ) -> WeeklyPlanCandidate:
     if week_start.weekday() != 0:
         raise WeeklyPlannerError(
@@ -674,6 +736,19 @@ def plan_shadow_week(
             "Die angegebene Verfügbarkeit ist ungültig.",
             code="planner.availability_invalid",
         )
+    week_end = week_start + timedelta(days=6)
+    facts = recent_training_facts(session, user.id, as_of=as_of)
+    completed = [f for f in facts if f.running and week_start <= f.day <= week_end]
+    linked = {f.workout_id for f in facts if f.workout_id is not None}
+    accepted = [
+        w
+        for w in workouts_between(session, user.id, week_start, week_end)
+        if is_running_sport(w.sport) and w.id not in linked and w.scheduled_for >= as_of
+    ]
+    occupied = tuple(sorted({f.day for f in completed} | {w.scheduled_for for w in accepted}))
+    accounted = sum((f.duration_s or 0) / 60 for f in completed) + sum(
+        workout_metrics(w.definition).duration_seconds / 60 for w in accepted
+    )
     snapshot = WeeklyPlannerSnapshot(
         week_start=week_start,
         as_of=as_of,
@@ -722,8 +797,19 @@ def plan_shadow_week(
         intensity_fingerprint=shadow.intensity.input_fingerprint,
         knowledge_base_version=get_knowledge_registry().version,
         safety_outcome=safety.report.outcome.value,
+        occupied_days=occupied,
+        accounted_minutes=accounted,
+        sustainable_minutes=float(window28.weekly_duration_s.median or 3600) / 60,
     )
     candidate = compose_week(snapshot)
+    candidate = _personalize_week(
+        session,
+        user,
+        candidate,
+        snapshot,
+        include_quality=include_quality,
+        planning_goal=planning_goal,
+    )
     assessment = assess_training_fit(
         session,
         user.id,
@@ -799,6 +885,201 @@ def plan_shadow_week(
     )
 
     return replace(candidate, generation_context=context, input_fingerprint=fingerprint)
+
+
+def _personalize_week(
+    session: Session,
+    user: User,
+    candidate: WeeklyPlanCandidate,
+    snapshot: WeeklyPlannerSnapshot,
+    *,
+    include_quality: bool,
+    planning_goal: str | None = None,
+) -> WeeklyPlanCandidate:
+    # Import at the orchestration boundary: daily selection uses the same history
+    # counter as weekly composition and remains the authority for quality eligibility.
+    from app.services.planning.daily_recommendation import SUSTAINED, recommend_today
+    from app.services.planning.workout_proposals import RunningProposalService
+
+    service = RunningProposalService(session, user, as_of=snapshot.as_of)
+    sessions: list[PlannedSessionCandidate] = []
+    quality_options: list[PlannedSessionCandidate] = []
+    quality_placed = False
+    budgets = {d.weekday: d.available_minutes for d in snapshot.availability}
+    remaining = max(0, (snapshot.sustainable_minutes or 60) - snapshot.accounted_minutes)
+    for item in sorted(candidate.sessions, key=lambda item: item.scheduled_for):
+        budget = min(budgets[item.weekday], int(remaining))
+        if budget < 20:
+            continue
+        recommendation = recommend_today(
+            session,
+            user,
+            as_of=item.scheduled_for,
+            available_minutes=budget,
+            snapshot_as_of=snapshot.as_of,
+            planning_goal=planning_goal,
+        )
+        if recommendation.state != "workout":
+            continue
+        if recommendation.template_id == "strides" and item.role == "strides":
+            assert recommendation.data is not None and recommendation.metadata is not None
+            strides = _session_from_preview(
+                item, recommendation.data, recommendation.metadata, " ".join(recommendation.reasons)
+            )
+            sessions.append(strides)
+            remaining -= strides.planned_minutes
+            continue
+        if recommendation.template_id in SUSTAINED:
+            assert recommendation.data is not None and recommendation.metadata is not None
+            quality = _session_from_preview(
+                item, recommendation.data, recommendation.metadata, " ".join(recommendation.reasons)
+            )
+            quality_options.append(quality)
+            if include_quality and not quality_placed and item.role != "long_run":
+                sessions.append(quality)
+                remaining -= quality.planned_minutes
+                quality_placed = True
+                continue
+        template_id = "easy_run"
+        minutes = min(item.planned_minutes, budget, int(recommendation.duration_seconds // 60))
+        near_event = any(
+            g.target_date and 0 <= (g.target_date - item.scheduled_for).days <= 7
+            for g in snapshot.goals
+        )
+        rec_context = (
+            (recommendation.metadata.generation_context_json or {})
+            if recommendation.metadata
+            else {}
+        )
+        daily_context = rec_context.get("daily_recommendation", {})
+        phase = daily_context.get("phase") if isinstance(daily_context, dict) else None
+        if (
+            item.role == "long_run"
+            and not snapshot.effective_reentry
+            and not near_event
+            and phase not in {"taper", "recovery"}
+            and (item.scheduled_for > snapshot.as_of or recommendation.template_id == "long_run")
+        ):
+            minutes = min(
+                item.planned_minutes,
+                budget,
+                int(
+                    (snapshot.typical_longest_run_seconds or snapshot.longest_run_28d_seconds or 0)
+                    // 60
+                ),
+                120,
+            )
+            if minutes >= 60:
+                template_id = "long_run"
+        if minutes < 20:
+            continue
+        data, metadata = service.build_candidate(
+            template_id=template_id,
+            suggested_for=item.scheduled_for,
+            available_minutes=budget,
+            edit_source="generator",
+            parameters=TemplateParameters(duration_minutes=minutes),
+        )
+        rationale = _rationale(template_id)
+        if recommendation.template_id in SUSTAINED:
+            rationale += " Der Qualitätsreiz entfällt zugunsten eines lockeren Wochenumfangs."
+        else:
+            rationale += " " + " ".join(
+                reason for reason in recommendation.reasons if "kleinste gültige" in reason
+            )
+            rationale = rationale.strip()
+        metadata = replace(
+            metadata,
+            guidance_json={
+                **(metadata.guidance_json or {}),
+                "reasons": [rationale],
+                "assumptions": list(recommendation.assumptions),
+            },
+        )
+        personalized = _session_from_preview(item, data, metadata, rationale)
+        sessions.append(personalized)
+        remaining -= personalized.planned_minutes
+    context = {
+        **candidate.generation_context,
+        "accounting": {
+            "occupied_days": [d.isoformat() for d in snapshot.occupied_days],
+            "completed_and_remaining_minutes": snapshot.accounted_minutes,
+            "sustainable_minutes": snapshot.sustainable_minutes,
+        },
+    }
+    return replace(
+        candidate,
+        sessions=tuple(sessions),
+        quality_options=tuple(quality_options),
+        target_days=len(sessions),
+        generation_context=context,
+        input_fingerprint=_fingerprint_candidate(
+            context, tuple(sessions), candidate.knowledge_base_version
+        ),
+    )
+
+
+def _session_from_preview(
+    item: PlannedSessionCandidate,
+    data: WorkoutInput,
+    metadata: RevisionMetadata,
+    rationale: str,
+) -> PlannedSessionCandidate:
+    template_id = metadata.template_id or "easy_run"
+    return replace(
+        item,
+        data=data,
+        metadata=metadata,
+        name=data.name,
+        template_id=template_id,
+        template_version=metadata.template_version or "",
+        role=template_id,
+        intensity_domain=get_knowledge_registry().workouts[template_id].intensity_domain,
+        planned_minutes=-(-int(workout_metrics(data.definition).duration_seconds) // 60),
+        rationale=rationale,
+        load_estimate_json=metadata.load_estimate_json or {},
+    )
+
+
+def resize_session(item: PlannedSessionCandidate, minutes: int) -> PlannedSessionCandidate:
+    """Resize continuous work together with its executable content and explanation."""
+    if minutes == item.planned_minutes:
+        return item
+    if item.data is None or item.metadata is None:
+        raise WeeklyPlannerError("Ausführbare Vorschau fehlt.", code="plan.candidate_invalid")
+    definition = item.data.definition.model_copy(deep=True)
+    if len(definition.blocks) != 1 or not isinstance(definition.blocks[0], StepBlockV2):
+        raise WeeklyPlannerError(
+            "Nur kontinuierliche Läufe sind skalierbar.", code="plan.candidate_invalid"
+        )
+    definition.blocks[0].end = TimeEnd(type="time", seconds=minutes * 60)
+    data = replace(item.data, definition=definition)
+    load = {
+        **item.load_estimate_json,
+        "duration_seconds": minutes * 60,
+        "time_by_intensity_domain_seconds": {"low": minutes * 60, "moderate": 0, "high": 0},
+    }
+    distance = load.get("distance_meters")
+    if isinstance(distance, (float, int)):
+        load["distance_meters"] = distance * minutes / item.planned_minutes
+    reason = f"Die Zyklusphase begrenzt diesen Lauf auf {minutes} Minuten."
+    metadata = replace(
+        item.metadata,
+        load_estimate_json=load,
+        guidance_json={**(item.metadata.guidance_json or {}), "reasons": [item.rationale, reason]},
+        generation_context_json={
+            **(item.metadata.generation_context_json or {}),
+            "selected_parameters": {"duration_minutes": minutes},
+        },
+    )
+    return replace(
+        item,
+        planned_minutes=minutes,
+        data=data,
+        metadata=metadata,
+        load_estimate_json=load,
+        rationale=item.rationale + " " + reason,
+    )
 
 
 def _count_consistent_weeks(session: Session, user_id: int, as_of: date) -> int:

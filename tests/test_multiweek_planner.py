@@ -50,6 +50,12 @@ from app.services.planning.weekly_planner import (
     WeeklyPlannerError,
     WeeklyPlannerSnapshot,
     compose_week,
+    resize_session,
+)
+from app.services.planning.workout_templates import (
+    TemplateEligibilityContext,
+    TemplateParameters,
+    expand_workout_template,
 )
 
 START = date(2026, 8, 31)
@@ -85,7 +91,57 @@ def _weekly_candidates(count: int = 8) -> tuple[WeeklyPlanCandidate, ...]:
             intensity_fingerprint="i" * 64,
             knowledge_base_version=get_knowledge_registry().version,
         )
-        output.append(compose_week(snapshot))
+        candidate = compose_week(snapshot)
+        # Pure composition fixtures supply already-selected executable quality options.
+        # Athlete eligibility and target personalization are exercised through plan_training_cycle.
+        options = []
+        for item in candidate.sessions:
+            if item.role != "easy_run":
+                continue
+            for template_id, repetitions, work in (
+                ("threshold_cruise", 3, 5),
+                ("vo2_intervals", 4, 3),
+            ):
+                expanded = expand_workout_template(
+                    template_id,
+                    TemplateParameters(repetitions=repetitions, work_minutes=work),
+                    eligibility=TemplateEligibilityContext(
+                        consistent_running_weeks=8,
+                        runs_per_week=4,
+                        available_minutes=120,
+                        facts={
+                            "reliable_intensity_model",
+                            "reliable_current_performance_model",
+                            "quality_density_validation",
+                        },
+                    ),
+                )
+                load = expanded.load_estimate.model_dump(mode="json")
+                assert item.data is not None and item.metadata is not None
+                options.append(
+                    replace(
+                        item,
+                        template_id=template_id,
+                        role=template_id,
+                        name=expanded.name,
+                        template_version=expanded.template_version,
+                        intensity_domain="moderate"
+                        if template_id == "threshold_cruise"
+                        else "high",
+                        planned_minutes=expanded.load_estimate.duration_seconds // 60,
+                        load_estimate_json=load,
+                        data=replace(item.data, name=expanded.name, definition=expanded.definition),
+                        metadata=replace(
+                            item.metadata,
+                            template_id=template_id,
+                            template_version=expanded.template_version,
+                            purpose=expanded.purpose,
+                            guidance_json=expanded.guidance,
+                            load_estimate_json=load,
+                        ),
+                    )
+                )
+        output.append(replace(candidate, quality_options=tuple(options)))
     return tuple(output)
 
 
@@ -486,7 +542,9 @@ def test_training_cycle_propagates_one_date_to_every_week(
     weekly_candidates = iter(_weekly_candidates())
     observed_dates: list[date] = []
 
-    def plan_week(_session, _user, *, week_start: date, as_of: date) -> WeeklyPlanCandidate:
+    def plan_week(
+        _session, _user, *, week_start: date, as_of: date, include_quality=False, planning_goal=None
+    ) -> WeeklyPlanCandidate:
         candidate = next(weekly_candidates)
         assert candidate.week_start == week_start
         observed_dates.append(as_of)
@@ -609,7 +667,7 @@ def test_plan_spacing_conflicts_produce_warnings_instead_of_refusal(
     with session_factory() as session:
         user = _user(session)
         _seed_cycle_availability(session, user)
-        _seed_cycle_history(session, user, as_of, runs_per_week=4, weeks=5)
+        _seed_cycle_history(session, user, as_of, runs_per_week=4, weeks=8)
         goal = AthleteGoal(
             user_id=user.id,
             event_type="half_marathon",
@@ -977,7 +1035,7 @@ def test_reactivating_cycle_revision_restores_weekly_revision_pointers(session_f
     changed_weeks = list(_weekly_candidates())
     changed_week = changed_weeks[0]
     changed_sessions = tuple(
-        replace(item, planned_minutes=item.planned_minutes - 5)
+        resize_session(item, item.planned_minutes - 5)
         if item.role == "easy_run" and item.planned_minutes > 30
         else item
         for item in changed_week.sessions

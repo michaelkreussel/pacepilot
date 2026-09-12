@@ -1,4 +1,5 @@
 import hashlib
+from dataclasses import replace
 from datetime import date
 
 from sqlalchemy import func, select
@@ -13,21 +14,13 @@ from app.models import (
     Workout,
 )
 from app.services.planning.planning_commands import WeekPlanRevisionInput
-from app.services.planning.registry import get_knowledge_registry
-from app.services.planning.registry_models import IntervalStructure
-from app.services.planning.validator import WorkoutInput
 from app.services.planning.weekly_planner import (
     DayAvailability,
     WeeklyPlanCandidate,
     plan_shadow_week,
 )
-from app.services.planning.workout_revision import RevisionMetadata
+from app.services.planning.workout_definition import workout_metrics
 from app.services.planning.workout_service import WorkoutService
-from app.services.planning.workout_templates import (
-    TemplateEligibilityContext,
-    TemplateParameters,
-    expand_workout_template,
-)
 
 PLAN_SOURCE = "coach_weekly_plan"
 
@@ -241,75 +234,42 @@ def _persist_week_candidate(
     plan.current_revision_id = plan_revision.id
 
     workout_service = WorkoutService(session, user)
-    context = candidate.generation_context.get("baseline")
-    consistent_weeks = (
-        int(context.get("consistent_running_weeks", 0)) if isinstance(context, dict) else 0
-    )
-    observed_runs = (
-        round(float(context.get("observed_runs_per_week", 0))) if isinstance(context, dict) else 0
-    )
-    registry = get_knowledge_registry()
     try:
         for position, item in enumerate(candidate.sessions):
-            template = registry.workouts.get(item.template_id)
-            is_interval_template = isinstance(
-                template.structure if template is not None else None, IntervalStructure
-            )
-            facts: set[str] = set()
-            if item.role == "long_run":
-                facts.add("sufficient_recent_long_run_baseline")
-            elif item.role == "strides":
-                facts.add("familiar_with_relaxed_fast_running")
-            elif is_interval_template and template is not None:
-                facts.update(template.eligibility.requirements)
-            expanded = expand_workout_template(
-                item.template_id,
-                None
-                if item.role == "strides" or is_interval_template
-                else TemplateParameters(duration_minutes=item.planned_minutes),
-                eligibility=TemplateEligibilityContext(
-                    consistent_running_weeks=consistent_weeks,
-                    runs_per_week=max(observed_runs, 1),
-                    available_minutes=item.planned_minutes,
-                    facts=facts,
-                ),
-            )
-            data = WorkoutInput(
-                name=expanded.name,
-                sport="running",
-                scheduled_for=item.scheduled_for,
-                description="Deterministischer Wochenplan-Vorschlag von PacePilot.",
-                definition=expanded.definition,
-                definition_version=expanded.definition_version,
-            )
+            if item.data is None or item.metadata is None:
+                raise WeeklyPlanPersistenceError(
+                    "Dem Kandidaten fehlt die ausführbare Vorschau.", code="plan.candidate_invalid"
+                )
+            data = item.data
+            if (
+                item.template_id != item.metadata.template_id
+                or item.load_estimate_json != item.metadata.load_estimate_json
+                or item.scheduled_for != data.scheduled_for
+                or -(-int(workout_metrics(data.definition).duration_seconds) // 60)
+                != item.planned_minutes
+            ):
+                raise WeeklyPlanPersistenceError(
+                    "Vorschau und Metadaten stimmen nicht überein.", code="plan.candidate_invalid"
+                )
+            workout_service.validate(data)
             request_fingerprint = hashlib.sha256(
                 f"{candidate.input_fingerprint}:{position}:{item.template_id}".encode()
             ).hexdigest()
-            metadata = RevisionMetadata(
-                purpose=expanded.purpose,
+            metadata = replace(
+                item.metadata,
                 guidance_json={
-                    **expanded.guidance,
+                    **(item.metadata.guidance_json or {}),
                     "rationale": item.rationale,
                     "plan_revision_id": plan_revision.id,
                 },
-                load_estimate_json=expanded.load_estimate.model_dump(mode="json"),
-                validation_report_json={
-                    "valid": True,
-                    "issues": [],
-                    "rule_set_version": candidate.planner_version,
-                },
                 generation_context_json={
-                    "schema_version": "weekly_plan_workout_context.v1",
+                    **(item.metadata.generation_context_json or {}),
                     "plan_revision_id": plan_revision.id,
                     "plan_input_fingerprint": candidate.input_fingerprint,
                     "scheduled_for": item.scheduled_for.isoformat(),
                 },
                 source_type=PLAN_SOURCE,
-                generator_version=expanded.generator_version,
-                template_id=expanded.template_id,
-                template_version=expanded.template_version,
                 rule_set_version=candidate.planner_version,
-                knowledge_base_version=get_knowledge_registry().version,
                 edit_source="generator",
             )
             workout = workout_service.create_proposal(

@@ -105,18 +105,31 @@ def _fingerprint(value: object) -> str:
 
 
 def recommend_today(
-    session: Session, user: User, *, as_of: date, available_minutes: int | None = None
+    session: Session,
+    user: User,
+    *,
+    as_of: date,
+    available_minutes: int | None = None,
+    snapshot_as_of: date | None = None,
+    planning_goal: str | None = None,
 ) -> DailyRecommendation:
     """Use a trusted date; no proposal, external call, or chat is created."""
     if available_minutes is not None and not 0 <= available_minutes <= 1440:
         raise ValueError("Zeitbudget muss zwischen 0 und 1440 Minuten liegen.")
-    inputs = get_planning_inputs(session, user.id, as_of=as_of)
+
+    observed_on = snapshot_as_of or as_of
+
+    nominal = snapshot_as_of is not None and as_of > snapshot_as_of
+
+    inputs = get_planning_inputs(session, user.id, as_of=observed_on)
     availability = list_availability(session, user.id)
     today_slot = next((slot for slot in availability if slot.weekday == as_of.weekday()), None)
-    athlete = AthleteDataService(session, user.id, as_of=as_of)
+
+    athlete = AthleteDataService(session, user.id, as_of=observed_on)
     shadow = athlete.get_running_shadow_analysis(performance_anchors=inputs.performance_anchors)
     recent = shadow.baseline.window(28)
-    facts = recent_training_facts(session, user.id, as_of=as_of)
+
+    facts = recent_training_facts(session, user.id, as_of=observed_on)
     normal_minutes = floor((recent.per_run_duration_s.median or 1800) / 60)
     assumptions: list[str] = []
     budget = available_minutes
@@ -133,7 +146,12 @@ def recommend_today(
         .order_by(PreSessionFeedback.recorded_at.desc(), PreSessionFeedback.id.desc())
         .limit(1)
     )
-    if current_feedback is not None and current_feedback.available_minutes is not None:
+
+    if (
+        not nominal
+        and current_feedback is not None
+        and current_feedback.available_minutes is not None
+    ):
         budget = (
             min(budget, current_feedback.available_minutes)
             if budget is not None
@@ -185,6 +203,7 @@ def recommend_today(
             "rules": DAILY_RULES_VERSION,
             "user": user.id,
             "as_of": as_of,
+            "snapshot_as_of": snapshot_as_of,
             "shadow": shadow.context_fingerprint,
             "inputs": asdict(inputs),
             "availability": [asdict(s) for s in availability],
@@ -276,8 +295,10 @@ def recommend_today(
                 "oder das Zeitfenster ist kürzer als 20 Minuten.",
             ),
         )
-    adverse = supported_adverse_evidence(assessment)
-    if assessment.outcome == TrainingFitOutcome.ELEVATED:
+
+    adverse = () if nominal else supported_adverse_evidence(assessment)
+
+    if not nominal and assessment.outcome == TrainingFitOutcome.ELEVATED:
         dates = ", ".join(sorted({f"{e.observed_on:%d.%m.}" for e in adverse}))
         return replace(
             base,
@@ -294,7 +315,8 @@ def recommend_today(
         if w.scheduled_for and w.scheduled_for < as_of and is_running_sport(r.sport)
     }
     observed_days = {f.day for f in runs_week} | planned_week
-    if recent.runs >= 4 and len(observed_days) >= habitual:
+
+    if not nominal and recent.runs >= 4 and len(observed_days) >= habitual:
         return replace(
             base,
             reasons=(
@@ -370,7 +392,8 @@ def recommend_today(
     parameters = TemplateParameters(duration_minutes=minutes)
     goals = [g for g in inputs.goals if g.target_date is None or g.target_date >= as_of]
     goals.sort(key=lambda g: (g.target_date or date.max, g.id))
-    goal = goals[0].event_type if goals else "general_fitness"
+
+    goal = planning_goal or (goals[0].event_type if goals else "general_fitness")
     goal_date = goals[0].target_date if goals else None
     phase = None
     if cycles:
@@ -401,7 +424,8 @@ def recommend_today(
     preferred_long_day = bool(
         inputs.profile and inputs.profile.preferred_long_run_weekday == as_of.weekday()
     )
-    consistent = _count_consistent_weeks(session, user.id, as_of)
+
+    consistent = _count_consistent_weeks(session, user.id, observed_on)
     quality_ok = (
         not any(
             (stress, unknown_recent, sustained_week, planned_quality, reentry, high_volume, adverse)
@@ -461,6 +485,10 @@ def recommend_today(
         )
         if parameters is None:
             template, parameters = "easy_run", TemplateParameters(duration_minutes=minutes)
+            reasons[0] = (
+                "Der kleinste gültige Qualitätsreiz passt mit Aufwärmen und Auslaufen "
+                "nicht in deinen Zeit- und Belastungsrahmen. Stattdessen ein lockerer Lauf."
+            )
         else:
             reasons[0] = (
                 f"{as_of:%d.%m.}: Kontinuierliches Lauftraining und dein Ziel {goal} "
@@ -499,7 +527,8 @@ def recommend_today(
                 f"{as_of:%d.%m.}: Bekannte kurze Steigerungen ergänzen deinen lockeren Lauf; "
                 "sie zählen nicht als volle VO₂-Einheit."
             )
-    data, metadata = RunningProposalService(session, user, as_of=as_of).build_candidate(
+
+    data, metadata = RunningProposalService(session, user, as_of=observed_on).build_candidate(
         template_id=template,
         suggested_for=as_of,
         available_minutes=budget,
@@ -621,8 +650,17 @@ def save_recommendation(
     as_of: date,
     expected_fingerprint: str,
     available_minutes: int | None = None,
+    option: Literal["standard", "shorter", "easier"] = "standard",
+    original_minutes: int | None = None,
 ) -> Workout | DailyRecommendation:
-    preview = recommend_today(session, user, as_of=as_of, available_minutes=available_minutes)
+    preview = recommend_option(
+        session,
+        user,
+        as_of=as_of,
+        available_minutes=available_minutes,
+        option=option,
+        original_minutes=original_minutes,
+    )
     if preview.context_fingerprint != expected_fingerprint or preview.state != "workout":
         return preview
     service = WorkoutService(session, user)
@@ -643,3 +681,98 @@ def save_recommendation(
         idempotency_key=key,
         request_fingerprint=preview.context_fingerprint,
     )
+
+
+def recommend_option(
+    session: Session,
+    user: User,
+    *,
+    as_of: date,
+    available_minutes: int | None = None,
+    option: Literal["standard", "shorter", "easier"] = "standard",
+    original_minutes: int | None = None,
+) -> DailyRecommendation:
+    if option == "standard":
+        return recommend_today(session, user, as_of=as_of, available_minutes=available_minutes)
+    original = recommend_today(session, user, as_of=as_of, available_minutes=original_minutes)
+    if original.state != "workout":
+        return original
+    budget = min(
+        available_minutes
+        if available_minutes is not None
+        else floor(original.duration_seconds / 60 * 0.75),
+        max(0, floor(original.duration_seconds / 60) - 1),
+    )
+    preview = recommend_today(session, user, as_of=as_of, available_minutes=budget)
+    if option == "easier" and preview.state == "workout":
+        data, metadata = RunningProposalService(session, user, as_of=as_of).build_candidate(
+            template_id="easy_run",
+            suggested_for=as_of,
+            available_minutes=budget,
+            edit_source="generator",
+            parameters=TemplateParameters(duration_minutes=min(budget, 90)),
+        )
+        preview = replace(
+            preview,
+            template_id="easy_run",
+            data=data,
+            metadata=metadata,
+            name=data.name,
+            definition=data.definition,
+            duration_seconds=workout_metrics(data.definition).duration_seconds,
+            work_seconds=0,
+            reasons=(
+                "Lockerer Lauf mit geringerem Umfang und ohne zügige Arbeitsblöcke.",
+                "Deine konfigurierte Garmin-HF-Zone ergänzt RPE und Sprechtest."
+                if (metadata.guidance_json or {}).get("device_target")
+                else "Intensität nach RPE und Sprechtest; kein belastbarer Geräte-Zielwert.",
+            ),
+        )
+    from app.services.planning.constraints import adaptation_does_not_increase_load
+
+    if preview.definition is not None and original.definition is not None:
+        original_load = adaptation_load(
+            original.definition,
+            load_estimate=original.metadata.load_estimate_json if original.metadata else None,
+        )
+        changed_load = adaptation_load(
+            preview.definition,
+            load_estimate=preview.metadata.load_estimate_json if preview.metadata else None,
+        )
+        if not adaptation_does_not_increase_load(original_load.dimensions, changed_load.dimensions):
+            return recommend_option(
+                session,
+                user,
+                as_of=as_of,
+                available_minutes=0,
+                option="easier",
+                original_minutes=original_minutes,
+            )
+    reason = (
+        f"{'Kürzer' if option == 'shorter' else 'Leichter'}: {original.duration_seconds / 60:g} → "
+        f"{preview.duration_seconds / 60:g} Minuten gesamt; zügige Arbeit "
+        f"{original.work_seconds / 60:g} → {preview.work_seconds / 60:g} Minuten. "
+        "Wenn ein gültiger Intervallablauf nicht passt, entfällt der Qualitätsreiz."
+    )
+    reasons = (reason,) + tuple(r for r in preview.reasons if "Qualitätsreiz" not in r)
+    metadata = preview.metadata
+    fingerprint = _fingerprint(
+        (
+            original.context_fingerprint,
+            preview.context_fingerprint,
+            option,
+            preview.definition.model_dump(mode="json") if preview.definition else None,
+            asdict(metadata) if metadata else None,
+        )
+    )
+    if metadata is not None:
+        metadata = replace(
+            metadata,
+            guidance_json={**(metadata.guidance_json or {}), "reasons": list(reasons)},
+            generation_context_json={
+                **(metadata.generation_context_json or {}),
+                "alternative": option,
+                "original_fingerprint": original.context_fingerprint,
+            },
+        )
+    return replace(preview, reasons=reasons, metadata=metadata, context_fingerprint=fingerprint)

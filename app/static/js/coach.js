@@ -97,7 +97,7 @@ import { consumeSse } from "./coach-sse.mjs?v=20260906-1";
     submit.disabled = true;
     if (deleteButton) deleteButton.disabled = true;
 
-    const body = new FormData();
+    const body = new FormData(form);
     body.set("message", text);
     try {
       const response = await fetch(form.action, {

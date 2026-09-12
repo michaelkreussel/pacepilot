@@ -2981,7 +2981,7 @@ def test_delete_conversation_cascades_and_preserves_selection(
     )
     assert response.status_code == 303
     assert response.headers["location"] == "/coach"
-    assert "Dein persönlicher Gesundheitscoach" in client.get("/coach").text
+    assert "Dein persönlicher Gesundheitscoach" in client.get("/coach/chat").text
 
 
 def test_active_conversation_cannot_be_deleted(

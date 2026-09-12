@@ -339,7 +339,9 @@ def test_health_concern_produces_advisory_draft_instead_of_blocking(session_fact
         )
         session.commit()
 
-        candidate = plan_shadow_week(session, user, week_start=MONDAY, as_of=today)
+        candidate = plan_shadow_week(
+            session, user, week_start=today + timedelta(days=7 - today.weekday()), as_of=today
+        )
 
         assert candidate.sessions
         raw_health = candidate.generation_context.get("advisory")
@@ -393,14 +395,14 @@ def test_supplied_availability_slot_generates_direct_draft(session_factory) -> N
             user,
             week_start=monday,
             as_of=today,
-            availability=(DayAvailability(weekday=1, available_minutes=60),),
+            availability=(DayAvailability(weekday=today.weekday(), available_minutes=60),),
         )
 
         assert candidate.sessions
         raw_supplied = candidate.generation_context.get("advisory")
         assert isinstance(raw_supplied, dict)
         assert raw_supplied["confidence"]
-        assert {session.weekday for session in candidate.sessions} == {1}
+        assert {session.weekday for session in candidate.sessions} == {today.weekday()}
 
 
 def test_planning_writes_no_rows(session_factory) -> None:

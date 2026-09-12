@@ -5,17 +5,18 @@ from collections.abc import AsyncIterator, Sequence
 from dataclasses import asdict
 from datetime import date
 from time import monotonic
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from pydantic import ValidationError
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth import CurrentUser
 from app.config import get_settings
 from app.database import SessionDep
-from app.models import CoachMessage
+from app.models import CoachMessage, Workout, WorkoutRevision
 from app.onboarding import require_data_access
 from app.repositories.coach import (
     complete_message,
@@ -41,6 +42,7 @@ from app.services.coach.dependencies import (
     CoachAgentFactoryDep,
     CoachProviderConfiguredDep,
 )
+from app.services.coach.overview import overview_context
 from app.services.coach.presentation import (
     PlanArtifactCard,
     PlanningArtifactPresentation,
@@ -52,6 +54,7 @@ from app.services.coach.presentation import (
 )
 from app.services.planning.daily_recommendation import (
     DailyRecommendation,
+    recommend_option,
     recommend_today,
     save_recommendation,
 )
@@ -110,10 +113,19 @@ def _render_coach(
     *,
     message_before: int | None = None,
     status_code: int = 200,
-    today: DailyRecommendation | None = None,
-    available_minutes: int | None = None,
-    recommendation_notice: str | None = None,
 ) -> HTMLResponse:
+    scope = {
+        key: request.query_params[key]
+        for key in (
+            "workout_id",
+            "revision_id",
+            "recommendation_fingerprint",
+            "recommendation_minutes",
+        )
+        if key in request.query_params
+    }
+    if scope:
+        _scope_context(session, user, scope)
     conversations = list_conversations(session, user.id)
     selected = None
     messages: list[CoachMessage] = []
@@ -143,12 +155,7 @@ def _render_coach(
             request,
             active_page="coach",
             configured=configured,
-            today=today
-            or recommend_today(
-                session, user, as_of=date.today(), available_minutes=available_minutes
-            ),
-            recommendation_minutes=available_minutes,
-            recommendation_notice=recommendation_notice,
+            chat_scope=scope,
             model=settings.llm_model,
             conversations=conversations,
             conversation=selected,
@@ -174,10 +181,62 @@ def coach(
     configured: CoachProviderConfiguredDep,
     user: CurrentUser,
     available_minutes: Annotated[int | None, Query(ge=0, le=1440)] = None,
+    option: Literal["standard", "shorter", "easier"] = "standard",
+    original_minutes: Annotated[int | None, Query(ge=0, le=1440)] = None,
 ) -> HTMLResponse:
-    return _render_coach(
-        request, session, user, configured, None, available_minutes=available_minutes
+    today = recommend_option(
+        session,
+        user,
+        as_of=date.today(),
+        available_minutes=available_minutes,
+        option=option,
+        original_minutes=original_minutes,
     )
+    return _render_overview(
+        request,
+        session,
+        user,
+        today,
+        available_minutes=available_minutes,
+        option=option,
+        original_minutes=original_minutes,
+    )
+
+
+def _render_overview(
+    request: Request,
+    session: Session,
+    user: CurrentUser,
+    today: DailyRecommendation,
+    *,
+    available_minutes: int | None = None,
+    option: Literal["standard", "shorter", "easier"] = "standard",
+    original_minutes: int | None = None,
+    status_code: int = 200,
+    notice: str | None = None,
+) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request,
+        "coach/overview.html",
+        context(
+            request,
+            active_page="coach",
+            today=today,
+            recommendation_minutes=available_minutes,
+            recommendation_option=option,
+            original_minutes=original_minutes if option != "standard" else available_minutes,
+            recommendation_notice=notice,
+            **overview_context(session, user, today),
+        ),
+        status_code=status_code,
+    )
+
+
+@router.get("/chat", response_class=HTMLResponse)
+def coach_chat(
+    request: Request, session: SessionDep, user: CurrentUser, configured: CoachProviderConfiguredDep
+):
+    return _render_coach(request, session, user, configured, None)
 
 
 @router.get("/today")
@@ -185,9 +244,16 @@ def today_preview(
     session: SessionDep,
     user: CurrentUser,
     available_minutes: Annotated[int | None, Query(ge=0, le=1440)] = None,
+    option: Literal["standard", "shorter", "easier"] = "standard",
+    original_minutes: Annotated[int | None, Query(ge=0, le=1440)] = None,
 ) -> dict[str, object]:
-    return recommend_today(
-        session, user, as_of=date.today(), available_minutes=available_minutes
+    return recommend_option(
+        session,
+        user,
+        as_of=date.today(),
+        available_minutes=available_minutes,
+        option=option,
+        original_minutes=original_minutes,
     ).summary()
 
 
@@ -199,6 +265,8 @@ def save_today(
     configured: CoachProviderConfiguredDep,
     context_fingerprint: Annotated[str, Form(min_length=64, max_length=64)],
     available_minutes: Annotated[int | None, Form(ge=0, le=1440)] = None,
+    option: Annotated[Literal["standard", "shorter", "easier"], Form()] = "standard",
+    original_minutes: Annotated[int | None, Form(ge=0, le=1440)] = None,
 ):
     try:
         result = save_recommendation(
@@ -207,22 +275,22 @@ def save_today(
             as_of=date.today(),
             expected_fingerprint=context_fingerprint,
             available_minutes=available_minutes,
+            option=option,
+            original_minutes=original_minutes,
         )
     except WorkoutServiceError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     if isinstance(result, DailyRecommendation):
-        return _render_coach(
+        return _render_overview(
             request,
             session,
             user,
-            configured,
-            None,
             today=result,
+            original_minutes=original_minutes,
+            option=option,
             available_minutes=available_minutes,
             status_code=409,
-            recommendation_notice=(
-                "Deine Empfehlung hat sich geändert. Bitte prüfe die aktuelle Vorschau."
-            ),
+            notice=("Deine Empfehlung hat sich geändert. Bitte prüfe die aktuelle Vorschau."),
         )
     return RedirectResponse(f"/workouts/{result.id}", status_code=303)
 
@@ -247,10 +315,79 @@ def coach_conversation(
 
 
 @router.post("/conversations")
-def new_conversation(session: SessionDep, user: CurrentUser) -> RedirectResponse:
+async def new_conversation(
+    request: Request, session: SessionDep, user: CurrentUser
+) -> RedirectResponse:
+    form = await request.form()
+    scope = {
+        key: str(form[key])
+        for key in (
+            "workout_id",
+            "revision_id",
+            "recommendation_fingerprint",
+            "recommendation_minutes",
+        )
+        if key in form
+    }
+    if scope:
+        _scope_context(session, user, scope)
     conversation = create_conversation(session, user.id)
     session.commit()
-    return RedirectResponse(f"/coach/{conversation.id}", status_code=303)
+    from urllib.parse import urlencode
+
+    return RedirectResponse(
+        f"/coach/{conversation.id}" + ("?" + urlencode(scope) if scope else ""), status_code=303
+    )
+
+
+def _scope_context(session: Session, user, scope: dict[str, str]) -> dict[str, object]:
+    if "workout_id" in scope or "revision_id" in scope:
+        try:
+            workout_id, revision_id = int(scope["workout_id"]), int(scope["revision_id"])
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(
+                422, "Workout und Revision müssen gemeinsam angegeben werden."
+            ) from exc
+        row = session.execute(
+            select(Workout, WorkoutRevision)
+            .join(WorkoutRevision, WorkoutRevision.workout_id == Workout.id)
+            .where(
+                Workout.user_id == user.id,
+                Workout.deleted_at.is_(None),
+                Workout.id == workout_id,
+                WorkoutRevision.id == revision_id,
+            )
+        ).first()
+        if row is None:
+            raise HTTPException(404, "Einheit nicht gefunden.")
+        workout, revision = row
+        if revision.id not in {workout.current_revision_id, workout.accepted_revision_id}:
+            raise HTTPException(
+                409, "Diese Revision ist veraltet. Bitte die Einheit erneut öffnen."
+            )
+        return {
+            "workout_id": workout.id,
+            "revision_id": revision.id,
+            "accepted_revision_id": workout.accepted_revision_id,
+            "name": revision.name,
+            "definition": revision.definition,
+            "guidance": revision.guidance_json,
+            "content_hash": revision.content_hash,
+        }
+    if "recommendation_fingerprint" in scope:
+        try:
+            minutes = (
+                int(scope["recommendation_minutes"]) if "recommendation_minutes" in scope else None
+            )
+            today = recommend_today(session, user, as_of=date.today(), available_minutes=minutes)
+        except ValueError as exc:
+            raise HTTPException(422, "Ungültiges Zeitbudget.") from exc
+        if today.context_fingerprint != scope["recommendation_fingerprint"]:
+            raise HTTPException(
+                409, "Die Empfehlung hat sich geändert. Bitte die Trainingsübersicht erneut öffnen."
+            )
+        return {"recommendation": today.summary()}
+    return {}
 
 
 @router.get(
@@ -556,10 +693,25 @@ async def ask_coach(
     agent_factory: CoachAgentFactoryDep,
     user: CurrentUser,
     message: Annotated[str, Form(max_length=4000)],
+    workout_id: Annotated[int | None, Form(gt=0)] = None,
+    revision_id: Annotated[int | None, Form(gt=0)] = None,
+    recommendation_fingerprint: Annotated[str | None, Form(min_length=64, max_length=64)] = None,
+    recommendation_minutes: Annotated[int | None, Form(ge=0, le=1440)] = None,
 ) -> StreamingResponse:
     message = message.strip()
     if not message:
         raise HTTPException(status_code=422, detail="Bitte formuliere eine Frage an den Coach.")
+    scope = {
+        key: str(value)
+        for key, value in {
+            "workout_id": workout_id,
+            "revision_id": revision_id,
+            "recommendation_fingerprint": recommendation_fingerprint,
+            "recommendation_minutes": recommendation_minutes,
+        }.items()
+        if value is not None
+    }
+    scoped_context = _scope_context(session, user, scope) if scope else None
 
     conversation = find_conversation(session, user.id, conversation_id)
     if conversation is None:
@@ -577,6 +729,7 @@ async def ask_coach(
             existing_messages,
             user_id=user.id,
             question=message,
+            scoped_context=scoped_context,
             model_id=get_settings().llm_model,
             request_id=request.state.request_id,
             prompt_template_version=COACH_PROMPT_TEMPLATE_VERSION,

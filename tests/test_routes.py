@@ -150,7 +150,7 @@ def test_main_pages_render(client: TestClient) -> None:
 
     assert client.get("/api/health").json() == {"status": "ok"}
     assert "So entsteht deine Einheit" in client.get("/workouts/new").text
-    assert "Dein persönlicher Gesundheitscoach" in client.get("/coach").text
+    assert "Dein Training" in client.get("/coach").text
 
     openapi = client.get("/openapi.json").json()
     assert "303" in openapi["paths"]["/workouts/{workout_id}/publish"]["post"]["responses"]
@@ -1066,7 +1066,7 @@ def test_edit_draft_workout(client: TestClient, session_factory: sessionmaker[Se
     assert "startPaletteDrag('interval'" in form.text
     assert "/static/icons/workout.svg#pencil" in form.text
     assert "setDropTarget(null, index)" in form.text
-    assert "/static/css/tailwind.css?v=20260911-1" in form.text
+    assert "/static/css/tailwind.css?v=20260912-1" in form.text
     assert "/static/js/theme.js?v=20260809-3" in form.text
     assert "data-theme-toggle" in form.text
 
@@ -1737,7 +1737,7 @@ def test_plan_persistence_is_idempotent_and_visible_in_calendar(
     session_factory: sessionmaker[Session],
     monkeypatch: Any,
 ) -> None:
-    monday = _seed_planning_history(session_factory)
+    monday = _seed_planning_history(session_factory) + timedelta(days=7)
 
     first = client.post(
         "/plans/generate-week",
@@ -1750,7 +1750,7 @@ def test_plan_persistence_is_idempotent_and_visible_in_calendar(
         follow_redirects=False,
     )
     assert first.status_code == second.status_code == 303
-    assert first.headers["location"] == "/plans?view=week&week=0"
+    assert first.headers["location"] == "/plans?view=week&week=1"
 
     calendar = client.get(first.headers["location"])
     assert calendar.status_code == 200
@@ -1908,8 +1908,9 @@ def test_multiweek_plan_generate_detail_and_accept(
     detail = client.get(generated.headers["location"])
     assert detail.status_code == 200
     assert "Mehrwochenplan" in detail.text
-    assert "Schwellenintervalle" in detail.text
-    assert "VO₂max-Intervalle" in detail.text
+    # This fixture has no successful comparable quality history; phase labels
+    # alone must not manufacture a default VO2 workout.
+    assert "VO₂max-Intervalle" not in detail.text
     accept_action = re.search(r'action="(/plans/cycles/\d+/revisions/\d+/accept)"', detail.text)
     assert accept_action is not None
 

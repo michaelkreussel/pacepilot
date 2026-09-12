@@ -1,0 +1,11 @@
+<div class="mt-3 text-sm">
+  <p class="font-semibold">{{ revision.purpose_label }} · {{ revision.target_label }}</p>
+  {% if revision.guidance %}
+    {% for reason in revision.guidance.get('reasons', []) %}<p class="mt-2">{{ reason }}</p>{% endfor %}
+    {% if revision.guidance.get('rationale') and not revision.guidance.get('reasons') %}<p class="mt-2">{{ revision.guidance.rationale }}</p>{% endif %}
+    {% if revision.guidance.get('pace_target') %}<p class="mt-2 text-xs text-muted-foreground">Zielquelle: {{ revision.guidance.pace_target.label }} · {{ revision.guidance.pace_target.source_day }}. RPE und Sprechtest bleiben maßgeblich.</p>
+    {% elif revision.guidance.get('device_target') %}<p class="mt-2 text-xs text-muted-foreground">Zielquelle: konfigurierte persönliche Garmin-HF-Zone. Keine gemessene physiologische Schwelle.</p>
+    {% else %}<p class="mt-2 text-xs text-muted-foreground">Intensität nach RPE und Sprechtest; kein belastbarer persönlicher Geräte-Zielwert hinterlegt.</p>{% endif %}
+    {% for assumption in revision.guidance.get('assumptions', []) %}<p class="mt-2 text-xs text-muted-foreground">{{ assumption }}</p>{% endfor %}
+  {% endif %}
+</div>

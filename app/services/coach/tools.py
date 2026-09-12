@@ -1396,6 +1396,7 @@ def revise_weekly_plan_draft(
             )
         try:
             data = WeekPlanRevisionInput(
+                as_of=runtime.as_of,
                 week_start=week_start,
                 availability=list(availability) if availability is not None else None,
             )
@@ -1541,6 +1542,7 @@ def revise_training_cycle_draft(
             )
         try:
             data = CycleRevisionInput(
+                as_of=runtime.as_of,
                 start_date=start_date,
                 target_date=target_date,
                 event_type=event_type,

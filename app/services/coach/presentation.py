@@ -89,6 +89,7 @@ class WorkoutArtifactPresentation:
     warning: ArtifactWarningPresentation | None
     warning_acknowledgement: WarningAcknowledgementPresentation | None
     lifecycle_actions: tuple[ArtifactActionPresentation, ...]
+    revision: WorkoutRevisionView | None = None
 
     @property
     def status_label(self) -> str:
@@ -200,6 +201,7 @@ PLAN_WARNING_LABELS = {
     "cycle.long_run_progression_elevated": "Erhöhte Long-Run-Steigerung",
     "cycle.existing_quality_spacing": "Geringer Abstand zu bestehenden Qualitätsreizen",
     "cycle.history_limited": "Eingeschränkte Verlaufshistorie in einzelnen Wochen",
+    "cycle.taper_at_minimum_dose": "Entlastung erreicht den kleinsten sinnvollen Trainingsumfang",
 }
 
 
@@ -934,6 +936,7 @@ def _workout_artifact_presentation(
         warning=warning,
         warning_acknowledgement=acknowledgement,
         lifecycle_actions=_available_actions(workout, current, accepted, lifecycle),
+        revision=current,
     )
 
 

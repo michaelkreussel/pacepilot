@@ -1,31 +1,41 @@
 {% from "workouts/_preview.html" import render_blocks with context %}
-<section class="shrink-0 max-h-96 overflow-y-auto border-b border-border bg-primary-subtle px-3 py-3 sm:px-5" aria-labelledby="today-title">
+<section class="rounded-xl border border-border bg-primary-subtle px-3 py-4 sm:px-5" aria-labelledby="today-title">
   <div class="mx-auto max-w-3xl">
     <div class="flex flex-wrap items-center justify-between gap-2">
       <h2 id="today-title" class="font-display text-lg font-semibold">Heute · {{ today.name }}</h2>
-      <span class="text-xs text-muted-foreground">{{ today.as_of.strftime('%d.%m.%Y') }} · Ohne KI-Aufruf</span>
+      <span class="text-xs text-muted-foreground">{{ today.as_of.strftime('%d.%m.%Y') }} · {{ {'workout': 'Empfohlen', 'scheduled': 'Eingeplant', 'completed': 'Erledigt', 'rest': 'Ruhetag', 'clarification': 'Klärung nötig'}.get(today.state) }}</span>
     </div>
     {% if recommendation_notice %}<p role="status" class="mt-2 text-sm font-semibold">{{ recommendation_notice }}</p>{% endif %}
     {% if today.duration_seconds %}<p class="mt-1 text-sm">{{ today.duration_seconds|precise_duration }}{% if today.work_seconds %} · davon {{ today.work_seconds|precise_duration }} zügige Arbeit{% endif %}</p>{% endif %}
+    <h3 class="mt-3 text-sm font-semibold">Warum diese Einheit?</h3>
     <ul class="mt-2 grid gap-1 text-sm">
       {% for reason in today.reasons %}<li>{{ reason }}</li>{% endfor %}
     </ul>
     {% for assumption in today.assumptions %}<p class="mt-2 text-xs text-muted-foreground">{{ assumption }}</p>{% endfor %}
     {% if today.adaptation %}<p class="mt-2 text-sm font-semibold">Empfohlene Anpassung: {{ today.adaptation }}</p>{% endif %}
     {% if today.definition %}<details class="mt-2"><summary class="cursor-pointer text-sm font-semibold">Ablauf und Intensität</summary>{{ render_blocks(today.definition.blocks) }}</details>{% endif %}
+    {% if today_revision|default(none) %}{% set revision = today_revision %}{% include "workouts/_guidance.html" %}{% endif %}
     <div class="mt-3 flex flex-wrap items-end gap-3">
       <form method="get" action="/coach" class="flex items-end gap-2">
+        <input type="hidden" name="option" value="{{ recommendation_option|default('standard') }}">
+        {% if original_minutes|default(none) is not none %}<input type="hidden" name="original_minutes" value="{{ original_minutes }}">{% endif %}
         <label class="text-xs">Zeitbudget (Minuten)<input class="ml-2 w-20 rounded-md border border-border bg-surface px-2 py-1" type="number" name="available_minutes" min="0" max="1440" value="{{ today.available_minutes }}"></label>
         <button type="submit" class="rounded-md border border-border bg-surface px-3 py-1 text-xs font-semibold">Aktualisieren</button>
       </form>
       {% if today.state == 'workout' %}
+      <a class="rounded-md border border-border bg-surface px-3 py-2 text-sm font-semibold" href="/coach?option=shorter{% if original_minutes|default(none) is not none %}&amp;original_minutes={{ original_minutes }}{% endif %}">Kürzer</a>
+      <a class="rounded-md border border-border bg-surface px-3 py-2 text-sm font-semibold" href="/coach?option=easier{% if original_minutes|default(none) is not none %}&amp;original_minutes={{ original_minutes }}{% endif %}">Leichter</a>
       <form method="post" action="/coach/today/save">
         {{ csrf_field() }}
         <input type="hidden" name="context_fingerprint" value="{{ today.context_fingerprint }}">
+        <input type="hidden" name="option" value="{{ recommendation_option|default('standard') }}">
+        {% if original_minutes|default(none) is not none %}<input type="hidden" name="original_minutes" value="{{ original_minutes }}">{% endif %}
         {% if recommendation_minutes is not none %}<input type="hidden" name="available_minutes" value="{{ recommendation_minutes }}">{% endif %}
         <button type="submit" class="rounded-md bg-primary px-3 py-2 text-sm font-semibold text-primary-foreground">Als Vorschlag speichern</button>
       </form>
       {% elif today.workout_id %}<a class="text-sm font-semibold underline" href="/workouts/{{ today.workout_id }}">Einheit prüfen und anpassen</a>{% endif %}
+      {% if today.workout_id and today.revision_id %}<a class="text-sm underline" href="/coach/chat?workout_id={{ today.workout_id }}&amp;revision_id={{ today.revision_id }}">Coach zu dieser Einheit fragen</a>{% elif recommendation_option|default('standard') == 'standard' %}<a class="text-sm underline" href="/coach/chat?recommendation_fingerprint={{ today.context_fingerprint }}{% if recommendation_minutes is not none %}&amp;recommendation_minutes={{ recommendation_minutes }}{% endif %}">Coach zur heutigen Empfehlung fragen</a>{% endif %}
+      {% if recommendation_option|default('standard') != 'standard' %}<a class="text-sm underline" href="/coach{% if original_minutes|default(none) is not none %}?available_minutes={{ original_minutes }}{% endif %}">Zur ursprünglichen Empfehlung</a>{% endif %}
     </div>
   </div>
 </section>

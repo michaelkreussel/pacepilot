@@ -34,6 +34,7 @@ class CoachRuntimeContext:
     conversation_id: int | None = None
     user_message_id: int | None = None
     assistant_message_id: int | None = None
+    scoped_context: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -87,6 +88,7 @@ def prepare_execution(
     prompt_template_version: str,
     operation_contract_version: str,
     as_of: date,
+    scoped_context: dict[str, object] | None = None,
 ) -> CoachExecutionPreparation:
     repair_stale_responses(session, user_id, conversation.id)
     try:
@@ -113,6 +115,7 @@ def prepare_execution(
         conversation_id=conversation.id,
         user_message_id=user_message.id,
         assistant_message_id=assistant_message.id,
+        scoped_context=scoped_context,
     )
     history = (*bounded_history(prior_messages), CoachHistoryMessage("user", question))
     return CoachExecutionPreparation(history, runtime, assistant_message.id)

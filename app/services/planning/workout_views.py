@@ -13,6 +13,9 @@ from app.models import (
 )
 from app.services.planning.workout_definition import (
     HeartRateRangeTarget,
+    HeartRateZoneTarget,
+    PaceRangeTarget,
+    RepeatBlockV2,
     RpeRangeTarget,
     StepBlockV2,
     WorkoutDefinitionModel,
@@ -123,14 +126,45 @@ class WorkoutRevisionView:
 
     @property
     def target_label(self) -> str:
-        definition = self.definition_model
-        if len(definition.blocks) == 1 and isinstance(definition.blocks[0], StepBlockV2):
-            target = definition.blocks[0].target
+        blocks = self.definition_model.blocks
+        steps = [
+            step
+            for block in blocks
+            for step in (block.children if isinstance(block, RepeatBlockV2) else [block])
+            if isinstance(step, StepBlockV2)
+        ]
+        work = [step for step in steps if step.step_type == "interval"] or steps
+        labels = []
+        for step in work:
+            target = step.target
             if isinstance(target, HeartRateRangeTarget):
-                return f"HF {target.lower_bpm}–{target.upper_bpm} bpm"
-            if isinstance(target, RpeRangeTarget):
-                return f"RPE {target.lower_rpe}–{target.upper_rpe}"
-        return "Lokale Intensitätsleitplanken"
+                label = f"HF {target.lower_bpm}–{target.upper_bpm} bpm"
+            elif isinstance(target, HeartRateZoneTarget):
+                label = f"HF-Zone {target.zone}"
+            elif isinstance(target, RpeRangeTarget):
+                label = f"RPE {target.lower_rpe}–{target.upper_rpe}"
+            elif isinstance(target, PaceRangeTarget):
+                fast, slow = (
+                    round(target.fastest_seconds_per_km),
+                    round(target.slowest_seconds_per_km),
+                )
+                label = f"Pace {fast // 60}:{fast % 60:02d}–{slow // 60}:{slow % 60:02d} min/km"
+            else:
+                continue
+            if label not in labels:
+                labels.append(label)
+        return " · ".join(labels) or "Nach Gefühl und Sprechtest"
+
+    @property
+    def purpose_label(self) -> str:
+        return {
+            "aerobic_base": "Aerobe Grundlage",
+            "aerobic_endurance_and_fatigue_resistance": "Ausdauer und Ermüdungsresistenz",
+            "threshold_endurance": "Schwellenausdauer",
+            "upper_aerobic_power": "Aerobe Leistungsfähigkeit",
+            "low_load_recovery": "Aktive Erholung",
+            "neuromuscular_activation": "Laufökonomie und Aktivierung",
+        }.get(self.purpose or "", self.purpose or "Lauftraining")
 
     @property
     def source_label(self) -> str:
