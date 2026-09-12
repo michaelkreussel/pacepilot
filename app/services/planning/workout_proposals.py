@@ -11,9 +11,10 @@ from sqlalchemy.orm import Session
 
 from app.models import GarminAccount, User, Workout, WorkoutRevision
 from app.services.analytics.athlete_data import AthleteDataService
-from app.services.analytics.running_intensity import RunningShadowAnalysis
+from app.services.analytics.running_intensity import RunningShadowAnalysis, workout_pace_guidance
 from app.services.garmin.heart_rate_zones import is_valid_normalized_heart_rate_zone_profile
 from app.services.planning.load_estimate import IntensityDomainTime, LoadEstimate
+from app.services.planning.planning_queries import list_performance_anchors
 from app.services.planning.registry import WorkoutFormatId, get_knowledge_registry
 from app.services.planning.registry_models import (
     ContinuousStructure,
@@ -31,6 +32,8 @@ from app.services.planning.validator import WorkoutInput
 from app.services.planning.weekly_planner import _count_consistent_weeks
 from app.services.planning.workout_definition import (
     HeartRateRangeTarget,
+    PaceRangeTarget,
+    RepeatBlockV2,
     RpeRangeTarget,
     StepBlockV2,
     TimeEnd,
@@ -54,7 +57,7 @@ from app.services.planning.workout_templates import (
 )
 
 PROPOSAL_SOURCE = "coach_single"
-PROPOSAL_RULE_SET_VERSION = "running-workout-candidate-v4"
+PROPOSAL_RULE_SET_VERSION = "running-workout-candidate-v5"
 RunningTemplateId = WorkoutFormatId
 QUALITY_TEMPLATE_IDS = frozenset({"strides", "threshold_cruise", "vo2_intervals"})
 
@@ -180,7 +183,9 @@ def _candidate_inputs(
             "Das vorgeschlagene Datum darf nicht in der Vergangenheit liegen.",
             code="proposal.date_in_past",
         )
-    shadow = AthleteDataService(session, user.id, as_of=as_of).get_running_shadow_analysis()
+    shadow = AthleteDataService(session, user.id, as_of=as_of).get_running_shadow_analysis(
+        performance_anchors=list_performance_anchors(session, user.id)
+    )
     return shadow
 
 
@@ -501,7 +506,7 @@ class RunningProposalService:
         if existing is not None:
             workout_service.verify_proposal_source(existing, source)
             return existing
-        data, metadata = self._build_candidate(
+        data, metadata = self.build_candidate(
             template_id=request.template_id,
             suggested_for=request.suggested_for,
             available_minutes=request.available_minutes,
@@ -533,7 +538,7 @@ class RunningProposalService:
                 "registrierten Format.",
                 code="proposal.revision_unsupported",
             )
-        data, metadata = self._build_candidate(
+        data, metadata = self.build_candidate(
             template_id=current.template_id,
             suggested_for=request.suggested_for,
             available_minutes=request.available_minutes,
@@ -555,7 +560,7 @@ class RunningProposalService:
             source=source,
         )
 
-    def _build_candidate(
+    def build_candidate(
         self,
         *,
         template_id: RunningTemplateId,
@@ -564,6 +569,7 @@ class RunningProposalService:
         edit_source: str,
         current: WorkoutRevision | None = None,
         exclude_workout_id: int | None = None,
+        parameters: TemplateParameters | None = None,
     ) -> tuple[WorkoutInput, RevisionMetadata]:
         shadow = _candidate_inputs(
             self.session,
@@ -588,8 +594,9 @@ class RunningProposalService:
             available_minutes,
             self.as_of,
         )
-        parameters: TemplateParameters | None = None
-        if isinstance(template.structure, ContinuousStructure):
+        if parameters is not None:
+            pass
+        elif isinstance(template.structure, ContinuousStructure):
             selected_minutes = min(
                 available_minutes,
                 template.structure.duration_minutes.maximum,
@@ -639,6 +646,26 @@ class RunningProposalService:
             parameters,
             eligibility=template_context,
         )
+        pace = workout_pace_guidance(shadow.intensity, template_id)
+        if pace is not None:
+            definition = expanded.definition.model_copy(deep=True)
+            for block in definition.blocks:
+                if isinstance(block, RepeatBlockV2):
+                    for step in block.children:
+                        if isinstance(step, StepBlockV2) and step.step_type == "interval":
+                            step.target = PaceRangeTarget.model_validate(
+                                {
+                                    key: pace[key]
+                                    for key in (
+                                        "type",
+                                        "fastest_seconds_per_km",
+                                        "slowest_seconds_per_km",
+                                    )
+                                }
+                            )
+            expanded = replace(
+                expanded, definition=definition, guidance={**expanded.guidance, "pace_target": pace}
+            )
         selected_minutes = ceil(expanded.load_estimate.duration_seconds / 60)
         device_target = None
         if template_id == "easy_run":
@@ -690,6 +717,7 @@ class RunningProposalService:
             definition=expanded.definition,
             definition_version=expanded.definition_version,
         )
+        WorkoutService(self.session, self.user).validate(data)
         assessment = assess_training_fit(
             self.session,
             self.user.id,
@@ -708,6 +736,15 @@ class RunningProposalService:
             edit_source=edit_source,
             as_of=self.as_of,
             quality_conflicts=quality_conflicts,
+        )
+        metadata = replace(
+            metadata,
+            generation_context_json={
+                **(metadata.generation_context_json or {}),
+                "selected_parameters": parameters.model_dump(mode="json", exclude_none=True)
+                if parameters
+                else {},
+            },
         )
         if current is not None:
             generation_context = deepcopy(metadata.generation_context_json)

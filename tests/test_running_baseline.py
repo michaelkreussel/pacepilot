@@ -77,6 +77,7 @@ def test_running_baseline_uses_manual_rpe_when_garmin_feedback_is_missing(sessio
                     pain_present=False,
                     source="manual",
                     content_hash="a" * 64,
+                    recorded_at=datetime.combine(as_of, datetime.min.time()),
                 ),
                 _complete_activity_history(user.id, as_of),
             ]
@@ -385,7 +386,7 @@ def test_shadow_fingerprint_is_stable_and_changes_with_material_input(session_fa
         assert changed.context_fingerprint != first.context_fingerprint
 
 
-def test_manual_race_anchors_beat_threshold_and_enable_supported_critical_speed(
+def test_manual_race_anchors_beat_threshold_but_long_races_do_not_establish_cs(
     session_factory,
 ):
     as_of = date(2026, 6, 30)
@@ -425,9 +426,9 @@ def test_manual_race_anchors_beat_threshold_and_enable_supported_critical_speed(
         assert intensity.pace_anchor is not None
         assert intensity.pace_anchor.reference_distance_m == 5_000
         assert intensity.pace_anchor.pace_seconds_per_km == 240
-        assert intensity.critical_speed.available is True
-        assert intensity.critical_speed.speed_mps == 3.333
-        assert intensity.critical_speed.d_prime_m == 1_000
+        assert intensity.critical_speed.available is False
+        assert intensity.critical_speed.speed_mps is None
+        assert intensity.critical_speed.d_prime_m is None
 
 
 def test_unreliable_and_stale_performance_anchors_fall_back_to_threshold(session_factory):

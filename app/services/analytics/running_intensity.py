@@ -12,7 +12,7 @@ from app.models import DailyFitness
 from app.repositories.fitness import fitness_on_or_before
 from app.services.analytics.running_baseline import RunningBaseline
 
-RUNNING_INTENSITY_VERSION = "1.0"
+RUNNING_INTENSITY_VERSION = "2.0"
 THRESHOLD_FRESH_DAYS = 56
 PERFORMANCE_ANCHOR_FRESH_DAYS = 180
 MIN_RUNNING_SPEED_MPS = 1.5
@@ -45,6 +45,7 @@ class PerformanceAnchorInput:
     distance_m: float
     duration_s: float
     reliable: bool = True
+    source: str = "manual"
 
 
 class PerformanceAnchorLike(Protocol):
@@ -187,7 +188,10 @@ def _valid_performance_anchors(
 
 
 def _critical_speed(
-    anchors: list[tuple[PerformanceAnchorLike, float]], baseline_confidence: str
+    anchors: list[tuple[PerformanceAnchorLike, float]],
+    baseline_confidence: str,
+    *,
+    as_of: date | None = None,
 ) -> CriticalSpeedResult:
     if baseline_confidence not in {"high", "medium"}:
         return CriticalSpeedResult(
@@ -196,7 +200,17 @@ def _critical_speed(
             available=False,
             reason="running_baseline_confidence_too_low",
         )
-    by_duration = sorted(anchors, key=lambda item: item[0].duration_s)
+    by_duration = sorted(
+        (
+            item
+            for item in anchors
+            if item[0].kind in {"race", "time_trial"}
+            and getattr(item[0], "source", "manual") != "garmin"
+            and 180 <= item[0].duration_s <= 1200
+            and (as_of is None or 0 <= (as_of - item[0].achieved_on).days <= 42)
+        ),
+        key=lambda item: item[0].duration_s,
+    )
     if len(by_duration) < 2:
         return CriticalSpeedResult(
             speed_mps=None,
@@ -208,11 +222,22 @@ def _critical_speed(
     long = by_duration[-1][0]
     duration_delta = long.duration_s - short.duration_s
     distance_delta = long.distance_m - short.distance_m
-    if duration_delta <= 0 or distance_delta <= 0:
+    if (
+        duration_delta <= 0
+        or distance_delta <= 0
+        or short.achieved_on == long.achieved_on
+        or abs((long.achieved_on - short.achieved_on).days) > 28
+        or long.duration_s < short.duration_s * 2
+    ):
         return CriticalSpeedResult(None, None, False, "performance_anchors_inconsistent")
     speed = distance_delta / duration_delta
     d_prime = short.distance_m - speed * short.duration_s
-    if _plausible_running_speed(speed) is None or not math.isfinite(d_prime) or d_prime < 0:
+    if (
+        _plausible_running_speed(speed) is None
+        or not math.isfinite(d_prime)
+        or not 50 <= d_prime <= 500
+        or speed >= min(item[1] for item in by_duration)
+    ):
         return CriticalSpeedResult(None, None, False, "performance_anchors_inconsistent")
     return CriticalSpeedResult(
         speed_mps=round(speed, 3),
@@ -283,11 +308,30 @@ def get_running_intensity_guidance(
     warnings = list(anchor_warnings)
     pace_anchor: PaceAnchor | None = None
 
-    if valid_anchors and baseline_confidence in {"high", "medium"}:
-        anchor, speed = valid_anchors[0]
+    appropriate = [(a, s) for a, s in valid_anchors if 3000 <= a.distance_m <= 21098]
+    independent = [
+        (a, s)
+        for a, s in appropriate
+        if a.kind in {"race", "time_trial"} and getattr(a, "source", "manual") != "garmin"
+    ]
+    prs = [
+        (a, s)
+        for a, s in appropriate
+        if getattr(a, "source", "manual") == "garmin" and (end - a.achieved_on).days <= 56
+    ]
+    selected_anchor = independent[0] if independent else None
+    fresh_threshold = (
+        threshold is not None and 0 <= (end - threshold[0].day).days <= THRESHOLD_FRESH_DAYS
+    )
+    if selected_anchor is None and not fresh_threshold and prs:
+        selected_anchor = prs[0]
+    if selected_anchor and baseline_confidence in {"high", "medium"}:
+        anchor, speed = selected_anchor
         pace_anchor = PaceAnchor(
             kind=anchor.kind,
-            source=f"{anchor.kind}_performance",
+            source="garmin_personal_record"
+            if getattr(anchor, "source", "manual") == "garmin"
+            else f"{anchor.kind}_performance",
             source_day=anchor.achieved_on,
             age_days=(end - anchor.achieved_on).days,
             speed_mps=round(speed, 3),
@@ -295,7 +339,7 @@ def get_running_intensity_guidance(
             reference_distance_m=round(anchor.distance_m, 1),
             reference_duration_s=round(anchor.duration_s, 1),
         )
-    elif valid_anchors:
+    elif selected_anchor:
         warnings.append("running_baseline_confidence_too_low_for_pace")
     elif threshold is not None:
         threshold_row, threshold_speed = threshold
@@ -361,6 +405,7 @@ def get_running_intensity_guidance(
                     anchor.duration_s if math.isfinite(anchor.duration_s) else "non_finite"
                 ),
                 "reliable": anchor.reliable,
+                "source": getattr(anchor, "source", "manual"),
             }
             for anchor in sorted(
                 performance_anchors,
@@ -384,7 +429,7 @@ def get_running_intensity_guidance(
         pace_anchor=pace_anchor,
         rpe_talk_test_bands=RPE_TALK_TEST_BANDS,
         secondary_context=secondary,
-        critical_speed=_critical_speed(valid_anchors, baseline_confidence),
+        critical_speed=_critical_speed(valid_anchors, baseline_confidence, as_of=end),
         warnings=tuple(warnings),
         input_fingerprint=_fingerprint(input_payload),
     )
@@ -454,6 +499,65 @@ def _generation_context(
             },
         }
     )
+
+
+def workout_pace_guidance(
+    guidance: RunningIntensityGuidance, template_id: str
+) -> dict[str, object] | None:
+    """Distance-aware estimate, never CS. Riegel power model plus product ranges.
+
+    Exponent 1.06; one-hour race-equivalent speed is a threshold approximation,
+    not a physiological measurement. VO2 intervals use 5K-equivalent speed.
+    See docs/daily-recommendation.md for limits and provenance.
+    """
+    anchor = guidance.pace_anchor
+    if anchor is None or template_id not in {"threshold_cruise", "vo2_intervals"}:
+        return None
+    if anchor.kind == "lactate_threshold":
+        if template_id != "threshold_cruise":
+            return None
+        speed = anchor.speed_mps
+        calculation = "fresh_garmin_threshold_speed"
+    else:
+        distance, duration = anchor.reference_distance_m, anchor.reference_duration_s
+        if distance is None or duration is None or not 3000 <= distance <= 21098 or duration <= 0:
+            return None
+        if template_id == "vo2_intervals":
+            if distance > 10000:
+                return None
+            estimated_time = duration * (5000 / distance) ** 1.06
+            speed = 5000 / estimated_time
+            calculation = "riegel_1.06_5k_equivalent"
+        else:
+            estimated_distance = distance * (3600 / duration) ** (1 / 1.06)
+            speed = estimated_distance / 3600
+            calculation = "riegel_1.06_one_hour_equivalent"
+    if _plausible_running_speed(speed) is None:
+        return None
+    # Rounded outward; wider/slower PR guidance acknowledges uncertain maximal effort.
+    low_factor, high_factor = (
+        (0.93, 0.99) if anchor.source == "garmin_personal_record" else (0.95, 1.0)
+    )
+    fastest = math.floor(1000 / (speed * high_factor) / 5) * 5
+    slowest = math.ceil(1000 / (speed * low_factor) / 5) * 5
+    if not all(math.isfinite(v) for v in (fastest, slowest)) or not 125 <= fastest < slowest <= 900:
+        return None
+    return {
+        "type": "pace_range",
+        "fastest_seconds_per_km": fastest,
+        "slowest_seconds_per_km": slowest,
+        "source": anchor.source,
+        "source_day": anchor.source_day.isoformat(),
+        "age_days": anchor.age_days,
+        "confidence": "low" if anchor.source == "garmin_personal_record" else guidance.confidence,
+        "calculation": calculation,
+        "policy": "distance_aware_pace_v1",
+        "reference_distance_m": anchor.reference_distance_m,
+        "reference_duration_s": anchor.reference_duration_s,
+        "label": "Garmin-Bestzeit (kein bestätigter Maximaltest)"
+        if anchor.source == "garmin_personal_record"
+        else "Leistungsbasierter Richtbereich",
+    }
 
 
 def build_running_shadow_analysis(

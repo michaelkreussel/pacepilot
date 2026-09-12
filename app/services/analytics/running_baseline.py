@@ -618,11 +618,17 @@ def get_running_baseline(
     states = {state.resource: state for state in sync_states_for_user(session, user_id)}
     activity_state = states.get("activities")
     fingerprint_runs = list(reference_runs)
-    feedback = effective_activity_feedback(session, user_id, fingerprint_runs)
+    feedback = effective_activity_feedback(
+        session, user_id, fingerprint_runs, through=datetime.combine(end, time.max)
+    )
     interruptions = _interruptions(runs, predecessor, end)
     if predecessor and all(run.id != predecessor.id for run in reference_runs):
         fingerprint_runs.insert(0, predecessor)
-        feedback.update(effective_activity_feedback(session, user_id, [predecessor]))
+        feedback.update(
+            effective_activity_feedback(
+                session, user_id, [predecessor], through=datetime.combine(end, time.max)
+            )
+        )
     return RunningBaseline(
         as_of=end,
         baseline_version=RUNNING_BASELINE_VERSION,

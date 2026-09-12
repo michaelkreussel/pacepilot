@@ -50,12 +50,18 @@ from app.services.coach.presentation import (
     workout_artifact_presentation,
     workout_artifact_presentations,
 )
+from app.services.planning.daily_recommendation import (
+    DailyRecommendation,
+    recommend_today,
+    save_recommendation,
+)
 from app.services.planning.planning_commands import (
     GoalUpdateInput,
     PlanningInputCommandError,
     PlanningInputCommands,
     ReferencedGoalChangeConfirmation,
 )
+from app.services.planning.workout_service import WorkoutServiceError
 from app.web import context, templates
 
 router = APIRouter(prefix="/coach", dependencies=[Depends(require_data_access)])
@@ -104,6 +110,9 @@ def _render_coach(
     *,
     message_before: int | None = None,
     status_code: int = 200,
+    today: DailyRecommendation | None = None,
+    available_minutes: int | None = None,
+    recommendation_notice: str | None = None,
 ) -> HTMLResponse:
     conversations = list_conversations(session, user.id)
     selected = None
@@ -134,6 +143,12 @@ def _render_coach(
             request,
             active_page="coach",
             configured=configured,
+            today=today
+            or recommend_today(
+                session, user, as_of=date.today(), available_minutes=available_minutes
+            ),
+            recommendation_minutes=available_minutes,
+            recommendation_notice=recommendation_notice,
             model=settings.llm_model,
             conversations=conversations,
             conversation=selected,
@@ -158,8 +173,58 @@ def coach(
     session: SessionDep,
     configured: CoachProviderConfiguredDep,
     user: CurrentUser,
+    available_minutes: Annotated[int | None, Query(ge=0, le=1440)] = None,
 ) -> HTMLResponse:
-    return _render_coach(request, session, user, configured, None)
+    return _render_coach(
+        request, session, user, configured, None, available_minutes=available_minutes
+    )
+
+
+@router.get("/today")
+def today_preview(
+    session: SessionDep,
+    user: CurrentUser,
+    available_minutes: Annotated[int | None, Query(ge=0, le=1440)] = None,
+) -> dict[str, object]:
+    return recommend_today(
+        session, user, as_of=date.today(), available_minutes=available_minutes
+    ).summary()
+
+
+@router.post("/today/save")
+def save_today(
+    request: Request,
+    session: SessionDep,
+    user: CurrentUser,
+    configured: CoachProviderConfiguredDep,
+    context_fingerprint: Annotated[str, Form(min_length=64, max_length=64)],
+    available_minutes: Annotated[int | None, Form(ge=0, le=1440)] = None,
+):
+    try:
+        result = save_recommendation(
+            session,
+            user,
+            as_of=date.today(),
+            expected_fingerprint=context_fingerprint,
+            available_minutes=available_minutes,
+        )
+    except WorkoutServiceError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if isinstance(result, DailyRecommendation):
+        return _render_coach(
+            request,
+            session,
+            user,
+            configured,
+            None,
+            today=result,
+            available_minutes=available_minutes,
+            status_code=409,
+            recommendation_notice=(
+                "Deine Empfehlung hat sich geändert. Bitte prüfe die aktuelle Vorschau."
+            ),
+        )
+    return RedirectResponse(f"/workouts/{result.id}", status_code=303)
 
 
 @router.get("/{conversation_id:int}", response_class=HTMLResponse)

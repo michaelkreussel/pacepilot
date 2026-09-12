@@ -1,6 +1,7 @@
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Literal
 
 from sqlalchemy import select
@@ -36,6 +37,8 @@ def effective_activity_feedback(
     session: Session,
     user_id: int,
     activities: Sequence[Activity],
+    *,
+    through: datetime | None = None,
 ) -> dict[int, EffectiveActivityFeedback]:
     activity_ids = [activity.id for activity in activities]
     manual_rows = (
@@ -45,6 +48,7 @@ def effective_activity_feedback(
                 .where(
                     PostSessionFeedback.user_id == user_id,
                     PostSessionFeedback.activity_id.in_(activity_ids),
+                    *([PostSessionFeedback.recorded_at <= through] if through else []),
                 )
                 .order_by(PostSessionFeedback.recorded_at.desc(), PostSessionFeedback.id.desc())
             )

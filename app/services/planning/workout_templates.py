@@ -24,7 +24,7 @@ from app.services.planning.workout_definition import (
     definition_to_json,
 )
 
-GENERATOR_VERSION = "workout-template-expander-v2"
+GENERATOR_VERSION = "workout-template-expander-v3"
 
 
 class TemplateExpansionError(ValueError):
@@ -38,6 +38,7 @@ class TemplateParameters(BaseModel):
 
     duration_minutes: int | None = Field(default=None, ge=1)
     repetitions: int | None = Field(default=None, ge=1)
+    work_minutes: int | None = Field(default=None, ge=1)
 
 
 class TemplateEligibilityContext(BaseModel):
@@ -224,7 +225,7 @@ def _intervals(
             code="template.parameter_unsupported",
         )
     repetitions = _bounded(parameters.repetitions, structure.repetitions, "Wiederholungen")
-    work_minutes = structure.work_minutes.default
+    work_minutes = _bounded(parameters.work_minutes, structure.work_minutes, "Arbeitsdauer")
     total_work_minutes = repetitions * work_minutes
     if (
         not structure.total_work_minutes.minimum
@@ -260,7 +261,16 @@ def _intervals(
                         step_type="interval",
                         end=TimeEnd(type="time", seconds=work_seconds),
                         target=_rpe_target(structure.work_rpe),
-                        instructions=structure.instructions,
+                        instructions=[
+                            *structure.instructions,
+                            f"RPE {structure.work_rpe.minimum}–{structure.work_rpe.maximum}; "
+                            + (
+                                "nur kurze Sätze möglich."
+                                if template.id == "threshold_cruise"
+                                else "nur einzelne Worte möglich."
+                            ),
+                            "Bei Hitze oder Hügeln nach Gefühl statt Pace laufen.",
+                        ],
                     ),
                     StepBlockV2(
                         id=_stable_id(template, parameters, "recovery"),
@@ -316,6 +326,10 @@ def expand_workout_template(
     if template is None:
         raise TemplateExpansionError("Workout-Template nicht gefunden.", code="template.not_found")
     selected = parameters or TemplateParameters()
+    if selected.work_minutes is not None and not isinstance(template.structure, IntervalStructure):
+        raise TemplateExpansionError(
+            "Arbeitsdauer ist nur für Intervalle verfügbar.", code="template.parameter_unsupported"
+        )
     if isinstance(template.structure, ContinuousStructure):
         definition, estimate = _continuous(template, template.structure, selected)
     elif isinstance(template.structure, StridesStructure):

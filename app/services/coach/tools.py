@@ -24,6 +24,11 @@ from app.services.analytics.health_trends import HealthMetric
 from app.services.analytics.progress import ProgressReferenceError
 from app.services.coach.conversation import CoachRuntimeContext
 from app.services.planning.daily_adaptation import DailyAdaptationError, DailyAdaptationService
+from app.services.planning.daily_recommendation import (
+    DailyRecommendation,
+    recommend_today,
+    save_recommendation,
+)
 from app.services.planning.feedback_service import FeedbackCommands, FeedbackNotFoundError
 from app.services.planning.multiweek_planner import (
     CycleRevisionError,
@@ -1026,17 +1031,54 @@ def _proposal_runtime(session: Session, runtime: CoachRuntimeContext) -> tuple[U
     return user, assistant_message
 
 
+def get_today_recommendation(runtime: CoachRuntimeContext) -> str:
+    """Read the same deterministic daily recommendation shown on /coach."""
+    with runtime.session_factory() as session:
+        user = session.get(User, runtime.user_id)
+        if user is None:
+            raise ValueError("User not found")
+        return _json(recommend_today(session, user, as_of=runtime.as_of).summary())
+
+
+def save_today_recommendation(runtime: CoachRuntimeContext, context_fingerprint: str) -> str:
+    """Save only after an explicit request; content comes exclusively from the planner."""
+    with runtime.session_factory() as session:
+        user, _ = _proposal_runtime(session, runtime)
+        try:
+            result = save_recommendation(
+                session, user, as_of=runtime.as_of, expected_fingerprint=context_fingerprint
+            )
+        except WorkoutServiceError as exc:
+            return _json(
+                {"status": "not_created", "error": {"code": exc.code, "message": str(exc)}}
+            )
+        if isinstance(result, DailyRecommendation):
+            return _json({"status": "updated_preview", "recommendation": result.summary()})
+        revision = session.get(WorkoutRevision, result.current_revision_id)
+        return _json(
+            {
+                "status": "created",
+                "workout_id": result.id,
+                "url": f"/workouts/{result.id}",
+                "name": result.name,
+                "guidance": revision.guidance_json if revision else None,
+                "accepted": result.accepted_revision_id is not None,
+                "scheduled": result.scheduled_for is not None,
+            }
+        )
+
+
 def create_running_workout_proposal(
     runtime: CoachRuntimeContext,
     suggested_for: date,
     available_minutes: int,
-    template_id: RunningTemplateId = "easy_run",
+    template_id: RunningTemplateId,
 ) -> str:
     """Create one unaccepted running workout through PacePilot's deterministic planner.
 
     Use this only when the athlete explicitly wants a running-workout proposal and has supplied a
-    desired date plus available time. Select the workout type that best matches the stated goal;
-    if the athlete did not request a type, use easy_run. The result remains unscheduled and
+    desired date, available time, and an explicit format. For recommendation intent use
+    get_today_recommendation and save_today_recommendation. The result remains unscheduled and
     unaccepted. This tool cannot accept, schedule, upload, push, or synchronize a workout.
     """
     with runtime.session_factory() as session:

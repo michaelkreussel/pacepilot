@@ -159,6 +159,35 @@ def test_identical_inputs_generate_identical_candidates() -> None:
     ] == [DailyAdaptationClass.KEEP]
 
 
+def test_missing_health_alone_keeps_training():
+    expanded = _easy()
+    assessment = generate_daily_adaptation_candidates(
+        expanded.definition,
+        training_fit=_fit(TrainingFitOutcome.CAUTION, "coverage.health_missing"),
+        load_estimate=expanded.load_estimate,
+    )
+    assert [c.adaptation_class for c in assessment.candidates if c.recommended] == [
+        DailyAdaptationClass.KEEP
+    ]
+
+
+def test_generated_interval_reduction_preserves_preparation():
+    expanded = expand_workout_template(
+        "threshold_cruise",
+        TemplateParameters(repetitions=5, work_minutes=6),
+        eligibility=TemplateEligibilityContext(
+            consistent_running_weeks=8, runs_per_week=4, available_minutes=80
+        ),
+    )
+    reduced = reduce_volume(expanded.definition, template_id="threshold_cruise")
+    assert reduced.blocks[0] == expanded.definition.blocks[0]
+    assert reduced.blocks[-1] == expanded.definition.blocks[-1]
+    assert (
+        workout_metrics(reduced).duration_seconds
+        < workout_metrics(expanded.definition).duration_seconds
+    )
+
+
 @given(
     time_seconds=st.floats(min_value=1, max_value=100_000, allow_nan=False),
     distance_meters=st.floats(min_value=1, max_value=1_000_000, allow_nan=False),

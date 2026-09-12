@@ -83,13 +83,18 @@ Sicherheit und Datenqualität:
 
 PROPOSAL_PROMPT = """
 Workout-Vorschläge:
+- Für "Was soll ich heute machen?" lies get_today_recommendation und erkläre dessen
+  Entscheidung. Das ist dieselbe Empfehlung wie auf der Heute-Karte, auch ohne Chat.
+- Nur auf ausdrücklichen Speicherwunsch rufe save_today_recommendation mit dem gelesenen
+  context_fingerprint auf. Bei updated_preview erkläre die aktualisierte Entscheidung.
+  Verlinke nach dem Speichern die zurückgegebene Workout-URL.
 - Wenn der Nutzer ausdrücklich einen Laufvorschlag möchte, frage bei Bedarf gezielt nach
   Wunschdatum und verfügbarer Zeit.
 - Rufe danach create_running_workout_proposal auf. Konstruiere niemals selbst Workout-Schritte,
   Pace-, Distanz-, Herzfrequenz- oder Belastungswerte.
 - Das Werkzeug erzeugt ausschließlich einen unbestätigten, nicht eingeplanten Laufvorschlag.
-  Wähle den Template-Typ passend zum ausdrücklich genannten Trainingsziel; ohne klare Typangabe
-  nutze easy_run.
+  Nutze create_running_workout_proposal nur für einen ausdrücklich gewünschten Format-Typ.
+  Ohne Typangabe verwende die deterministische Tagesempfehlung, keinen Easy-Run-Fallback.
 - Löse relative Datumsangaben ausschließlich anhand des vertrauenswürdigen Serverkontexts auf.
   Übergib dem Werkzeug immer das daraus berechnete ISO-Datum. Frage nur bei echter Mehrdeutigkeit
   nach und erfinde kein Datum.
@@ -719,17 +724,31 @@ def record_post_session_feedback(
 
 
 @tool
+def get_today_recommendation(runtime: ToolRuntime[CoachRuntimeContext]) -> str:
+    """Read today's deterministic recommendation, including personal reasons and exact steps."""
+    return coach_operations.get_today_recommendation(runtime.context)
+
+
+@tool
+def save_today_recommendation(
+    runtime: ToolRuntime[CoachRuntimeContext], context_fingerprint: str
+) -> str:
+    """Save the daily recommendation only on explicit user request, using the read fingerprint."""
+    return coach_operations.save_today_recommendation(runtime.context, context_fingerprint)
+
+
+@tool
 def create_running_workout_proposal(
     runtime: ToolRuntime[CoachRuntimeContext],
     suggested_for: date,
     available_minutes: Annotated[int, Field(ge=20, le=1440)],
-    template_id: RunningTemplateId = "easy_run",
+    template_id: RunningTemplateId,
 ) -> str:
     """Create one unaccepted running workout through PacePilot's deterministic planner.
 
     Use this only when the athlete explicitly wants a running-workout proposal and has supplied a
-    desired date plus available time. Select the workout type that best matches the stated goal;
-    if the athlete did not request a type, use easy_run. The result remains unscheduled and
+    desired date, available time, and an explicit format. For recommendation intent use
+    get_today_recommendation and save_today_recommendation. The result remains unscheduled and
     unaccepted. This tool cannot accept, schedule, upload, push, or synchronize a workout.
     """
     return coach_operations.create_running_workout_proposal(
@@ -894,6 +913,8 @@ def coach_tools() -> tuple[BaseTool, ...]:
     return (
         *COACH_TOOLS,
         assess_daily_adaptation,
+        get_today_recommendation,
+        save_today_recommendation,
         create_running_workout_proposal,
         get_revisable_running_workouts,
         revise_running_workout_proposal,

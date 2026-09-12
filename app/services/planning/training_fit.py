@@ -4,13 +4,19 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, time, timedelta
 from enum import StrEnum
+from math import isfinite
 from typing import Literal
 
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from app.models import Activity, PostSessionFeedback, PreSessionFeedback
+from app.models import Activity, PostSessionFeedback, PreSessionFeedback, Workout, WorkoutRevision
 from app.models.user import utcnow
+from app.services.analytics.activity_semantics import (
+    hard_activity_data_available,
+    is_hard_activity,
+    is_running_sport,
+)
 from app.services.analytics.health_trends import MetricTrend, get_health_trends
 from app.services.analytics.subjective_feedback import effective_activity_feedback
 from app.services.planning.registry import get_knowledge_registry
@@ -73,6 +79,105 @@ class TrainingFitAssessment:
     coverage: tuple[TrainingFitCoverage, ...]
     feedback_ids: tuple[str, ...]
     authoritative_input_fingerprint: str
+
+
+@dataclass(frozen=True)
+class RecentTrainingFact:
+    activity_id: int
+    day: date
+    running: bool
+    duration_s: float | None
+    hard: bool
+    intensity_known: bool
+    effort: float | None
+    feel: int | None
+    workout_id: int | None
+    template_id: str | None
+    completion_supported: bool
+
+
+def recent_training_facts(
+    session: Session, user_id: int, *, as_of: date, days: int = 56
+) -> tuple[RecentTrainingFact, ...]:
+    activities = list(
+        session.scalars(
+            select(Activity)
+            .where(
+                Activity.user_id == user_id,
+                Activity.started_at >= datetime.combine(as_of - timedelta(days=days - 1), time.min),
+                Activity.started_at <= datetime.combine(as_of, time.max),
+            )
+            .order_by(Activity.started_at, Activity.id)
+        )
+    )
+    feedback = effective_activity_feedback(
+        session, user_id, activities, through=datetime.combine(as_of, time.max)
+    )
+    revisions = {
+        workout_id: template_id
+        for workout_id, template_id in session.execute(
+            select(Workout.id, WorkoutRevision.template_id)
+            .join(WorkoutRevision, WorkoutRevision.id == Workout.accepted_revision_id)
+            .where(
+                Workout.user_id == user_id,
+                Workout.id.in_([a.workout_id for a in activities if a.workout_id]),
+            )
+        ).all()
+    }
+    adverse_completions = set(
+        session.scalars(
+            select(PostSessionFeedback.activity_id).where(
+                PostSessionFeedback.user_id == user_id,
+                PostSessionFeedback.activity_id.in_([a.id for a in activities]),
+                PostSessionFeedback.recorded_at <= datetime.combine(as_of, time.max),
+                or_(
+                    PostSessionFeedback.completion_percent < 90,
+                    PostSessionFeedback.pain_present.is_(True),
+                    PostSessionFeedback.stopped_reason.is_not(None),
+                ),
+            )
+        )
+    )
+    return tuple(
+        RecentTrainingFact(
+            activity.id,
+            activity.started_at.date(),
+            is_running_sport(activity.activity_type),
+            activity.duration_s
+            if activity.duration_s is not None
+            and isfinite(activity.duration_s)
+            and activity.duration_s > 0
+            else None,
+            is_hard_activity(activity, workout_rpe=feedback[activity.id].effort),
+            hard_activity_data_available(activity, workout_rpe=feedback[activity.id].effort),
+            feedback[activity.id].effort,
+            feedback[activity.id].feel,
+            activity.workout_id,
+            revisions.get(activity.workout_id),
+            activity.id not in adverse_completions,
+        )
+        for activity in activities
+    )
+
+
+def supported_adverse_evidence(
+    assessment: TrainingFitAssessment,
+) -> tuple[TrainingFitEvidence, ...]:
+    """Coverage is uncertainty, not an observed recovery problem."""
+    return tuple(
+        item
+        for item in assessment.evidence
+        if 0 <= (assessment.evaluated_at.date() - item.observed_on).days <= 3
+        and (
+            item.feedback_id is not None
+            or item.source.startswith("training.")
+            or item.code == "readiness.low_score"
+            or any(
+                c.sufficient_for_elevation and item.source == f"health.{c.metric}"
+                for c in assessment.coverage
+            )
+        )
+    )
 
 
 def _number(parameters: Mapping[str, object], name: str) -> int | float:
@@ -194,7 +299,7 @@ def _load_feedback(
             .order_by(Activity.started_at, Activity.id)
         )
     )
-    effective = effective_activity_feedback(session, user_id, activities)
+    effective = effective_activity_feedback(session, user_id, activities, through=evaluated_at)
     effective_sessions = [
         EffectiveSessionFeedback(
             activity_id=activity.id,

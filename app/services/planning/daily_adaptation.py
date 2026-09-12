@@ -30,6 +30,8 @@ from app.services.planning.training_fit import (
     TrainingFitAssessment,
     TrainingFitOutcome,
     assess_training_fit,
+    recent_training_facts,
+    supported_adverse_evidence,
 )
 from app.services.planning.validator import WorkoutInput
 from app.services.planning.workout_definition import (
@@ -56,8 +58,8 @@ from app.services.planning.workout_templates import (
     expand_workout_template,
 )
 
-ADAPTATION_GENERATOR_VERSION = "daily-adaptation-v1"
-ADAPTATION_RULE_SET_VERSION = "daily-adaptation-rules-v1"
+ADAPTATION_GENERATOR_VERSION = "daily-adaptation-v2"
+ADAPTATION_RULE_SET_VERSION = "daily-adaptation-rules-v2"
 
 
 class DailyAdaptationClass(StrEnum):
@@ -97,8 +99,8 @@ class DailyAdaptationCandidate:
                 "Die angenommene Einheit und ihre Belastung bleiben unverändert."
             ),
             DailyAdaptationClass.REDUCE_VOLUME: (
-                "Dauer und Distanz werden gleichmäßig reduziert; Ziele und Struktur"
-                " bleiben erhalten."
+                "Der Umfang wird reduziert; bei generierten Intervallen bleibt die Vorbereitung "
+                "erhalten und die zügige Arbeit wird gekürzt."
             ),
             DailyAdaptationClass.REPLACE_WITH_EASY: (
                 "Ein zeitbasierter Easy Run mit RPE 2–3 und Sprechtest ersetzt die Belastung."
@@ -263,8 +265,40 @@ class DailyAdaptationService:
             .limit(1)
         )
         available_minutes = latest_feedback.available_minutes if latest_feedback else None
+        from app.services.planning.planning_queries import list_availability
+
+        slot = next(
+            (
+                s
+                for s in list_availability(self.session, self.user.id)
+                if s.weekday == self.as_of.weekday()
+            ),
+            None,
+        )
+        if slot is not None:
+            if not slot.available:
+                available_minutes = 0
+            elif slot.available_minutes is not None:
+                available_minutes = (
+                    min(available_minutes, slot.available_minutes)
+                    if available_minutes is not None
+                    else slot.available_minutes
+                )
         athlete = AthleteDataService(self.session, self.user.id, as_of=self.as_of)
         baseline = athlete.get_running_baseline()
+        facts = recent_training_facts(self.session, self.user.id, as_of=self.as_of)
+        typical = baseline.window(28).per_run_duration_s.median or 1800
+        recent_stress = tuple(
+            f"training.recent_demand:{f.day.isoformat()}"
+            for f in facts
+            if 0 <= (self.as_of - f.day).days <= 2
+            and (
+                f.hard
+                or f.running
+                and f.duration_s is not None
+                and f.duration_s >= max(2400, typical * 1.3)
+            )
+        )
         recovery_fingerprint = _fingerprint(asdict(athlete.get_current_recovery_state()))
         week = self._week_context()
         context_fingerprint = _fingerprint(
@@ -281,6 +315,7 @@ class DailyAdaptationService:
                 "recovery_fingerprint": recovery_fingerprint,
                 "week_fingerprint": week.fingerprint,
                 "available_minutes": available_minutes,
+                "recent_training": [asdict(f) for f in facts],
                 "knowledge_base_version": get_knowledge_registry().version,
                 "generator_version": ADAPTATION_GENERATOR_VERSION,
             }
@@ -290,6 +325,8 @@ class DailyAdaptationService:
             training_fit=training_fit,
             load_estimate=revision.load_estimate_json,
             available_minutes=available_minutes,
+            recent_stress=recent_stress,
+            template_id=revision.template_id,
         )
         week_duration = sum(item.duration_seconds for item in week.workouts)
         week_distance = sum(item.distance_meters for item in week.workouts)
@@ -588,12 +625,24 @@ def generate_daily_adaptation_candidates(
     load_estimate: LoadEstimate | dict[str, object] | None = None,
     available_minutes: int | None = None,
     registry: KnowledgeRegistry | None = None,
+    recent_stress: tuple[str, ...] = (),
+    template_id: str | None = None,
 ) -> DailyAdaptationAssessment:
     """Generate the initial Phase 10 classes without model-authored workout content."""
     knowledge = registry or get_knowledge_registry()
     original = adaptation_load(definition, load_estimate=load_estimate)
-    issue_codes = tuple(sorted(training_fit.warning_codes))
-    caution = training_fit.outcome == TrainingFitOutcome.CAUTION
+    issue_codes = tuple(
+        sorted({e.code for e in supported_adverse_evidence(training_fit)} | set(recent_stress))
+    )
+    # Hand-authored callers may carry warning codes without an evidence collection.
+    if not training_fit.evidence:
+        issue_codes = tuple(
+            sorted(
+                set(issue_codes)
+                | {c for c in training_fit.warning_codes if not c.startswith("coverage.")}
+            )
+        )
+    caution = bool(issue_codes) and training_fit.outcome != TrainingFitOutcome.ELEVATED
     elevated = training_fit.outcome == TrainingFitOutcome.ELEVATED
     warned = caution or elevated
 
@@ -618,11 +667,22 @@ def generate_daily_adaptation_candidates(
         recommended=not warned and not time_limited,
         reason_codes=issue_codes if warned else ("adaptation.keep_current",),
     )
-    reduced_definition = reduce_volume(
-        definition,
-        available_minutes=available_minutes,
-        estimated_duration_seconds=original.dimensions.duration_seconds,
-        registry=knowledge,
+    try:
+        reduced_definition = reduce_volume(
+            definition,
+            available_minutes=available_minutes,
+            estimated_duration_seconds=original.dimensions.duration_seconds,
+            registry=knowledge,
+            template_id=template_id,
+        )
+    except DailyAdaptationError:
+        reduced_definition = None
+    mild_supported = (
+        bool(supported_adverse_evidence(training_fit))
+        and not any(e.severe for e in supported_adverse_evidence(training_fit))
+        and not recent_stress
+        and reduced_definition is not None
+        and template_id in {"threshold_cruise", "vo2_intervals"}
     )
     easy = _easy_replacement(
         original,
@@ -637,9 +697,12 @@ def generate_daily_adaptation_candidates(
     reduced = DailyAdaptationCandidate(
         adaptation_class=DailyAdaptationClass.REDUCE_VOLUME,
         definition=reduced_definition,
-        load=_same_intensity_load(reduced_definition, original, definition),
+        load=_same_intensity_load(reduced_definition, original, definition)
+        if reduced_definition
+        else original,
         recommended=(
             not elevated
+            and available_minutes != 0
             and not warning_requires_rest
             and (
                 not warned
@@ -647,7 +710,7 @@ def generate_daily_adaptation_candidates(
                 and available_minutes != 0
                 or caution
                 and original.intensity_comparable
-                and original.dimensions.intensity_score <= 1
+                and (original.dimensions.intensity_score <= 1 or mild_supported)
             )
         ),
         reason_codes=(
@@ -658,7 +721,9 @@ def generate_daily_adaptation_candidates(
             else ("adaptation.reduce_volume_available",)
         ),
     )
-    candidates = [keep, reduced]
+    candidates = [keep]
+    if reduced_definition is not None:
+        candidates.append(reduced)
 
     if easy is not None:
         candidates.append(
@@ -666,13 +731,29 @@ def generate_daily_adaptation_candidates(
                 adaptation_class=DailyAdaptationClass.REPLACE_WITH_EASY,
                 definition=easy[0],
                 load=easy[1],
-                recommended=caution and original.dimensions.intensity_score > 1,
+                recommended=(
+                    not elevated
+                    and available_minutes != 0
+                    and (
+                        caution
+                        and not mild_supported
+                        and original.dimensions.intensity_score > 1
+                        or reduced_definition is None
+                        and time_limited
+                    )
+                ),
                 reason_codes=(
                     issue_codes if warned else ("adaptation.easy_replacement_available",)
                 ),
             )
         )
-    if elevated or warning_requires_rest:
+    if (
+        elevated
+        or warning_requires_rest
+        or reduced_definition is None
+        and easy is None
+        and time_limited
+    ):
         rest = DailyAdaptationCandidate(
             adaptation_class=rest.adaptation_class,
             definition=rest.definition,
@@ -754,6 +835,7 @@ def reduce_volume(
     available_minutes: int | None = None,
     estimated_duration_seconds: float | None = None,
     registry: KnowledgeRegistry | None = None,
+    template_id: str | None = None,
 ) -> WorkoutDefinitionModel:
     knowledge = registry or get_knowledge_registry()
     rule = knowledge.constraints["ADAPT-VOLUME-REDUCTION-001"]
@@ -771,6 +853,41 @@ def reduce_volume(
         factor = min(factor, available_minutes * 60 / duration_seconds)
 
     candidate = definition.model_copy(deep=True)
+    if template_id in {"threshold_cruise", "vo2_intervals"}:
+        from app.services.planning.registry_models import IntervalStructure
+
+        structure = knowledge.workouts[template_id].structure
+        assert isinstance(structure, IntervalStructure)
+        repeat = next((b for b in candidate.blocks if isinstance(b, RepeatBlockV2)), None)
+        if repeat is not None:
+            work = next(
+                (
+                    s
+                    for s in repeat.children
+                    if isinstance(s, StepBlockV2) and s.step_type == "interval"
+                ),
+                None,
+            )
+            if isinstance(work, StepBlockV2) and isinstance(work.end, TimeEnd):
+                original_work = work.end.seconds
+                for count in range(repeat.iterations, structure.repetitions.minimum - 1, -1):
+                    for minutes in range(
+                        int(original_work // 60), structure.work_minutes.minimum - 1, -1
+                    ):
+                        if (
+                            not structure.total_work_minutes.minimum
+                            <= count * minutes
+                            <= structure.total_work_minutes.maximum
+                        ):
+                            continue
+                        repeat.iterations = count
+                        work.end.seconds = minutes * 60
+                        if workout_metrics(candidate).duration_seconds <= duration_seconds * factor:
+                            return candidate
+                raise DailyAdaptationError(
+                    "Kein gültiger reduzierter Intervallumfang; lockeren Lauf oder Ruhe wählen.",
+                    code="adaptation.minimum_work",
+                )
     for step in _steps(candidate.blocks):
         if isinstance(step.end, TimeEnd):
             step.end.seconds = _scaled_value(step.end.seconds, factor)
@@ -1009,6 +1126,23 @@ def _candidate_load_estimate(
     else:
         low, moderate = remaining, 0
     original_estimate = original.load_estimate_json or {}
+    if (
+        original.template_id in {"threshold_cruise", "vo2_intervals"}
+        and candidate.definition is not None
+        and candidate.adaptation_class != DailyAdaptationClass.REPLACE_WITH_EASY
+    ):
+        work_seconds = sum(
+            block.iterations * step.end.seconds
+            for block in candidate.definition.blocks
+            if isinstance(block, RepeatBlockV2)
+            for step in block.children
+            if isinstance(step, StepBlockV2)
+            and step.step_type == "interval"
+            and isinstance(step.end, TimeEnd)
+        )
+        high = round(work_seconds) if original.template_id == "vo2_intervals" else 0
+        moderate = round(work_seconds) if original.template_id == "threshold_cruise" else 0
+        low = duration - high - moderate
     session_rpe = (
         {"minimum": 2, "maximum": 3}
         if candidate.adaptation_class == DailyAdaptationClass.REPLACE_WITH_EASY

@@ -844,6 +844,7 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
             self.runtime = runtime
             rejected = json.loads(
                 create_running_workout_proposal(
+                    template_id="easy_run",
                     runtime=runtime,
                     suggested_for=runtime.as_of - timedelta(days=1),
                     available_minutes=60,
@@ -857,11 +858,13 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
                 },
             }
             first = create_running_workout_proposal(
+                template_id="easy_run",
                 runtime=runtime,
                 suggested_for=runtime.as_of + timedelta(days=1),
                 available_minutes=60,
             )
             second = create_running_workout_proposal(
+                template_id="easy_run",
                 runtime=runtime,
                 suggested_for=runtime.as_of + timedelta(days=1),
                 available_minutes=60,
@@ -1026,6 +1029,7 @@ def test_coach_tool_creates_one_durable_server_rendered_proposal(
 
     conflict = json.loads(
         create_running_workout_proposal(
+            template_id="easy_run",
             runtime=fake.runtime,
             suggested_for=date.today() + timedelta(days=2),
             available_minutes=60,
@@ -2148,6 +2152,7 @@ def test_invalid_proposal_date_returns_completed_stream_without_artifact(
             del messages
             result = json.loads(
                 create_running_workout_proposal(
+                    template_id="easy_run",
                     runtime=runtime,
                     suggested_for=runtime.as_of - timedelta(days=1),
                     available_minutes=45,
@@ -2633,6 +2638,7 @@ def test_proposal_survives_provider_failure_after_commit(
         ) -> AsyncIterator[CoachEvent]:
             del messages
             create_running_workout_proposal(
+                template_id="easy_run",
                 runtime=runtime,
                 suggested_for=date.today() + timedelta(days=1),
                 available_minutes=35,
