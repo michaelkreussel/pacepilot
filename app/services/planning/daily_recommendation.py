@@ -39,6 +39,7 @@ from app.services.planning.workout_definition import (
     StepBlockV2,
     TimeEnd,
     WorkoutDefinitionModel,
+    estimated_duration_seconds,
     workout_metrics,
 )
 from app.services.planning.workout_proposals import RunningProposalService, RunningTemplateId
@@ -46,7 +47,7 @@ from app.services.planning.workout_revision import RevisionMetadata, workout_con
 from app.services.planning.workout_service import WorkoutService, WorkoutTransitionError
 from app.services.planning.workout_templates import TemplateParameters
 
-DAILY_RULES_VERSION = "daily-running-v1"
+DAILY_RULES_VERSION = "daily-running-v2"
 SUSTAINED = {"threshold_cruise", "vo2_intervals"}
 QUALITY_SESSION_SIZE_CEILING = 1.3
 OBSERVED_WEEK_VOLUME_FLAG = 1.2
@@ -274,16 +275,10 @@ def recommend_today(
             template_id=revision.template_id
             if revision.template_id in get_knowledge_registry().workouts
             else None,
-            duration_seconds=workout_metrics(revision.definition_model).duration_seconds,
-            work_seconds=sum(
-                block.iterations * step.end.seconds
-                for block in revision.definition_model.blocks
-                if isinstance(block, RepeatBlockV2)
-                for step in block.children
-                if isinstance(step, StepBlockV2)
-                and step.step_type == "interval"
-                and isinstance(step.end, TimeEnd)
-            ),
+            duration_seconds=estimated_duration_seconds(revision.definition_model),
+            work_seconds=estimated_duration_seconds(revision.definition_model, work_only=True)
+            if revision.template_id in SUSTAINED
+            else 0,
             reasons=tuple(reasons),
             adaptation=adaptation,
         )
@@ -464,7 +459,7 @@ def recommend_today(
             revision
             and revision.template_id in SUSTAINED
             and fact.duration_s
-            and fact.duration_s >= workout_metrics(revision.definition_model).duration_seconds * 0.9
+            and fact.duration_s >= estimated_duration_seconds(revision.definition_model) * 0.9
         ):
             comparable.append((fact.day, revision))
     if quality_ok and not preferred_long_day and goal in {"5k", "10k", "half_marathon", "marathon"}:
@@ -539,10 +534,10 @@ def recommend_today(
     domains = load.get("time_by_intensity_domain_seconds", {})
     assert isinstance(domains, dict)
     work = float(domains.get("moderate", 0)) + float(domains.get("high", 0))
-    duration = workout_metrics(data.definition).duration_seconds
+    duration = estimated_duration_seconds(data.definition)
     reasons.append(
-        f"{as_of:%d.%m.}: {duration / 60:g} Minuten gesamt, "
-        f"{work / 60:g} Minuten zügige Arbeit; übliche Laufdauer {normal_minutes} Minuten. "
+        f"{as_of:%d.%m.}: ca. {duration / 60:.0f} Minuten gesamt, "
+        f"{work / 60:.0f} Minuten zügige Arbeit; übliche Laufdauer {normal_minutes} Minuten. "
         "Freie Zeit ist nur die Obergrenze."
     )
     guidance = metadata.guidance_json or {}
@@ -550,7 +545,8 @@ def recommend_today(
     if isinstance(pace, dict):
         reasons.append(
             f"{pace['source_day']}: {pace['label']}; daraus ein gerundeter, "
-            "formatspezifischer Pace-Bereich. RPE und Sprechtest bleiben maßgeblich."
+            "persönlicher Pace-Bereich für die Uhr. Bei Hitze, Steigungen oder ungewöhnlicher "
+            "Anstrengung langsamer laufen."
         )
     elif isinstance(guidance.get("device_target"), dict):
         reasons.append(
@@ -609,11 +605,15 @@ def automatic_interval_parameters(
     structure = get_knowledge_registry().workouts[template_id].structure
     assert isinstance(structure, IntervalStructure)
     repetitions, work = (3, 5) if template_id == "threshold_cruise" else (4, 3)
+    allowance = None
     if comparable:
+        allowance = int(estimated_duration_seconds(comparable[-1].definition_model, work_only=True))
         selected = (comparable[-1].generation_context_json or {}).get("selected_parameters", {})
         if isinstance(selected, dict) and selected:
             repetitions = int(selected.get("repetitions", repetitions))
             work = int(selected.get("work_minutes", structure.work_minutes.default))
+            if selected.get("work_distance_meters") and allowance:
+                work = max(structure.work_minutes.minimum, allowance // repetitions // 60)
         else:
             for block in comparable[-1].definition_model.blocks:
                 if isinstance(block, RepeatBlockV2):
@@ -638,8 +638,14 @@ def automatic_interval_parameters(
             <= count * work
             <= structure.total_work_minutes.maximum
             and total <= budget
+            and (allowance is None or count * work * 60 <= allowance)
         ):
-            return TemplateParameters(repetitions=count, work_minutes=work)
+            return TemplateParameters(
+                repetitions=count,
+                work_minutes=work,
+                vary_structure=True,
+                work_allowance_seconds=min(allowance, count * work * 60) if allowance else None,
+            )
     return None
 
 

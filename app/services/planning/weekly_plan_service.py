@@ -19,7 +19,7 @@ from app.services.planning.weekly_planner import (
     WeeklyPlanCandidate,
     plan_shadow_week,
 )
-from app.services.planning.workout_definition import workout_metrics
+from app.services.planning.workout_definition import estimated_duration_seconds
 from app.services.planning.workout_service import WorkoutService
 
 PLAN_SOURCE = "coach_weekly_plan"
@@ -245,7 +245,7 @@ def _persist_week_candidate(
                 item.template_id != item.metadata.template_id
                 or item.load_estimate_json != item.metadata.load_estimate_json
                 or item.scheduled_for != data.scheduled_for
-                or -(-int(workout_metrics(data.definition).duration_seconds) // 60)
+                or -(-int(estimated_duration_seconds(data.definition)) // 60)
                 != item.planned_minutes
             ):
                 raise WeeklyPlanPersistenceError(

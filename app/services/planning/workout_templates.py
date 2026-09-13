@@ -1,5 +1,6 @@
 import json
 from dataclasses import dataclass
+from math import ceil
 from uuid import NAMESPACE_URL, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -15,7 +16,9 @@ from app.services.planning.registry_models import (
     WorkoutTemplate,
 )
 from app.services.planning.workout_definition import (
+    DistanceEnd,
     NoTarget,
+    PaceRangeTarget,
     RepeatBlockV2,
     RpeRangeTarget,
     StepBlockV2,
@@ -24,7 +27,7 @@ from app.services.planning.workout_definition import (
     definition_to_json,
 )
 
-GENERATOR_VERSION = "workout-template-expander-v3"
+GENERATOR_VERSION = "workout-template-expander-v4"
 
 
 class TemplateExpansionError(ValueError):
@@ -39,6 +42,12 @@ class TemplateParameters(BaseModel):
     duration_minutes: int | None = Field(default=None, ge=1)
     repetitions: int | None = Field(default=None, ge=1)
     work_minutes: int | None = Field(default=None, ge=1)
+    work_distance_meters: int | None = Field(default=None, ge=400, le=2000)
+    warmup_minutes: int | None = Field(default=None, ge=10, le=20)
+    cooldown_minutes: int | None = Field(default=None, ge=5, le=15)
+    recovery_seconds: int | None = Field(default=None, ge=60, le=300)
+    vary_structure: bool = False
+    work_allowance_seconds: int | None = Field(default=None, ge=1)
 
 
 class TemplateEligibilityContext(BaseModel):
@@ -218,6 +227,7 @@ def _intervals(
     template: WorkoutTemplate,
     structure: IntervalStructure,
     parameters: TemplateParameters,
+    pace_target: PaceRangeTarget | None = None,
 ) -> tuple[WorkoutDefinitionV2, LoadEstimate]:
     if parameters.duration_minutes is not None:
         raise TemplateExpansionError(
@@ -225,8 +235,22 @@ def _intervals(
             code="template.parameter_unsupported",
         )
     repetitions = _bounded(parameters.repetitions, structure.repetitions, "Wiederholungen")
-    work_minutes = _bounded(parameters.work_minutes, structure.work_minutes, "Arbeitsdauer")
-    total_work_minutes = repetitions * work_minutes
+    work_seconds = _bounded(parameters.work_minutes, structure.work_minutes, "Arbeitsdauer") * 60
+    if parameters.work_distance_meters is not None:
+        if pace_target is None or parameters.work_minutes is not None:
+            raise TemplateExpansionError(
+                "Distanzintervalle benötigen einen belegten Pace-Bereich und keine Arbeitsdauer.",
+                code="template.distance_pace_required",
+            )
+        work_seconds = ceil(
+            parameters.work_distance_meters * pace_target.slowest_seconds_per_km / 1000
+        )
+        minimum = 60 if template.id == "vo2_intervals" else structure.work_minutes.minimum * 60
+        if not minimum <= work_seconds <= structure.work_minutes.maximum * 60:
+            raise TemplateExpansionError(
+                "Distanz passt nicht zum Belastungsbereich.", code="template.parameter_out_of_range"
+            )
+    total_work_minutes = repetitions * work_seconds / 60
     if (
         not structure.total_work_minutes.minimum
         <= total_work_minutes
@@ -236,10 +260,9 @@ def _intervals(
             "Die gewählte Wiederholungszahl liegt außerhalb der erlaubten Gesamtbelastung.",
             code="template.total_work_out_of_range",
         )
-    warmup_seconds = structure.warmup_minutes.default * 60
-    work_seconds = work_minutes * 60
-    recovery_seconds = structure.recovery_minutes.default * 60
-    cooldown_seconds = structure.cooldown_minutes.default * 60
+    warmup_seconds = (parameters.warmup_minutes or structure.warmup_minutes.default) * 60
+    recovery_seconds = parameters.recovery_seconds or structure.recovery_minutes.default * 60
+    cooldown_seconds = (parameters.cooldown_minutes or structure.cooldown_minutes.default) * 60
     definition = WorkoutDefinitionV2(
         blocks=[
             StepBlockV2(
@@ -259,8 +282,10 @@ def _intervals(
                         id=_stable_id(template, parameters, "work"),
                         kind="step",
                         step_type="interval",
-                        end=TimeEnd(type="time", seconds=work_seconds),
-                        target=_rpe_target(structure.work_rpe),
+                        end=DistanceEnd(type="distance", meters=parameters.work_distance_meters)
+                        if parameters.work_distance_meters
+                        else TimeEnd(type="time", seconds=work_seconds),
+                        target=pace_target or _rpe_target(structure.work_rpe),
                         instructions=[
                             *structure.instructions,
                             f"RPE {structure.work_rpe.minimum}–{structure.work_rpe.maximum}; "
@@ -307,7 +332,9 @@ def _intervals(
         session_rpe=structure.session_rpe,
         confidence="low",
         uncertainty=[
-            "distance_unknown_for_time_based_workout",
+            "duration_estimated_at_slowest_target_pace"
+            if parameters.work_distance_meters
+            else "distance_unknown_for_time_based_workout",
             "individual_response_requires_baseline_validation",
         ],
     )
@@ -320,13 +347,23 @@ def expand_workout_template(
     *,
     eligibility: TemplateEligibilityContext,
     registry: KnowledgeRegistry | None = None,
+    pace_target: PaceRangeTarget | None = None,
 ) -> ExpandedWorkoutTemplate:
     knowledge = registry or get_knowledge_registry()
     template = knowledge.workouts.get(template_id)
     if template is None:
         raise TemplateExpansionError("Workout-Template nicht gefunden.", code="template.not_found")
     selected = parameters or TemplateParameters()
-    if selected.work_minutes is not None and not isinstance(template.structure, IntervalStructure):
+    if any(
+        (
+            selected.work_minutes,
+            selected.work_distance_meters,
+            selected.warmup_minutes,
+            selected.cooldown_minutes,
+            selected.recovery_seconds,
+            selected.vary_structure,
+        )
+    ) and not isinstance(template.structure, IntervalStructure):
         raise TemplateExpansionError(
             "Arbeitsdauer ist nur für Intervalle verfügbar.", code="template.parameter_unsupported"
         )
@@ -335,7 +372,7 @@ def expand_workout_template(
     elif isinstance(template.structure, StridesStructure):
         definition, estimate = _strides(template, template.structure, selected)
     elif isinstance(template.structure, IntervalStructure):
-        definition, estimate = _intervals(template, template.structure, selected)
+        definition, estimate = _intervals(template, template.structure, selected, pace_target)
     else:
         raise TemplateExpansionError(
             "Diese Template-Struktur ist noch nicht freigegeben.",

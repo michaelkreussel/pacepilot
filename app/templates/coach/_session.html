@@ -1,0 +1,34 @@
+{% macro session_steps(blocks) %}
+<ol class="grid gap-3" aria-label="Trainingsablauf">
+  {% for block in blocks %}
+  {% if block.kind == 'repeat' %}
+  <li class="overflow-hidden rounded-2xl border border-primary/25 bg-primary-subtle">
+    <div class="flex items-center justify-between gap-3 px-4 py-3">
+      <strong class="font-display text-lg text-primary-emphasis">{{ block.iterations }} Wiederholungen</strong>
+      <div class="flex h-7 items-end gap-1" aria-hidden="true">{% for i in range(block.iterations) %}<span class="h-full w-2 rounded-sm bg-primary"></span><span class="h-2 w-2 rounded-sm bg-primary/25"></span>{% endfor %}</div>
+    </div>
+    <div class="grid gap-2 border-t border-primary/15 p-3 sm:grid-cols-2">
+    {% for step in block.children %}{{ session_step(step) }}{% endfor %}
+    </div>
+  </li>
+  {% else %}<li>{{ session_step(block) }}</li>{% endif %}
+  {% endfor %}
+</ol>
+{% endmacro %}
+
+{% macro session_step(step) %}
+<div class="flex items-center gap-3 rounded-xl bg-surface px-4 py-3">
+  <span class="h-9 w-1 shrink-0 rounded-full {{ 'bg-primary' if step.step_type == 'interval' else 'bg-border' }}" aria-hidden="true"></span>
+  <div class="min-w-0 flex-1">
+    <p class="text-xs font-medium text-muted-foreground">{{ {'warmup':'Einlaufen','interval':'Belastung','recovery':'Trabpause','cooldown':'Auslaufen'}.get(step.step_type, step.step_type) }}</p>
+    <p class="mt-0.5 font-display text-lg font-semibold tabular-nums">{% if step.end.type == 'time' %}{{ step.end.seconds|precise_duration }}{% else %}{{ step.end.meters|round|int }} m{% endif %}</p>
+  </div>
+  <div class="text-right text-sm font-semibold tabular-nums">
+    {% if step.target.type == 'pace_range' %}{{ step.target.fastest_seconds_per_km|pace|replace(' min/km', '') }}–{{ step.target.slowest_seconds_per_km|pace|replace(' min/km', '') }}<span class="block text-xs font-normal text-muted-foreground">Zielpace · min/km</span>
+    {% elif step.target.type == 'heart_rate_range' %}{{ step.target.lower_bpm }}–{{ step.target.upper_bpm }}<span class="block text-xs font-normal text-muted-foreground">Herzfrequenz · bpm</span>
+    {% elif step.target.type == 'heart_rate_zone' %}Zone {{ step.target.zone }}<span class="block text-xs font-normal text-muted-foreground">Herzfrequenz</span>
+    {% elif step.target.type == 'rpe_range' %}Nach Gefühl<span class="block text-xs font-normal text-muted-foreground">RPE {{ step.target.lower_rpe }}–{{ step.target.upper_rpe }} · kein Uhr-Ziel</span>
+    {% else %}Locker<span class="block text-xs font-normal text-muted-foreground">Ohne Tempovorgabe</span>{% endif %}
+  </div>
+</div>
+{% endmacro %}

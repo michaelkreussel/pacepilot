@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from math import isfinite
+from math import ceil, isfinite
 from typing import Annotated, Any, Literal, overload
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
@@ -294,6 +294,28 @@ def validate_definition(definition: WorkoutDefinitionModel, sport: str) -> None:
 
 def _valid_positive(value: float) -> bool:
     return isfinite(value) and value > 0
+
+
+def step_duration_seconds(step: StepBlock | StepBlockV2) -> float:
+    """Time endpoint, or a conservative duration estimate for a paced distance step."""
+    if isinstance(step.end, TimeEnd):
+        return step.end.seconds
+    if isinstance(step.target, PaceRangeTarget):
+        return ceil(step.end.meters * step.target.slowest_seconds_per_km / 1000)
+    return 0
+
+
+def estimated_duration_seconds(
+    definition: WorkoutDefinitionModel, *, work_only: bool = False
+) -> float:
+    return sum(
+        (block.iterations if isinstance(block, (RepeatBlock, RepeatBlockV2)) else 1)
+        * step_duration_seconds(step)
+        for block in definition.blocks
+        for step in (block.children if isinstance(block, (RepeatBlock, RepeatBlockV2)) else [block])
+        if isinstance(step, (StepBlock, StepBlockV2))
+        and (not work_only or step.step_type == "interval")
+    )
 
 
 def workout_metrics(definition: WorkoutDefinitionModel) -> WorkoutMetrics:

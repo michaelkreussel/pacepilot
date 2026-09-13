@@ -1073,6 +1073,7 @@ def create_running_workout_proposal(
     suggested_for: date,
     available_minutes: int,
     template_id: RunningTemplateId,
+    work_distance_meters: int | None = None,
 ) -> str:
     """Create one unaccepted running workout through PacePilot's deterministic planner.
 
@@ -1088,6 +1089,7 @@ def create_running_workout_proposal(
             template_id=template_id,
             suggested_for=suggested_for,
             available_minutes=available_minutes,
+            work_distance_meters=work_distance_meters,
             # SQLite rowids can be reused after conversation deletion, so the timestamp
             # keeps retries scoped to this exact durable assistant execution.
             idempotency_key=(

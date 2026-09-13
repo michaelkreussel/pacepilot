@@ -2,9 +2,9 @@
 {% from "workouts/_preview.html" import render_blocks with context %}
 {% block title %}Training · PacePilot{% endblock %}
 {% block content %}
-<div class="mx-auto grid w-full max-w-5xl gap-6">
+<div class="mx-auto grid w-full max-w-6xl gap-6 pb-8">
   <header class="flex flex-wrap items-center justify-between gap-3">
-    <div><h1 class="font-display text-2xl font-semibold">Dein Training</h1><p class="mt-1 text-sm text-muted-foreground">Heute entscheiden, die Woche im Blick behalten.</p></div>
+    <div><p class="mb-1 text-xs font-semibold uppercase tracking-widest text-primary-emphasis">Dein Laufcoach</p><h1 class="font-display text-2xl font-semibold">Bereit für deinen nächsten Lauf.</h1></div>
     <a href="/coach/chat" class="rounded-lg border border-border bg-surface px-4 py-2 text-sm font-semibold">Coach fragen</a>
   </header>
   {% include "coach/_today.html" %}
@@ -34,19 +34,18 @@
     </div>
   </section>
   {% elif adaptation_notice %}<p class="text-sm">{{ adaptation_notice }} <a class="underline" href="/workouts/{{ today.workout_id }}">Einheit prüfen</a></p>{% endif %}
-  <section class="rounded-xl border border-border bg-surface p-4" aria-labelledby="week-title">
+  <section class="rounded-3xl border border-border bg-surface p-5 sm:p-6" aria-labelledby="week-title">
     <div class="flex flex-wrap items-center justify-between gap-2"><h2 id="week-title" class="font-display text-xl font-semibold">Diese Woche</h2><span class="text-sm text-muted-foreground">{{ week_start.strftime('%d.%m.') }}–{{ week_end.strftime('%d.%m.') }}</span></div>
     <p class="mt-2 text-sm">{{ completed_seconds|precise_duration }} erledigt · {{ remaining_seconds|precise_duration }} noch eingeplant</p>
-    <p class="mt-1 text-xs text-muted-foreground">Fehlende Zuordnung oder noch laufende Garmin-Detailverarbeitung belegen keine ausgelassene Einheit.</p>
-    <ol class="mt-4 grid gap-3">
+    <ol class="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
     {% for day in week_days %}
-      <li class="grid gap-2 rounded-lg border border-border p-3 sm:grid-cols-[8rem_minmax(0,1fr)]">
+      <li class="flex min-w-0 flex-col gap-3 rounded-2xl border p-4 {{ 'border-primary/30 bg-primary-subtle' if day.date == today.as_of else 'border-border bg-background' }}">
         <h3 class="text-sm font-semibold">{{ ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'][loop.index0] }} · {{ day.date.strftime('%d.%m.') }}{% if day.date == today.as_of %} · Heute{% endif %}</h3>
         <div class="grid gap-2 text-sm">
-          {% for activity in day.activities %}<p><strong class="text-success-emphasis">Erledigt</strong> · <a class="underline" href="/activities/{{ activity.id }}">{{ activity.name }}</a>{% if activity.duration_s %} · {{ activity.duration_s|precise_duration }}{% endif %}</p>{% endfor %}
-          {% for workout in day.workouts %}<p><strong>{{ 'Erledigt · zugeordnet' if workout.id in linked_workouts else 'Eingeplant' }}</strong> · <a class="underline" href="/workouts/{{ workout.id }}">{{ workout.name }}</a> · angenommene Revision {{ workout.revision_number }}{% if workout.has_unaccepted_changes %}<span class="block text-warning-emphasis">Änderungsvorschlag offen; ausgeführt wird die angenommene Revision.</span>{% endif %}{% if day.date < today.as_of and workout.id not in linked_workouts %}<span class="block text-muted-foreground">Abschluss nicht sicher zugeordnet.</span>{% endif %}</p>{% endfor %}
-          {% for workout, revision in day.proposals %}<p><strong class="text-warning-emphasis">Vorgeschlagen · nicht eingeplant</strong> · <a class="underline" href="/workouts/{{ workout.id }}">{{ revision.name }}</a> · {{ revision.duration_minutes }} Min. · {{ revision.target_label }}</p>{% endfor %}
-          {% if not day.activities and not day.workouts and not day.proposals %}<p class="text-muted-foreground">{% if day.date == today.as_of %}{{ {'rest': 'Ruhetag empfohlen', 'workout': 'Empfohlen: ' ~ today.name, 'clarification': 'Trainingsziel klären'}.get(today.state, 'Keine Einheit eingeplant') }}{% else %}Keine Einheit eingeplant{% endif %}</p>{% endif %}
+          {% for activity in day.activities %}<div><p class="mb-1 text-xs font-semibold text-success-emphasis">Erledigt</p><a class="font-semibold hover:underline" href="/activities/{{ activity.id }}">{{ activity.name }}</a>{% if activity.duration_s %}<p class="mt-1 text-xs text-muted-foreground">{{ activity.duration_s|precise_duration }}</p>{% endif %}{% if activity.workout_id in linked_workouts %}<a class="mt-2 inline-block text-xs underline" href="/workouts/{{ activity.workout_id }}">Zugehöriges Training</a>{% endif %}</div>{% endfor %}
+          {% for workout in day.workouts %}<div><p class="mb-1 text-xs font-semibold text-primary-emphasis">Eingeplant</p><a class="font-semibold hover:underline" href="/workouts/{{ workout.id }}">{{ workout.name }}</a>{% if workout.has_unaccepted_changes %}<span class="mt-2 block text-xs text-warning-emphasis">Änderungsvorschlag offen.</span>{% endif %}{% if day.date < today.as_of %}<span class="mt-1 block text-xs text-muted-foreground">Abschluss nicht sicher zugeordnet.</span>{% endif %}</div>{% endfor %}
+          {% if not day.activities and not day.workouts %}<p class="text-sm text-muted-foreground">{% if day.date == today.as_of %}<a class="underline" href="#today-title">{{ {'rest': 'Ruhetag empfohlen', 'workout': 'Deine Empfehlung ansehen', 'clarification': 'Trainingsziel klären'}.get(today.state, 'Heute im Überblick') }}</a>{% elif day.proposals %}Noch nicht eingeplant{% else %}Frei{% endif %}</p>{% endif %}
+          {% if day.proposals %}<details class="mt-2 border-t border-border pt-2"><summary class="cursor-pointer text-xs font-semibold text-muted-foreground">Alternativen · {{ day.proposals|length }}</summary><div class="mt-3 grid gap-3">{% for workout, revision in day.proposals %}<div><a class="text-sm font-semibold hover:underline" href="/workouts/{{ workout.id }}">{{ revision.name }}</a><p class="mt-1 text-xs text-muted-foreground">Vorgeschlagen · nicht eingeplant<br>ca. {{ revision.duration_minutes }} Min. · {{ revision.target_label }}</p></div>{% endfor %}</div></details>{% endif %}
         </div>
       </li>
     {% endfor %}

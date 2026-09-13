@@ -743,6 +743,7 @@ def create_running_workout_proposal(
     suggested_for: date,
     available_minutes: Annotated[int, Field(ge=20, le=1440)],
     template_id: RunningTemplateId,
+    work_distance_meters: Annotated[int, Field(ge=400, le=2000)] | None = None,
 ) -> str:
     """Create one unaccepted running workout through PacePilot's deterministic planner.
 
@@ -750,12 +751,15 @@ def create_running_workout_proposal(
     desired date, available time, and an explicit format. For recommendation intent use
     get_today_recommendation and save_today_recommendation. The result remains unscheduled and
     unaccepted. This tool cannot accept, schedule, upload, push, or synchronize a workout.
+    For explicitly requested distance repeats, pass work_distance_meters (VO2: 400/600/800/1000;
+    threshold: 1000/1200/1600/2000). Pace, repetitions and recovery are calculated from evidence.
     """
     return coach_operations.create_running_workout_proposal(
         runtime.context,
         suggested_for,
         available_minutes,
         template_id,
+        work_distance_meters,
     )
 
 

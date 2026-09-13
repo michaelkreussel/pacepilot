@@ -19,6 +19,7 @@ from app.services.planning.workout_definition import (
     RpeRangeTarget,
     StepBlockV2,
     WorkoutDefinitionModel,
+    estimated_duration_seconds,
     parse_definition,
     workout_metrics,
 )
@@ -122,7 +123,7 @@ class WorkoutRevisionView:
 
     @property
     def duration_minutes(self) -> int:
-        return round(workout_metrics(self.definition_model).duration_seconds / 60)
+        return round(estimated_duration_seconds(self.definition_model) / 60)
 
     @property
     def target_label(self) -> str:

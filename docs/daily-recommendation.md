@@ -130,10 +130,57 @@ Die bestehenden JSON-Felder speichern ausgewählte Parameter, Quellen, Gründe u
 Kontext. Alte Revisionen bleiben lesbar. Empfehlungen sind absichtlich keine
 automatisch angenommenen Pläne und holen keine vermeintlich verpasste Arbeit nach.
 
+## Distanzintervalle und Trainingsansicht (13. September 2026)
+
+Diese Erweiterung ersetzt die oben beschriebenen festen Vorbereitungszeiten bei
+neu ausgewählten Intervallvarianten. Bestehende Revisionen bleiben unverändert.
+
+- `interval_prescription.interval_parameters()` wählt innerhalb des vorhandenen
+  Arbeitsumfangs: VO₂ 400/600/800/1000 m, Schwelle 1000/1200/1600/2000 m oder
+  Zeitintervalle. Die Kalenderwoche bestimmt die Startvariante; ungeeignete Distanzen
+  werden übersprungen. Das ist eine nachvollziehbare Produktrotation, keine KI-Auswahl
+  und kein Nachweis einer individuell optimalen Periodisierung.
+- Distanzschritte benötigen einen belegten Pace-Bereich. Geschätzte Belastungsdauer,
+  Wiederholungszahl, Gesamtarbeit und Zeitbudget müssen zusammenpassen. Eine Distanz
+  ist nicht für jedes Leistungsniveau und jeden Reiz geeignet. Der Coach kann
+  explizite Distanzwünsche über `work_distance_meters` weitergeben; Zielpaces und
+  Wiederholungen berechnet weiterhin der Server.
+- Einlaufen dauert 10 oder 15 Minuten abhängig von Reiz und Arbeitsumfang, Auslaufen
+  5 oder 10 Minuten. Trabpausen werden aus der Belastungsdauer abgeleitet und auf
+  30 Sekunden gerundet (Schwelle etwa ein Viertel, VO₂ etwa drei Viertel; 60–180 s).
+  Diese Werte sind Produktannahmen, keine wissenschaftlich validierte Individualdosierung.
+- Die vorhandene Pace-Schätzung wird für lockere/lange Läufe um breite Richtbereiche
+  von 72–82 % der Schwellen-Entsprechung ergänzt, für Erholung um 65–75 %. Eine
+  vorhandene persönliche Garmin-HF-Zone 2 hat beim Easy Run weiterhin Vorrang.
+  Ein-/Auslaufen kann dieselbe lockere Pace nutzen; Trabpausen bleiben ohne Tempodruck.
+  Quelle und Berechnung bleiben in den Revisionsmetadaten. Ohne geeignete Leistungsdaten
+  werden keine Zielpaces erfunden.
+- Distanzbasierte Zeiten werden am langsamen Ende des Zielbereichs geschätzt. Die
+  exakten Distanz-/Pace-Schritte bleiben in Tagesvorschau, Wochenplan, Revision und
+  Garmin-Payload erhalten. Die Uhr beendet einen solchen Schritt nach Distanz.
+  Anpassungen entfernen ganze Wiederholungen, ohne Vorbereitung, Pausen oder Pace
+  zu verschärfen. Unterhalb der Mindestarbeit bleibt eine Easy-/Ruhe-Alternative.
+- Der Coach zeigt den Ablauf offen mit Dauer/Distanz und Zielbereich. Begründungen
+  sind aufklappbar. Ein zugeordneter abgeschlossener Lauf erscheint in der Woche
+  einmal mit Links zu Aktivität und Training. Offene Entwürfe bleiben unter
+  „Alternativen“ zugänglich; nichts wird gelöscht oder automatisch angenommen.
+
+Entwicklungsreferenzen, recherchiert am 12. September 2026:
+
+- [Runna: Trainingsaufbau](https://support.runna.com/en/articles/15690947-understand-your-runna-workouts)
+  als Referenz für verständliche Abschnitte und Ziele.
+- [Runna: Pace Insights](https://support.runna.com/en/articles/14656203-what-are-pace-insights-and-how-do-they-work)
+  als Produktvergleich. Ein entsprechender automatischer Lernmechanismus wurde hier
+  nicht eingeführt; PacePilot verwendet seine vorhandenen Leistungsanker.
+- [Furman FIRST: Intervallvarianten](https://www.furman.edu/first/wp-content/uploads/sites/168/2023/01/January-April-2023-Tuesday-Track-Workouts.pdf)
+  belegt variable Zeit-/Distanzwiederholungen und Vorbereitungszeiten. Die konkreten
+  PacePilot-Faktoren sind keine aus dieser Quelle abgeleiteten universellen Regeln.
+
 ## Manuelle Prüfung
 
 1. `/coach` ohne LLM-Key öffnen: Heute-Karte mit Empfehlung/Erledigt/Geplant/Ruhe sehen.
-2. „Ablauf und Intensität“ öffnen: genaue Schritte und RPE bzw. belegte Geräteziele sehen.
+2. Der Ablauf ist direkt sichtbar: Einlaufen, Belastung, Trabpause und Auslaufen.
+   „Warum diese Einheit?“ öffnet die Begründung und Datengrundlage.
 3. Zeitbudget verkleinern und aktualisieren: Gesamtdauer bleibt im Budget; zu knappe
    Qualitätsfenster werden locker, unter 20 Minuten wird Ruhe vorgeschlagen.
 4. „Als Vorschlag speichern“: Workout-Detailseite zeigt einen unangenommenen,
@@ -141,3 +188,11 @@ automatisch angenommenen Pläne und holen keine vermeintlich verpasste Arbeit na
 5. Zwischen Vorschau und Speichern relevante Daten ändern: aktuelle Vorschau statt
    stillschweigend abweichendem Entwurf. Bei angenommener Einheit bleibt deren Revision
    sichtbar; „Einheit prüfen und anpassen“ führt zu den bestehenden expliziten Aktionen.
+6. Bei vorhandenem geeigneten Leistungsanker im Coach einen Vorschlag mit 400-m-
+   VO₂-Intervallen oder 1000-m-Schwellenintervallen anfordern. Passendes Zeitbudget
+   angeben, z. B. 60 Minuten. Vorschau und gespeichertes Workout zeigen identische
+   Distanzen und persönliche Zielpaces. Bei ungeeigneten Daten/Umfang erklärt der
+   Coach, warum der gewünschte Entwurf nicht erstellt werden kann.
+7. Nach Annahme über die bestehenden Garmin-Aktionen übertragen: auf der Uhr Distanz
+   und Zielpace der Belastungsschritte prüfen. Das ist die noch notwendige manuelle
+   Geräteprüfung; automatisierte Tests verwenden keine Live-Garmin-Verbindung.
