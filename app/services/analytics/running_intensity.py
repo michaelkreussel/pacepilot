@@ -511,10 +511,16 @@ def workout_pace_guidance(
     See docs/daily-recommendation.md for limits and provenance.
     """
     anchor = guidance.pace_anchor
-    if anchor is None or template_id not in {"threshold_cruise", "vo2_intervals"}:
+    if anchor is None or template_id not in {
+        "threshold_cruise",
+        "vo2_intervals",
+        "easy_run",
+        "long_run",
+        "recovery_run",
+    }:
         return None
     if anchor.kind == "lactate_threshold":
-        if template_id != "threshold_cruise":
+        if template_id == "vo2_intervals":
             return None
         speed = anchor.speed_mps
         calculation = "fresh_garmin_threshold_speed"
@@ -538,6 +544,10 @@ def workout_pace_guidance(
     low_factor, high_factor = (
         (0.93, 0.99) if anchor.source == "garmin_personal_record" else (0.95, 1.0)
     )
+    if template_id in {"easy_run", "long_run", "recovery_run"}:
+        # Broad product guidance relative to threshold-equivalent speed, not measured zones.
+        low_factor, high_factor = (0.65, 0.75) if template_id == "recovery_run" else (0.72, 0.82)
+        calculation += "_endurance_estimate"
     fastest = math.floor(1000 / (speed * high_factor) / 5) * 5
     slowest = math.ceil(1000 / (speed * low_factor) / 5) * 5
     if not all(math.isfinite(v) for v in (fastest, slowest)) or not 125 <= fastest < slowest <= 900:

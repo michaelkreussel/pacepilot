@@ -2200,7 +2200,10 @@ def test_proposal_tool_schema_exposes_no_runtime_or_workout_definition() -> None
         "suggested_for",
         "available_minutes",
         "template_id",
+        "work_distance_meters",
     }
+    distance_schema = schema["properties"]["work_distance_meters"]["anyOf"][0]
+    assert distance_schema["minimum"] == 400 and distance_schema["maximum"] == 2000
     serialized = json.dumps(schema)
     assert "user_id" not in serialized
     assert "idempotency" not in serialized

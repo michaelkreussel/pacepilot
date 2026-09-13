@@ -16,7 +16,12 @@ from app.services.planning.registry_models import ContinuousStructure
 from app.services.planning.safety_triage import build_proposal_safety_context
 from app.services.planning.training_fit import assess_training_fit, recent_training_facts
 from app.services.planning.validator import WorkoutInput
-from app.services.planning.workout_definition import StepBlockV2, TimeEnd, workout_metrics
+from app.services.planning.workout_definition import (
+    StepBlockV2,
+    TimeEnd,
+    estimated_duration_seconds,
+    workout_metrics,
+)
 from app.services.planning.workout_revision import RevisionMetadata
 from app.services.planning.workout_templates import (
     ExpandedWorkoutTemplate,
@@ -1035,7 +1040,7 @@ def _session_from_preview(
         template_version=metadata.template_version or "",
         role=template_id,
         intensity_domain=get_knowledge_registry().workouts[template_id].intensity_domain,
-        planned_minutes=-(-int(workout_metrics(data.definition).duration_seconds) // 60),
+        planned_minutes=-(-int(estimated_duration_seconds(data.definition)) // 60),
         rationale=rationale,
         load_estimate_json=metadata.load_estimate_json or {},
     )

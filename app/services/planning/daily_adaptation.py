@@ -48,7 +48,11 @@ from app.services.planning.workout_definition import (
     TimeEnd,
     WorkoutDefinitionModel,
     WorkoutDefinitionV2,
+    step_duration_seconds,
     workout_metrics,
+)
+from app.services.planning.workout_definition import (
+    estimated_duration_seconds as definition_duration,
 )
 from app.services.planning.workout_revision import RevisionIdentity, RevisionMetadata
 from app.services.planning.workout_service import WorkoutService
@@ -844,7 +848,7 @@ def reduce_volume(
     factor = rule.parameters.get("factor")
     if not isinstance(factor, float) or isinstance(factor, bool) or not 0 < factor < 1:
         raise RuntimeError("ADAPT-VOLUME-REDUCTION-001.factor must be between zero and one")
-    duration_seconds = estimated_duration_seconds or workout_metrics(definition).duration_seconds
+    duration_seconds = estimated_duration_seconds or definition_duration(definition)
     if (
         available_minutes is not None
         and available_minutes > 0
@@ -884,6 +888,20 @@ def reduce_volume(
                         work.end.seconds = minutes * 60
                         if workout_metrics(candidate).duration_seconds <= duration_seconds * factor:
                             return candidate
+                raise DailyAdaptationError(
+                    "Kein gültiger reduzierter Intervallumfang; lockeren Lauf oder Ruhe wählen.",
+                    code="adaptation.minimum_work",
+                )
+            if isinstance(work, StepBlockV2) and isinstance(work.end, DistanceEnd):
+                # Keep rep distance, targets, preparation and recoveries intact; remove reps only.
+                for count in range(repeat.iterations - 1, structure.repetitions.minimum - 1, -1):
+                    repeat.iterations = count
+                    if (
+                        count * step_duration_seconds(work)
+                        >= structure.total_work_minutes.minimum * 60
+                        and definition_duration(candidate) <= duration_seconds * factor
+                    ):
+                        return candidate
                 raise DailyAdaptationError(
                     "Kein gültiger reduzierter Intervallumfang; lockeren Lauf oder Ruhe wählen.",
                     code="adaptation.minimum_work",
@@ -931,8 +949,8 @@ def _same_intensity_load(
 ) -> AdaptationLoad:
     original_metrics = workout_metrics(original_definition)
     candidate_metrics = workout_metrics(definition)
-    if original_metrics.duration_seconds > 0:
-        factor = candidate_metrics.duration_seconds / original_metrics.duration_seconds
+    if definition_duration(original_definition) > 0:
+        factor = definition_duration(definition) / definition_duration(original_definition)
     elif original_metrics.distance_meters > 0:
         factor = candidate_metrics.distance_meters / original_metrics.distance_meters
     else:
@@ -1131,15 +1149,7 @@ def _candidate_load_estimate(
         and candidate.definition is not None
         and candidate.adaptation_class != DailyAdaptationClass.REPLACE_WITH_EASY
     ):
-        work_seconds = sum(
-            block.iterations * step.end.seconds
-            for block in candidate.definition.blocks
-            if isinstance(block, RepeatBlockV2)
-            for step in block.children
-            if isinstance(step, StepBlockV2)
-            and step.step_type == "interval"
-            and isinstance(step.end, TimeEnd)
-        )
+        work_seconds = definition_duration(candidate.definition, work_only=True)
         high = round(work_seconds) if original.template_id == "vo2_intervals" else 0
         moderate = round(work_seconds) if original.template_id == "threshold_cruise" else 0
         low = duration - high - moderate

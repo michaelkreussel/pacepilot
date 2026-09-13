@@ -91,10 +91,10 @@ def test_quality_repetitions_targets_and_compilation_survive_plan_save(session_f
         assert quality.data is not None and quality.metadata is not None
         assert quality.metadata.generation_context_json is not None
         assert quality.metadata.guidance_json is not None
-        assert quality.metadata.generation_context_json["selected_parameters"] == {
-            "repetitions": 3,
-            "work_minutes": 5,
-        }
+        parameters = quality.metadata.generation_context_json["selected_parameters"]
+        assert isinstance(parameters, dict) and parameters["repetitions"] >= 3
+        assert parameters.get("work_minutes") or parameters.get("work_distance_meters")
+        assert parameters["warmup_minutes"] in (10, 15)
         pace_target = quality.metadata.guidance_json["pace_target"]
         assert isinstance(pace_target, dict) and pace_target["source_day"]
         revision = persist_week_candidate(session, user, candidate)
@@ -178,8 +178,10 @@ def test_completed_sunday_quality_prevents_monday_quality(session_factory):
 
 
 def test_cycle_uses_shared_selected_quality_and_exact_scaled_duration(session_factory):
+    from math import ceil
+
     from app.models import AthleteAvailability
-    from app.services.planning.workout_definition import workout_metrics
+    from app.services.planning.workout_definition import estimated_duration_seconds
 
     with session_factory() as session:
         user = runner(session, minutes=55, frequency=4)
@@ -214,8 +216,8 @@ def test_cycle_uses_shared_selected_quality_and_exact_scaled_duration(session_fa
             for item in week.weekly_plan.sessions:
                 assert item.data is not None and item.metadata is not None
                 assert (
-                    workout_metrics(item.data.definition).duration_seconds
-                    == item.planned_minutes * 60
+                    ceil(estimated_duration_seconds(item.data.definition) / 60)
+                    == item.planned_minutes
                 )
                 assert item.metadata.load_estimate_json == item.load_estimate_json
 

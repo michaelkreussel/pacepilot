@@ -13,6 +13,7 @@ from app.models import GarminAccount, User, Workout, WorkoutRevision
 from app.services.analytics.athlete_data import AthleteDataService
 from app.services.analytics.running_intensity import RunningShadowAnalysis, workout_pace_guidance
 from app.services.garmin.heart_rate_zones import is_valid_normalized_heart_rate_zone_profile
+from app.services.planning.interval_prescription import interval_parameters
 from app.services.planning.load_estimate import IntensityDomainTime, LoadEstimate
 from app.services.planning.planning_queries import list_performance_anchors
 from app.services.planning.registry import WorkoutFormatId, get_knowledge_registry
@@ -38,6 +39,7 @@ from app.services.planning.workout_definition import (
     StepBlockV2,
     TimeEnd,
     WorkoutDefinitionV2,
+    estimated_duration_seconds,
 )
 from app.services.planning.workout_revision import (
     RevisionIdentity,
@@ -52,12 +54,13 @@ from app.services.planning.workout_service import (
 from app.services.planning.workout_templates import (
     ExpandedWorkoutTemplate,
     TemplateEligibilityContext,
+    TemplateExpansionError,
     TemplateParameters,
     expand_workout_template,
 )
 
 PROPOSAL_SOURCE = "coach_single"
-PROPOSAL_RULE_SET_VERSION = "running-workout-candidate-v5"
+PROPOSAL_RULE_SET_VERSION = "running-workout-candidate-v6"
 RunningTemplateId = WorkoutFormatId
 QUALITY_TEMPLATE_IDS = frozenset({"strides", "threshold_cruise", "vo2_intervals"})
 
@@ -69,6 +72,7 @@ class RunningProposalRequest(BaseModel):
     suggested_for: date
     available_minutes: int = Field(ge=20, le=1440)
     idempotency_key: str = Field(min_length=8, max_length=200)
+    work_distance_meters: int | None = Field(default=None, ge=400, le=2000)
 
 
 class RunningRevisionRequest(BaseModel):
@@ -511,6 +515,7 @@ class RunningProposalService:
             suggested_for=request.suggested_for,
             available_minutes=request.available_minutes,
             edit_source="generator",
+            work_distance_meters=request.work_distance_meters,
         )
         return workout_service.create_proposal(
             data,
@@ -570,6 +575,7 @@ class RunningProposalService:
         current: WorkoutRevision | None = None,
         exclude_workout_id: int | None = None,
         parameters: TemplateParameters | None = None,
+        work_distance_meters: int | None = None,
     ) -> tuple[WorkoutInput, RevisionMetadata]:
         shadow = _candidate_inputs(
             self.session,
@@ -587,6 +593,34 @@ class RunningProposalService:
             )
         registry = get_knowledge_registry()
         template = registry.workouts[template_id]
+        if current is not None and parameters is None:
+            previous = (current.generation_context_json or {}).get("selected_parameters", {})
+            if isinstance(previous, dict) and previous.get("work_distance_meters"):
+                parameters = TemplateParameters.model_validate(previous)
+                parameters.work_allowance_seconds = int(
+                    estimated_duration_seconds(current.definition_model, work_only=True)
+                )
+                parameters.vary_structure = True
+                work_distance_meters = parameters.work_distance_meters
+        vary_structure = parameters is None or parameters.vary_structure
+        pace = workout_pace_guidance(shadow.intensity, template_id)
+        pace_target = (
+            PaceRangeTarget.model_validate(
+                {
+                    key: pace[key]
+                    for key in ("type", "fastest_seconds_per_km", "slowest_seconds_per_km")
+                }
+            )
+            if pace is not None
+            else None
+        )
+        if work_distance_meters is not None and not isinstance(
+            template.structure, IntervalStructure
+        ):
+            raise TemplateExpansionError(
+                "Distanzwiederholungen sind nur für Intervalle verfügbar.",
+                code="template.parameter_unsupported",
+            )
         template_context = _template_context(
             self.session,
             self.user.id,
@@ -641,15 +675,30 @@ class RunningProposalService:
                 ):
                     parameters = TemplateParameters(repetitions=repetitions)
                     break
+        if isinstance(template.structure, IntervalStructure) and (
+            vary_structure or work_distance_meters is not None
+        ):
+            parameters = interval_parameters(
+                template_id,
+                template.structure,
+                parameters or TemplateParameters(),
+                pace_target,
+                suggested_for,
+                available_minutes,
+                work_distance_meters,
+            )
         expanded = expand_workout_template(
             template_id,
             parameters,
             eligibility=template_context,
+            pace_target=pace_target,
         )
-        pace = workout_pace_guidance(shadow.intensity, template_id)
         if pace is not None:
+            assert pace_target is not None
             definition = expanded.definition.model_copy(deep=True)
             for block in definition.blocks:
+                if isinstance(block, StepBlockV2) and block.step_type == "interval":
+                    block.target = pace_target
                 if isinstance(block, RepeatBlockV2):
                     for step in block.children:
                         if isinstance(step, StepBlockV2) and step.step_type == "interval":
@@ -666,6 +715,39 @@ class RunningProposalService:
             expanded = replace(
                 expanded, definition=definition, guidance={**expanded.guidance, "pace_target": pace}
             )
+        easy_pace = workout_pace_guidance(shadow.intensity, "easy_run")
+        if isinstance(template.structure, IntervalStructure) and easy_pace is not None:
+            definition = expanded.definition.model_copy(deep=True)
+            easy_target = PaceRangeTarget.model_validate(
+                {
+                    key: easy_pace[key]
+                    for key in ("type", "fastest_seconds_per_km", "slowest_seconds_per_km")
+                }
+            )
+            for block in definition.blocks:
+                steps = block.children if isinstance(block, RepeatBlockV2) else [block]
+                for step in steps:
+                    if isinstance(step, StepBlockV2) and step.step_type in {"warmup", "cooldown"}:
+                        step.target = easy_target.model_copy()
+            expanded = replace(
+                expanded,
+                definition=definition,
+                guidance={**expanded.guidance, "preparation_pace": easy_pace},
+            )
+        if isinstance(template.structure, IntervalStructure) and parameters is not None:
+            repeat = expanded.definition.blocks[1]
+            if isinstance(repeat, RepeatBlockV2):
+                work = repeat.children[0]
+                label = (
+                    f"{parameters.work_distance_meters} m"
+                    if parameters.work_distance_meters
+                    else f"{int(work.end.seconds / 60)} Min."
+                    if isinstance(work, StepBlockV2) and isinstance(work.end, TimeEnd)
+                    else "Intervalle"
+                )
+                expanded = replace(
+                    expanded, name=f"{repeat.iterations} × {label} · {template.name}"
+                )
         selected_minutes = ceil(expanded.load_estimate.duration_seconds / 60)
         device_target = None
         if template_id == "easy_run":
@@ -705,7 +787,11 @@ class RunningProposalService:
                 expanded,
                 definition=definition,
                 guidance={
-                    **expanded.guidance,
+                    **{
+                        key: value
+                        for key, value in expanded.guidance.items()
+                        if key != "pace_target"
+                    },
                     "device_target": device_target.provenance,
                 },
             )
