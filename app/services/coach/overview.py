@@ -13,10 +13,7 @@ from app.services.analytics.progress import get_progress
 from app.services.planning.daily_adaptation import DailyAdaptationError, DailyAdaptationService
 from app.services.planning.daily_recommendation import DailyRecommendation
 from app.services.planning.workout_definition import (
-    RepeatBlockV2,
-    StepBlockV2,
-    TimeEnd,
-    workout_metrics,
+    estimated_duration_seconds,
 )
 from app.services.planning.workout_views import GOAL_TYPE_LABELS, revision_view
 
@@ -60,7 +57,11 @@ def overview_context(session: Session, user: User, today: DailyRecommendation) -
             "activities": [
                 a for a in activities if a.started_at.date() == start + timedelta(days=i)
             ],
-            "workouts": [w for w in workouts if w.scheduled_for == start + timedelta(days=i)],
+            "workouts": [
+                w
+                for w in workouts
+                if w.scheduled_for == start + timedelta(days=i) and w.id not in linked
+            ],
             "proposals": [
                 (w, r) for w, r in proposals if r.suggested_for == start + timedelta(days=i)
             ],
@@ -83,14 +84,12 @@ def overview_context(session: Session, user: User, today: DailyRecommendation) -
     work_differences = {}
     if adaptation is not None:
         for candidate in adaptation.assessment.candidates:
-            work_differences[candidate.adaptation_class.value] = sum(
-                block.iterations * step.end.seconds
-                for block in (candidate.definition.blocks if candidate.definition else [])
-                if isinstance(block, RepeatBlockV2)
-                for step in block.children
-                if isinstance(step, StepBlockV2)
-                and step.step_type == "interval"
-                and isinstance(step.end, TimeEnd)
+            work_differences[candidate.adaptation_class.value] = (
+                estimated_duration_seconds(candidate.definition, work_only=True)
+                if candidate.definition
+                and today.template_id in {"threshold_cruise", "vo2_intervals"}
+                and candidate.adaptation_class.value != "REPLACE_WITH_EASY"
+                else 0
             )
     return {
         "week_days": days,
@@ -99,7 +98,7 @@ def overview_context(session: Session, user: User, today: DailyRecommendation) -
         "linked_workouts": linked,
         "completed_seconds": sum(a.duration_s or 0 for a in activities),
         "remaining_seconds": sum(
-            workout_metrics(w.definition).duration_seconds
+            estimated_duration_seconds(w.definition)
             for w in workouts
             if w.id not in linked and w.scheduled_for >= today.as_of
         ),
