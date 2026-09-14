@@ -58,7 +58,7 @@ def login_page(request: Request, error: str | None = None) -> Response:
 
 
 @router.post("/auth/{provider}/login", name="oauth_login")
-async def oauth_login(provider: str, request: Request, next: str | None = None) -> RedirectResponse:
+async def oauth_login(provider: str, request: Request, next: str | None = None) -> HTMLResponse:
     client = oauth.create_client(provider)
     if provider not in PROVIDERS or client is None:
         raise HTTPException(status_code=404, detail="Anmeldeanbieter nicht konfiguriert")
@@ -66,7 +66,14 @@ async def oauth_login(provider: str, request: Request, next: str | None = None) 
     request.session["post_login_redirect"] = _safe_next(next)
     settings = get_settings()
     redirect_uri = _callback_url(request, provider, settings)
-    return await client.authorize_redirect(request, redirect_uri)
+    authorization = await client.authorize_redirect(request, redirect_uri)
+    # Chromium applies form-action 'self' to cross-origin redirects after a POST.
+    # Navigate from a document instead, preserving CSP and Authlib's session state.
+    return templates.TemplateResponse(
+        request,
+        "auth_redirect.html",
+        {"authorization_url": authorization.headers["location"]},
+    )
 
 
 async def _google_profile(token: dict[str, Any]) -> IdentityProfile:

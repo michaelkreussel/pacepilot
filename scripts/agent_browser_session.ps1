@@ -1,51 +1,17 @@
 <#
 .SYNOPSIS
-    Create a reusable agent-browser auth state for local PacePilot development.
-
+    Open dedicated Chrome for manual PacePilot login, then use Agent Browser via CDP.
 .DESCRIPTION
-    Opens real Chrome with a dedicated automation profile and a Chrome DevTools
-    Protocol (CDP) debugging port, waits until a manual Google sign-in has set
-    the PacePilot session cookie, then saves the browser auth state so
-    agent-browser can reuse it with --state.
-
-.PARAMETER Action
-    What to do:
-      browser  Open (or reuse) the automation Chrome window.
-      wait     Wait until sign-in completes (session cookie present).
-      save     Save the current auth state with agent-browser.
-      get      browser + wait + save in one run (default).
-      check    Report whether the automation browser is running and signed in.
-
-.PARAMETER Port
-    CDP debugging port (default 9222).
-
-.PARAMETER AppUrl
-    Local PacePilot origin (default http://127.0.0.1:8000/).
-
-.PARAMETER Profile
-    Dedicated Chrome profile directory. Defaults to %USERPROFILE%\.pacepilot-browser.
-
-.PARAMETER StateFile
-    Where to save agent-browser auth state (default pacepilot-auth.json).
-
-.PARAMETER TimeoutSeconds
-    How long to wait for sign-in (default 600).
-
-.EXAMPLE
-    .\scripts\agent_browser_session.ps1 -Action get
-
-.EXAMPLE
-    .\scripts\agent_browser_session.ps1 -Action wait -TimeoutSeconds 300
+    Uses localhost and a persistent separate Chrome profile. A protected page verifies
+    authentication; cookies are never inspected. The save action is a legacy export.
 #>
-
 [CmdletBinding()]
 param(
     [ValidateSet("browser", "wait", "save", "get", "check")]
     [string]$Action = "get",
-
     [ValidateRange(1, 65535)]
     [int]$Port = 9222,
-    [string]$AppUrl = "http://127.0.0.1:8000/",
+    [string]$AppUrl = "http://localhost:8000/",
     [string]$Profile = "",
     [string]$StateFile = "pacepilot-auth.json",
     [ValidateRange(1, 86400)]
@@ -53,227 +19,213 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$SessionCookieName = "pacepilot_session"
-$PollSeconds = 3
-
-function Write-Step {
-    param([string]$Message)
-    Write-Host "==> $Message"
-}
-
-function Test-Cdp {
-    try {
-        $null = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/json/version" -TimeoutSec 2
-        return $true
-    } catch {
-        return $false
-    }
-}
+$BrowserSession = "pacepilot-helper-$Port"
+$ProbeOpen = $false
 
 function Get-AppUri {
     $uri = $null
-    if (-not [System.Uri]::TryCreate($AppUrl, [System.UriKind]::Absolute, [ref]$uri) -or
-        $uri.Scheme -notin @("http", "https")) {
-        throw "AppUrl must be an absolute HTTP or HTTPS URL; received '$AppUrl'."
+    if (-not [Uri]::TryCreate($AppUrl, [UriKind]::Absolute, [ref]$uri) -or
+        $uri.Scheme -ne "http" -or $uri.Host -ne "localhost" -or $uri.Port -ne 8000 -or
+        $uri.UserInfo -or $uri.Query -or $uri.Fragment -or $uri.AbsolutePath -ne "/") {
+        throw "Verwende fuer PacePilot ausschliesslich http://localhost:8000/."
     }
     return $uri
 }
 
-function Assert-AppAvailable {
-    $uri = Get-AppUri
+function Test-AppAvailable {
     try {
-        $response = Invoke-WebRequest -Uri $uri.AbsoluteUri -UseBasicParsing -TimeoutSec 5
-        Write-Step "PacePilot is reachable at $($uri.AbsoluteUri) (HTTP $($response.StatusCode))."
-    } catch {
-        throw "PacePilot is not reachable at $($uri.AbsoluteUri). Start it with 'uv run uvicorn app.main:app --reload' and retry. $($_.Exception.Message)"
-    }
+        $health = Invoke-RestMethod -Uri "$($AppUrl.TrimEnd('/'))/api/health" -TimeoutSec 5
+        return $health.status -eq "ok"
+    } catch { return $false }
 }
 
-function Find-Chrome {
-    if ($env:CHROME_PATH -and (Test-Path -LiteralPath $env:CHROME_PATH)) {
-        return $env:CHROME_PATH
+function Assert-AppAvailable {
+    if (-not (Test-AppAvailable)) {
+        throw "PacePilot ist nicht erreichbar. Starte: uv run uvicorn app.main:app --host localhost --port 8000 --reload"
     }
-    $candidates = @(
-        "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
-        "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe"
-    )
-    return $candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 }
 
 function Resolve-Profile {
-    if ($Profile) {
-        return $Profile
+    $selected = if ($Profile) { $Profile } else { Join-Path $env:USERPROFILE ".pacepilot-browser" }
+    $resolved = [IO.Path]::GetFullPath($selected).TrimEnd('\')
+    $personal = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA "Google\Chrome\User Data"))
+    if ($resolved -eq $personal -or $resolved.StartsWith("$personal\", [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Das persoenliche Chrome-Profil darf nicht verwendet werden. Nutze ein separates PacePilot-Profil."
     }
-    $homeDir = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
-    return Join-Path $homeDir ".pacepilot-browser"
+    return $resolved
 }
 
-function Get-AgentBrowser {
-    $exe = Get-Command agent-browser -ErrorAction SilentlyContinue
-    if (-not $exe) {
-        throw "agent-browser is not installed. Install it with: npm i -g agent-browser && agent-browser install"
-    }
-    return $exe.Source
+function Get-ProfileChrome {
+    $resolved = Resolve-Profile
+    @(Get-CimInstance Win32_Process -Filter "name = 'chrome.exe'" | Where-Object {
+        $command = $_.CommandLine
+        if (-not $command -or $command -match '--type=') { return $false }
+        $match = [regex]::Match($command, '--user-data-dir(?:=|\s+)(?:"([^"]+)"|(\S+))')
+        if (-not $match.Success) { return $false }
+        $directory = if ($match.Groups[1].Success) { $match.Groups[1].Value } else { $match.Groups[2].Value }
+        [IO.Path]::GetFullPath($directory).TrimEnd('\') -eq $resolved
+    })
 }
 
-function Invoke-AgentBrowser {
-    param([string[]]$Arguments)
-    $exe = Get-AgentBrowser
-    $output = & $exe @Arguments 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        $details = ($output | Out-String).Trim()
-        if (-not $details) {
-            $details = "No diagnostic output was returned."
-        }
-        throw "agent-browser $($Arguments -join ' ') failed (exit $LASTEXITCODE): $details"
+function Test-Cdp {
+    try {
+        $null = Invoke-RestMethod -Uri "http://localhost:$Port/json/version" -TimeoutSec 5
+        return $true
+    } catch { return $false }
+}
+
+function Assert-Cdp {
+    if (-not (Test-Cdp)) { throw "Chrome/CDP ist nicht erreichbar. Fuehre just agent-browser aus." }
+    $matching = @(Get-ProfileChrome | Where-Object {
+        $_.CommandLine -match "--remote-debugging-port(?:=|\s+)$Port(?:\s|$)"
+    })
+    if (-not $matching) {
+        throw "CDP gehoert nicht zum dedizierten PacePilot-Profil. Verwende dessen Chrome-Fenster auf Port $Port."
     }
-    return ($output | Out-String)
 }
 
 function Open-Browser {
     if (Test-Cdp) {
-        Write-Step "Chrome is already running with CDP on port $Port; reusing it."
+        Assert-Cdp
+        Write-Host "Chrome/CDP ist bereit; das dedizierte Profil wird weiterverwendet."
         return
     }
-    $chrome = Find-Chrome
-    if (-not $chrome) {
-        throw "Chrome not found. Install Chrome or point CHROME_PATH at chrome.exe."
+    if (@(Get-ProfileChrome).Count) {
+        throw "Das PacePilot-Browserprofil ist bereits ohne erreichbares Remote Debugging geoeffnet. Schliesse dieses dedizierte Chrome-Fenster und starte den Befehl erneut."
     }
-    $profileDir = Resolve-Profile
-    if (-not (Test-Path -LiteralPath $profileDir)) {
-        New-Item -ItemType Directory -Path $profileDir -Force | Out-Null
-    }
-    $arguments = @(
-        "--user-data-dir=$profileDir",
-        "--remote-debugging-port=$Port",
-        $AppUrl
+    $chrome = @(
+        "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
+        "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe"
+    ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    if (-not $chrome) { throw "Installiertes Google Chrome wurde nicht gefunden." }
+    $directory = Resolve-Profile
+    $null = New-Item -ItemType Directory -Path $directory -Force
+    # Numeric loopback is CDP transport only, never the PacePilot origin.
+    $launchArguments = @(
+        "--user-data-dir=`"$directory`"", "--remote-debugging-port=$Port",
+        "--remote-debugging-address=127.0.0.1", "--no-first-run", $AppUrl
     )
-    Start-Process -FilePath $chrome -ArgumentList $arguments | Out-Null
-    Write-Step "Launched Chrome ($chrome) with profile $profileDir and CDP port $Port."
-    Write-Step "Sign in with Google in the new window."
+    Start-Process -FilePath $chrome -ArgumentList $launchArguments -WindowStyle Normal | Out-Null
+    $deadline = (Get-Date).AddSeconds(15)
+    while (-not (Test-Cdp) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
+    Assert-Cdp
+    Write-Host "Dediziertes Chrome-Profil gestartet. Melde dich auf localhost:8000 manuell bei PacePilot an."
+}
 
-    $deadline = (Get-Date).AddSeconds(20)
-    while (-not (Test-Cdp) -and (Get-Date) -lt $deadline) {
-        Start-Sleep -Milliseconds 500
+function Invoke-AgentBrowser {
+    param([string[]]$Arguments)
+    $exe = Get-Command agent-browser -ErrorAction SilentlyContinue
+    if (-not $exe) { throw "agent-browser fehlt. Installiere es mit npm install -g agent-browser." }
+    # On Windows a new daemon inherits stdout. Reading until EOF can therefore hang.
+    # Read the CLI's single JSON response instead; never echo raw browser errors.
+    $cliArguments = @("--session", $BrowserSession, "--cdp", "$Port", "--pin-tab", "--json") + $Arguments
+    $quotedArguments = ($cliArguments | ForEach-Object { "'" + $_.Replace("'", "''") + "'" }) -join " "
+    $command = "& '" + $exe.Source.Replace("'", "''") + "' " + $quotedArguments
+    $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+    $start = [Diagnostics.ProcessStartInfo]::new("powershell.exe", "-NoProfile -NonInteractive -EncodedCommand $encodedCommand")
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $process = $null
+    try {
+        $process = [Diagnostics.Process]::Start($start)
+        $line = $process.StandardOutput.ReadLineAsync()
+        if (-not $line.Wait(45000)) { throw "Timeout" }
+        $result = $line.Result | ConvertFrom-Json
+    } catch { throw "Agent Browser antwortet nicht korrekt. Chrome offen lassen und den Befehl erneut starten." }
+    finally {
+        if ($process) {
+            # Only release our reader; never terminate Chrome or its CDP session.
+            $process.StandardOutput.Dispose()
+            $process.StandardError.Dispose()
+            $process.Dispose()
+        }
     }
-    if (-not (Test-Cdp)) {
-        throw "Chrome did not open CDP port $Port. If Chrome is already running with this profile (started without --remote-debugging-port), close it and run again."
-    }
+    if (-not $result.success) { throw "Agent Browser konnte den Prueftab nicht lesen." }
+    return $result
+}
+
+function Open-Probe {
+    $url = "$($AppUrl.TrimEnd('/'))/api/health"
+    $null = Invoke-AgentBrowser -Arguments @("tab", "new", $url)
+    $script:ProbeOpen = $true
+    $null = Invoke-AgentBrowser -Arguments @("wait", "--url", $url)
+}
+
+function Get-LoginState {
+    # A separate same-origin tab leaves manual Google login untouched.
+    # Read only status and final origin/path of an existing protected route.
+    $javascript = @"
+(async () => {
+  try {
+    if (location.origin !== 'http://localhost:8000') return {status: 0, origin: '', path: ''};
+    const response = await fetch('/settings', {credentials: 'same-origin', redirect: 'follow'});
+    const url = new URL(response.url);
+    return {status: response.status, origin: url.origin, path: url.pathname};
+  } catch { return {status: 0, origin: '', path: ''}; }
+})()
+"@
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($javascript))
+    $response = (Invoke-AgentBrowser -Arguments @("eval", "-b", $encoded)).data.result
+    if ($response.origin -ne $AppUrl.TrimEnd('/') -or $response.status -ne 200) { return "unavailable" }
+    if ($response.path -eq "/login") { return "unauthenticated" }
+    if ($response.path -in @("/settings", "/onboarding")) { return "authenticated" }
+    return "unavailable"
 }
 
 function Wait-ForSignIn {
-    $appUri = Get-AppUri
-    Write-Step "Waiting for sign-in on $AppUrl (up to $TimeoutSeconds seconds)."
-    Write-Step "Complete the Google sign-in in the Chrome window; waiting for the '$SessionCookieName' cookie..."
-
-    $cdpDeadline = (Get-Date).AddSeconds(15)
-    while (-not (Test-Cdp) -and (Get-Date) -lt $cdpDeadline) {
-        Start-Sleep -Milliseconds 500
-    }
-    if (-not (Test-Cdp)) {
-        throw "No browser found on CDP port $Port. Run 'just open-browser' first."
-    }
-
-    $elapsed = 0
-    $lastNotice = 0
-    $lastError = $null
-    while ($elapsed -lt $TimeoutSeconds) {
-        try {
-            $output = Invoke-AgentBrowser @("--cdp", "$Port", "cookies", "--json")
-            $result = $output | ConvertFrom-Json
-            if (-not $result.success) {
-                throw "Cookie query failed: $($result.error)"
-            }
-            $cookies = $result.data.cookies
-            $matchingCookie = $cookies | Where-Object {
-                $_.name -eq $SessionCookieName -and
-                ($appUri.Host -eq $_.domain -or $appUri.Host.EndsWith(".$($_.domain.TrimStart('.'))"))
-            }
-            if ($matchingCookie) {
-                Write-Step "Signed in: '$SessionCookieName' cookie found."
-                return
-            }
-        } catch {
-            # The daemon may still be connecting to CDP; retain the error for diagnostics.
-            $lastError = $_.Exception.Message
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    Write-Host "Warte auf die manuelle PacePilot-Anmeldung. Keine Chrome-Synchronisierung erforderlich."
+    Write-Host "Wechsle dazu zum PacePilot-Tab; der separate /api/health-Tab dient nur der Pruefung."
+    do {
+        Assert-Cdp
+        Assert-AppAvailable
+        $state = Get-LoginState
+        if ($state -eq "authenticated") {
+            Write-Host "Erfolgreich angemeldet: geschuetzte PacePilot-Seite ist erreichbar."
+            return
         }
-        $elapsed += $PollSeconds
-        if ($elapsed - $lastNotice -ge 30) {
-            $lastNotice = $elapsed
-            Write-Host "    ... still waiting (${elapsed}s)."
-        }
-        Start-Sleep -Seconds $PollSeconds
-    }
-    $details = if ($lastError) { " Last agent-browser error: $lastError" } else { "" }
-    throw "Timed out after $TimeoutSeconds seconds waiting for sign-in at $($appUri.Host).$details"
+        if ($state -eq "unavailable") { throw "PacePilot-Pruefseite ist nicht erreichbar oder meldet einen Fehler." }
+        Start-Sleep -Seconds 3
+    } while ((Get-Date) -lt $deadline)
+    throw "Noch nicht angemeldet. Google-Login im dedizierten Chrome abschliessen; danach just wait-login."
 }
-
-function Resolve-StateFile {
-    if ([System.IO.Path]::IsPathRooted($StateFile)) {
-        return $StateFile
-    }
-    return Join-Path (Get-Location).Path $StateFile
-}
-
 function Save-State {
-    $target = Resolve-StateFile
-    $parent = Split-Path -Parent $target
-    if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
-        throw "State file directory does not exist: $parent"
-    }
-    Write-Step "Saving auth state to $target ..."
-    Invoke-AgentBrowser @("--cdp", "$Port", "state", "save", $target)
-    if (-not (Test-Path -LiteralPath $target -PathType Leaf) -or (Get-Item -LiteralPath $target).Length -eq 0) {
-        throw "agent-browser did not create a non-empty state file at $target."
-    }
-    Write-Step "Saved $target."
-}
-
-function Show-Status {
-    if (-not (Test-Cdp)) {
-        Write-Host "Automation Chrome: not running on CDP port $Port (run 'just open-browser')."
-        return
-    }
-    Write-Host "Automation Chrome: running on CDP port $Port."
-    try {
-        $output = Invoke-AgentBrowser @("--cdp", "$Port", "cookies")
-        if ($output -match [regex]::Escape($SessionCookieName)) {
-            Write-Host "Sign-in state:     signed in ('$SessionCookieName' cookie present)."
-        } else {
-            Write-Host "Sign-in state:     not signed in (run 'just wait-login' after signing in)."
-        }
-    } catch {
-        Write-Host "Sign-in state:     unknown ($($_.Exception.Message))."
-    }
-}
-
-function Get-Session {
-    Assert-AppAvailable
-    Open-Browser
-    Wait-ForSignIn
-    Save-State
-    $target = Resolve-StateFile
-    Write-Host ""
-    Write-Host "Auth state saved to $target. Reuse it with:"
-    Write-Host "  agent-browser --state $target open $AppUrl"
-    Write-Host ""
-    Write-Host "Or attach to the still-running Chrome window with:"
-    Write-Host "  agent-browser --cdp $Port open $AppUrl"
+    if ((Get-LoginState) -ne "authenticated") { throw "Kein Export: Benutzer ist nicht angemeldet." }
+    $target = [IO.Path]::GetFullPath($StateFile)
+    $null = Invoke-AgentBrowser -Arguments @("state", "save", $target)
+    Write-Host "Legacy-Export gespeichert. Die Datei enthaelt lokale Auth-Daten und darf nicht committed werden."
 }
 
 try {
+    $null = Get-AppUri
+    Assert-AppAvailable
+    if ($Action -in @("browser", "get")) { Open-Browser } else { Assert-Cdp }
     if ($Action -ne "browser") {
-        $null = Get-AgentBrowser
+        Open-Probe
+        switch ($Action) {
+            "get" { Wait-ForSignIn }
+            "wait" { Wait-ForSignIn }
+            "save" { Save-State }
+            "check" {
+                switch (Get-LoginState) {
+                    "authenticated" { Write-Host "Benutzer erfolgreich angemeldet; Chrome/CDP und PacePilot erreichbar." }
+                    "unauthenticated" { throw "Benutzer nicht eingeloggt. Google-Login im PacePilot-Chrome abschliessen." }
+                    default { throw "PacePilot-Pruefseite nicht erreichbar oder fehlerhaft." }
+                }
+            }
+        }
     }
-    switch ($Action) {
-        "browser" { Open-Browser }
-        "wait" { Wait-ForSignIn }
-        "save" { Save-State }
-        "get" { Get-Session }
-        "check" { Show-Status }
+    if ($Action -in @("get", "wait")) {
+        Write-Host "Session bleibt im Chrome-Profil. Kein Auth-State-Export erforderlich."
+        Write-Host "agent-browser --session pacepilot --cdp $Port --pin-tab tab new http://localhost:8000/"
     }
 } catch {
-    Write-Host ""
-    Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "FEHLER: $($_.Exception.Message)" -ForegroundColor Red
     exit 1
+} finally {
+    if ($ProbeOpen) {
+        try { $null = Invoke-AgentBrowser -Arguments @("tab", "close") } catch { }
+    }
 }

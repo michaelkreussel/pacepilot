@@ -106,7 +106,7 @@ process. The user interface is currently available in German.
 
    ```bash
    uv sync --frozen
-   uv run uvicorn app.main:app --reload
+   uv run uvicorn app.main:app --host localhost --port 8000 --reload
    ```
 
 6. Open <http://localhost:8000>.
@@ -318,23 +318,49 @@ uv run pytest tests/test_migrations.py
 
 ### Agent Browser Session
 
-Google may reject automated Chromium login attempts. To create a persistent authenticated
-agent-browser session for local development, drive real Chrome through a dedicated automation
-profile and a CDP debugging port:
+Use installed Google Chrome with a dedicated persistent profile and CDP on loopback port 9222.
+The recommended Windows workflow is:
 
-```bash
-just get-session
-```
+1. Start PacePilot in one terminal:
 
-`get-session` opens Chrome with a dedicated profile, waits until you have signed in with Google,
-and saves the signed-in state to `pacepilot-auth.json`. Reuse it with:
+   ```powershell
+   uv run uvicorn app.main:app --host localhost --port 8000 --reload
+   ```
 
-```bash
-agent-browser --state pacepilot-auth.json open http://127.0.0.1:8000/
-```
+2. In another terminal, from the repository directory, run:
 
-Other recipes: `just open-browser`, `just wait-login`, `just save-state`, and
-`just check`. The `pacepilot-auth.json` state file is gitignored.
+   ```powershell
+   just agent-browser
+   ```
+
+3. In the dedicated Chrome window, open PacePilot and complete Google sign-in manually.
+   Signing into Chrome Sync is not required. The helper reports success only when a protected
+   PacePilot page is accessible, not merely when a session cookie exists.
+4. Leave that Chrome running. Connect Agent Browser (including Codex/Astra) to the same process:
+
+   ```powershell
+   agent-browser --session pacepilot --cdp 9222 --pin-tab tab new http://localhost:8000/
+   agent-browser --session pacepilot --cdp 9222 --pin-tab snapshot -i
+   ```
+
+Use **`http://localhost:8000` consistently**, including the registered Google callback
+`http://localhost:8000/auth/google/callback` and, if set locally, `PUBLIC_BASE_URL`.
+IP-address and hostname origins have different cookies; do not mix them during sign-in.
+
+Chrome stores the session in `%USERPROFILE%\.pacepilot-browser`, separate from your personal
+Chrome profile. This directory contains local authentication data: never commit or share it.
+Restart it with `just agent-browser`; the session is reused while still valid. No development
+login or authentication bypass exists; OAuth state, signed sessions and CSRF remain enforced.
+
+If this dedicated profile is already open without remote debugging, close **only that Chrome
+window** and retry. The helper never kills Chrome processes. `just check` distinguishes missing
+Chrome/CDP, an unavailable app, a signed-out user and a verified login; `just wait-login` resumes
+waiting after manual sign-in. `just get-session` remains an alias for the CDP workflow.
+
+`pacepilot-auth.json` is **not needed** for this workflow. `just save-state` is an optional legacy
+export only; the file remains gitignored and existing files are not deleted. Google may still
+require manual verification or reject a browser; resolve that in Google rather than weakening
+PacePilot authentication.
 
 ### Tailwind CSS
 

@@ -225,3 +225,5 @@ __marimo__/
 
 # Agent-browser auth state (signed-in session; do not commit)
 /pacepilot-auth.json
+/pacepilot-auth-*.json
+/.pacepilot-browser/

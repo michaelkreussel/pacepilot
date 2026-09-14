@@ -124,6 +124,44 @@ class RecordingClient:
         return RedirectResponse("https://example.com/authorize", status_code=302)
 
 
+def test_oauth_form_login_navigates_without_cross_origin_form_redirect(
+    unauthenticated_client: TestClient, monkeypatch: Any
+) -> None:
+    recording = RecordingClient()
+    monkeypatch.setattr(oauth, "create_client", lambda _provider: recording)
+    page = unauthenticated_client.get("/login")
+    match = re.search(r'name="_csrf_token" value="([^"]+)"', page.text)
+    assert match is not None
+    assert "X-CSRF-Token" not in unauthenticated_client.headers
+
+    response = unauthenticated_client.post(
+        "/auth/google/login", data={"_csrf_token": match.group(1)}, follow_redirects=False
+    )
+
+    # Chromium applies form-action to the redirect after a form POST, too.
+    # Return a document so navigation to the provider is no longer a form action.
+    assert response.status_code == 200
+    assert "location" not in response.headers
+    assert "form-action 'self'" in response.headers["content-security-policy"]
+    assert 'href="https://example.com/authorize"' in response.text
+    assert "window.location.replace(" in response.text
+    assert response.headers["cache-control"] == "private, no-store, max-age=0"
+
+
+def test_oauth_form_login_rejects_invalid_csrf_before_provider(
+    unauthenticated_client: TestClient, monkeypatch: Any
+) -> None:
+    recording = RecordingClient()
+    monkeypatch.setattr(oauth, "create_client", lambda _provider: recording)
+    unauthenticated_client.get("/login")
+    for data in ({}, {"_csrf_token": "invalid"}):
+        response = unauthenticated_client.post(
+            "/auth/google/login", data=data, follow_redirects=False
+        )
+        assert response.status_code == 403
+    assert recording.redirect_uri is None
+
+
 def _csrf_header(client: TestClient) -> dict[str, str]:
     page = client.get("/login")
     match = re.search(r'<meta name="csrf-token" content="([^"]+)"', page.text)
@@ -148,7 +186,7 @@ def test_oauth_login_uses_public_base_url_for_redirect_uri(
         follow_redirects=False,
     )
 
-    assert response.status_code == 302
+    assert response.status_code == 200
     assert recording.redirect_uri == "https://example.com/auth/google/callback"
 
 
